@@ -40,6 +40,11 @@ const MAGIC: u32 = 0x7472_6976;
 const VERSION: u32 = 2;
 /// `DeviceID` for virtio-console.
 const DEVICE_ID_CONSOLE: u32 = 3;
+/// `DeviceID` for virtio-net.
+const DEVICE_ID_NET: u32 = 1;
+/// Bytes stripped from each net TX datagram to reach the telemetry payload:
+/// the virtio-net header (12) + Ethernet (14) + IPv4 (20) + UDP (8) headers.
+const NET_HEADER_STRIP: usize = 12 + 14 + 20 + 8;
 /// `VIRTIO_F_VERSION_1` — bit 32, the only feature we advertise.
 const F_VERSION_1: u64 = 1 << 32;
 /// The descriptor count we advertise as the per-queue ceiling. The kernel
@@ -70,8 +75,13 @@ const MMIO_COUNT: u64 = 8;
 pub(crate) const MMIO_END: u64 = MMIO_BASE + MMIO_STRIDE * MMIO_COUNT;
 
 /// QEMU places the virtio-console at the highest slot (`0x1000_8000`); the
-/// other seven slots are present but empty (`DeviceID == 0`).
+/// other slots are present but empty (`DeviceID == 0`) unless a device is
+/// modelled there.
 const CONSOLE_SLOT: u64 = (0x1000_8000 - MMIO_BASE) / MMIO_STRIDE;
+/// The slot the virtio-net device answers on (`0x1000_7000`), just below the
+/// console. Its DTB node advertises it so `virtio_console`-style discovery finds
+/// it by probing `DeviceID`.
+const NET_SLOT: u64 = (0x1000_7000 - MMIO_BASE) / MMIO_STRIDE;
 
 /// One virtqueue's driver-installed configuration plus the device's progress
 /// cursor through the available ring (`processed`, which also indexes the used
@@ -86,9 +96,23 @@ struct Queue {
     processed: u16,
 }
 
-/// The virtio-mmio device block: one live console plus seven empty slots.
+/// What a live slot's TX bytes mean, which is the only thing that differs
+/// between the two devices we model.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    /// Raw telemetry bytes on the wire (the QEMU virtio-console path).
+    Console,
+    /// UDP datagrams — the payload begins after [`NET_HEADER_STRIP`] header bytes.
+    Net,
+}
+
+/// One live virtio-mmio device: its register/queue state plus the bytes it has
+/// pulled off its TX queue. `Console` and `Net` share all of this and differ
+/// only in `DeviceID` and how [`Device::absorb`] interprets a drained buffer.
 #[derive(Clone)]
-pub(crate) struct Virtio {
+struct Device {
+    kind: DeviceKind,
+    device_id: u32,
     status: u32,
     device_features_sel: u32,
     driver_features_sel: u32,
@@ -98,9 +122,11 @@ pub(crate) struct Virtio {
     output: Vec<u8>,
 }
 
-impl Virtio {
-    pub(crate) fn new() -> Self {
+impl Device {
+    fn new(kind: DeviceKind, device_id: u32) -> Self {
         Self {
+            kind,
+            device_id,
             status: 0,
             device_features_sel: 0,
             driver_features_sel: 0,
@@ -111,38 +137,12 @@ impl Virtio {
         }
     }
 
-    /// Whether `addr` falls in the virtio-mmio register window.
-    pub(crate) fn in_window(addr: u64) -> bool {
-        (MMIO_BASE..MMIO_END).contains(&addr)
-    }
-
-    /// Whether a window write to `addr` is a queue-notify (the bus services the
-    /// TX queue against guest RAM after such a write).
-    pub(crate) fn is_notify(addr: u64) -> bool {
-        decode(addr).1 == REG_QUEUE_NOTIFY
-    }
-
-    /// The bytes the device has pulled off the TX queue so far.
-    pub(crate) fn tx_output(&self) -> &[u8] {
-        &self.output
-    }
-
-    /// Read a 32-bit register at a guest physical `addr` in the window.
-    pub(crate) fn read(&self, addr: u64) -> u32 {
-        let (slot, offset) = decode(addr);
-        // Empty slots are present but advertise no device, so the probe skips
-        // them; only the console slot serves the full register file.
-        if slot != CONSOLE_SLOT {
-            return match offset {
-                REG_MAGIC_VALUE => MAGIC,
-                REG_VERSION => VERSION,
-                _ => 0, // including REG_DEVICE_ID -> 0 (no device here)
-            };
-        }
+    /// Read a 32-bit register by `offset` within this device's slot.
+    fn read(&self, offset: usize) -> u32 {
         match offset {
             REG_MAGIC_VALUE => MAGIC,
             REG_VERSION => VERSION,
-            REG_DEVICE_ID => DEVICE_ID_CONSOLE,
+            REG_DEVICE_ID => self.device_id,
             REG_QUEUE_NUM_MAX => QUEUE_NUM_MAX,
             REG_STATUS => self.status,
             REG_DEVICE_FEATURES if self.device_features_sel == 0 => F_VERSION_1 as u32,
@@ -151,13 +151,8 @@ impl Virtio {
         }
     }
 
-    /// Write a 32-bit register at a guest physical `addr` in the window. Only
-    /// the console slot has writable state; writes to empty slots are dropped.
-    pub(crate) fn write(&mut self, addr: u64, value: u32) {
-        let (slot, offset) = decode(addr);
-        if slot != CONSOLE_SLOT {
-            return;
-        }
+    /// Write a 32-bit register by `offset` within this device's slot.
+    fn write(&mut self, offset: usize, value: u32) {
         match offset {
             REG_STATUS => self.set_status(value),
             REG_DEVICE_FEATURES_SEL => self.device_features_sel = value,
@@ -186,11 +181,11 @@ impl Virtio {
         }
     }
 
-    /// Service the TX queue: drain every newly-available descriptor chain into
-    /// the output and publish a used-ring entry for each, so the driver's
-    /// `used.idx` poll completes. The device has no MMU; the ring addresses the
-    /// driver installed are guest physical addresses read straight from RAM.
-    pub(crate) fn service_tx(&mut self, ram: &mut Memory) {
+    /// Service the TX queue: absorb every newly-available descriptor chain and
+    /// publish a used-ring entry for each, so the driver's `used.idx` poll
+    /// completes. The device has no MMU; the ring addresses the driver installed
+    /// are guest physical addresses read straight from RAM.
+    fn service_tx(&mut self, ram: &mut Memory) {
         let mut q = self.queues[TX_QUEUE]; // Copy: frees `self` for output pushes
         if !q.ready || q.num == 0 {
             return;
@@ -200,7 +195,9 @@ impl Virtio {
         while q.processed != avail_idx {
             let ring_slot = u64::from(q.processed % qsize);
             let head = ram.read_u16(q.avail + AVAIL_RING + ring_slot * 2).unwrap_or(0);
-            let len = self.drain_chain(ram, q.desc, head, qsize);
+            let buf = read_chain(ram, q.desc, head, qsize);
+            let len = buf.len() as u32;
+            self.absorb(&buf);
             // Publish the used-ring entry for this buffer, then advance used.idx.
             let used_slot = u64::from(q.processed % qsize);
             let elem = q.used + USED_RING + used_slot * USED_ELEM_SIZE;
@@ -212,28 +209,18 @@ impl Virtio {
         self.queues[TX_QUEUE] = q;
     }
 
-    /// Walk a descriptor chain from `head`, copying each buffer's bytes into the
-    /// output, and return the total byte count. Bounded by `qsize` so a
-    /// malformed cyclic chain can't spin forever.
-    fn drain_chain(&mut self, ram: &Memory, desc_base: u64, head: u16, qsize: u16) -> u32 {
-        let mut id = head;
-        let mut total = 0u32;
-        for _ in 0..qsize {
-            let d = desc_base + u64::from(id) * DESC_SIZE;
-            let addr = ram.read_u64(d + DESC_ADDR).unwrap_or(0);
-            let len = ram.read_u32(d + DESC_LEN).unwrap_or(0);
-            let flags = ram.read_u16(d + DESC_FLAGS).unwrap_or(0);
-            let next = ram.read_u16(d + DESC_NEXT).unwrap_or(0);
-            for i in 0..u64::from(len) {
-                self.output.push(ram.read_u8(addr + i).unwrap_or(0));
+    /// Interpret one drained TX buffer per the device kind: console bytes are the
+    /// telemetry stream as-is; a net datagram's telemetry payload begins after
+    /// the fixed Ethernet/IP/UDP + virtio-net header prefix.
+    fn absorb(&mut self, buf: &[u8]) {
+        match self.kind {
+            DeviceKind::Console => self.output.extend_from_slice(buf),
+            DeviceKind::Net => {
+                if let Some(payload) = buf.get(NET_HEADER_STRIP..) {
+                    self.output.extend_from_slice(payload);
+                }
             }
-            total = total.wrapping_add(len);
-            if flags & DESC_F_NEXT == 0 {
-                break;
-            }
-            id = next;
         }
-        total
     }
 
     /// Accumulate a 32-bit driver-feature half into the 64-bit set, selected by
@@ -265,6 +252,117 @@ impl Virtio {
     }
 }
 
+/// Walk a descriptor chain from `head`, collecting each buffer's bytes, and
+/// return them. Bounded by `qsize` so a malformed cyclic chain can't spin
+/// forever. The device has no MMU — `desc_base` and the buffer addresses are
+/// guest physical.
+fn read_chain(ram: &Memory, desc_base: u64, head: u16, qsize: u16) -> Vec<u8> {
+    let mut id = head;
+    let mut buf = Vec::new();
+    for _ in 0..qsize {
+        let d = desc_base + u64::from(id) * DESC_SIZE;
+        let addr = ram.read_u64(d + DESC_ADDR).unwrap_or(0);
+        let len = ram.read_u32(d + DESC_LEN).unwrap_or(0);
+        let flags = ram.read_u16(d + DESC_FLAGS).unwrap_or(0);
+        let next = ram.read_u16(d + DESC_NEXT).unwrap_or(0);
+        for i in 0..u64::from(len) {
+            buf.push(ram.read_u8(addr + i).unwrap_or(0));
+        }
+        if flags & DESC_F_NEXT == 0 {
+            break;
+        }
+        id = next;
+    }
+    buf
+}
+
+/// The virtio-mmio device block: a live console (slot 7) and a live net device
+/// (slot 6), with the remaining slots present but empty (`DeviceID == 0`).
+#[derive(Clone)]
+pub(crate) struct Virtio {
+    console: Device,
+    net: Device,
+}
+
+impl Virtio {
+    pub(crate) fn new() -> Self {
+        Self {
+            console: Device::new(DeviceKind::Console, DEVICE_ID_CONSOLE),
+            net: Device::new(DeviceKind::Net, DEVICE_ID_NET),
+        }
+    }
+
+    /// The live device answering on `slot`, if any (empty slots return `None`).
+    fn device_at(&self, slot: u64) -> Option<&Device> {
+        match slot {
+            CONSOLE_SLOT => Some(&self.console),
+            NET_SLOT => Some(&self.net),
+            _ => None,
+        }
+    }
+
+    fn device_at_mut(&mut self, slot: u64) -> Option<&mut Device> {
+        match slot {
+            CONSOLE_SLOT => Some(&mut self.console),
+            NET_SLOT => Some(&mut self.net),
+            _ => None,
+        }
+    }
+
+    /// Whether `addr` falls in the virtio-mmio register window.
+    pub(crate) fn in_window(addr: u64) -> bool {
+        (MMIO_BASE..MMIO_END).contains(&addr)
+    }
+
+    /// Whether a window write to `addr` is a queue-notify (the bus services the
+    /// TX queues against guest RAM after such a write).
+    pub(crate) fn is_notify(addr: u64) -> bool {
+        decode(addr).1 == REG_QUEUE_NOTIFY
+    }
+
+    /// Raw telemetry bytes the console has pulled off its TX queue.
+    pub(crate) fn tx_output(&self) -> &[u8] {
+        &self.console.output
+    }
+
+    /// Telemetry payload bytes the net device has extracted from its TX
+    /// datagrams (headers stripped) — the same COBS stream the console emits.
+    pub(crate) fn net_tx_output(&self) -> &[u8] {
+        &self.net.output
+    }
+
+    /// Read a 32-bit register at a guest physical `addr` in the window. A live
+    /// slot serves its full register file; an empty slot is present (magic +
+    /// version) but advertises no device, so the probe skips it.
+    pub(crate) fn read(&self, addr: u64) -> u32 {
+        let (slot, offset) = decode(addr);
+        match self.device_at(slot) {
+            Some(dev) => dev.read(offset),
+            None => match offset {
+                REG_MAGIC_VALUE => MAGIC,
+                REG_VERSION => VERSION,
+                _ => 0, // including REG_DEVICE_ID -> 0 (no device here)
+            },
+        }
+    }
+
+    /// Write a 32-bit register at a guest physical `addr` in the window. Only a
+    /// live slot has writable state; writes to empty slots are dropped.
+    pub(crate) fn write(&mut self, addr: u64, value: u32) {
+        let (slot, offset) = decode(addr);
+        if let Some(dev) = self.device_at_mut(slot) {
+            dev.write(offset, value);
+        }
+    }
+
+    /// Service both devices' TX queues. A notify names one queue, but servicing
+    /// the other is a no-op (it has no new available entries), so both run.
+    pub(crate) fn service_tx(&mut self, ram: &mut Memory) {
+        self.console.service_tx(ram);
+        self.net.service_tx(ram);
+    }
+}
+
 /// Set the low / high 32-bit half of a 64-bit register slot.
 fn put_low(slot: &mut u64, value: u32) {
     *slot = (*slot & !0xFFFF_FFFF) | u64::from(value);
@@ -286,6 +384,7 @@ mod tests {
     use crate::mem::{Memory, RAM_BASE};
 
     const CONSOLE_BASE: u64 = 0x1000_8000;
+    const NET_BASE: u64 = 0x1000_7000;
     const EMPTY_BASE: u64 = 0x1000_1000;
 
     #[test]
@@ -427,6 +526,58 @@ mod tests {
 
         assert_eq!(dev.tx_output(), b"abc"); // both buffers, in chain order
         assert_eq!(mem.read_u32(used_pa + USED_RING + 4).unwrap(), 3); // total len
+    }
+
+    #[test]
+    fn net_slot_answers_discovery_with_the_net_device_id() {
+        let dev = Virtio::new();
+        assert_eq!(dev.read(NET_BASE + REG_MAGIC_VALUE as u64), MAGIC);
+        assert_eq!(dev.read(NET_BASE + REG_DEVICE_ID as u64), DEVICE_ID_NET);
+    }
+
+    #[test]
+    fn net_tx_strips_the_header_to_the_payload() {
+        let desc_pa = RAM_BASE + 0x1000;
+        let avail_pa = RAM_BASE + 0x2000;
+        let used_pa = RAM_BASE + 0x3000;
+        let buf_pa = RAM_BASE + 0x4000;
+        let payload = b"COBS-frame-bytes";
+        let mut mem = Memory::new(0x10000);
+        // A full datagram in one buffer: NET_HEADER_STRIP header bytes (arbitrary
+        // 0xEE — the model strips by length, not by parsing) then the payload.
+        for i in 0..NET_HEADER_STRIP {
+            mem.write_u8(buf_pa + i as u64, 0xEE).unwrap();
+        }
+        for (i, &b) in payload.iter().enumerate() {
+            mem.write_u8(buf_pa + (NET_HEADER_STRIP + i) as u64, b).unwrap();
+        }
+        let total = (NET_HEADER_STRIP + payload.len()) as u32;
+        mem.write_u64(desc_pa + DESC_ADDR, buf_pa).unwrap();
+        mem.write_u32(desc_pa + DESC_LEN, total).unwrap();
+        mem.write_u16(desc_pa + DESC_FLAGS, 0).unwrap();
+        mem.write_u16(desc_pa + DESC_NEXT, 0).unwrap();
+        mem.write_u16(avail_pa + AVAIL_IDX, 1).unwrap();
+        mem.write_u16(avail_pa + AVAIL_RING, 0).unwrap();
+
+        let mut dev = Virtio::new();
+        // Configure the NET slot's TX queue.
+        let w = |dev: &mut Virtio, off: usize, v: u32| dev.write(NET_BASE + off as u64, v);
+        w(&mut dev, REG_QUEUE_SEL, TX_QUEUE as u32);
+        w(&mut dev, REG_QUEUE_NUM, 8);
+        w(&mut dev, REG_QUEUE_DESC_LOW, desc_pa as u32);
+        w(&mut dev, REG_QUEUE_DESC_HIGH, (desc_pa >> 32) as u32);
+        w(&mut dev, REG_QUEUE_DRIVER_LOW, avail_pa as u32);
+        w(&mut dev, REG_QUEUE_DRIVER_HIGH, (avail_pa >> 32) as u32);
+        w(&mut dev, REG_QUEUE_DEVICE_LOW, used_pa as u32);
+        w(&mut dev, REG_QUEUE_DEVICE_HIGH, (used_pa >> 32) as u32);
+        w(&mut dev, REG_QUEUE_READY, 1);
+        dev.service_tx(&mut mem);
+
+        // Only the payload survives — the 54 header bytes are stripped, and the
+        // full datagram length (not the stripped length) is published as used.
+        assert_eq!(dev.net_tx_output(), payload, "headers stripped, payload kept");
+        assert!(dev.tx_output().is_empty(), "the console device saw nothing");
+        assert_eq!(mem.read_u32(used_pa + USED_RING + 4).unwrap(), total);
     }
 
     #[test]
