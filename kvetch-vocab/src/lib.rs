@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 /// A token's identity in the frozen vocab.
@@ -80,6 +81,46 @@ impl Vocab {
         tokens.get(id as usize).cloned().unwrap_or_default()
     }
 
+    /// Learn a vocab of `target_size` tokens from `corpus` by repeatedly
+    /// merging its most frequent adjacent pair.
+    ///
+    /// Deterministic: ties go to the lexicographically smallest pair, so the
+    /// same corpus always yields the same vocab. That is what lets a vocab be
+    /// identified by a hash and reproduced from a seed rather than shipped as a
+    /// snapshot.
+    ///
+    /// **No pre-tokenization.** Mainstream BPE splits on a word regex first, so
+    /// merges cannot span whitespace. Code wants the opposite: indentation runs
+    /// and `\n` + indent are among the most valuable tokens in a source corpus.
+    /// The cost is that a merge may straddle a token boundary, which the
+    /// keyword-atomicity test is there to bound.
+    ///
+    /// Cost is `O(target_size × corpus_len)` — the counts are rebuilt from
+    /// scratch each round rather than updated incrementally. Fine for an
+    /// offline, run-rarely step; the incremental version is the known fix if a
+    /// real corpus makes it hurt.
+    pub fn train(corpus: &[&str], target_size: usize) -> Self {
+        let byte_level = Self::byte_level();
+        let mut sequences: Vec<Vec<TokenId>> =
+            corpus.iter().map(|text| byte_level.encode(text)).collect();
+        let mut merges: Vec<(TokenId, TokenId)> = Vec::new();
+
+        while BYTE_TOKENS + merges.len() < target_size {
+            let Some(pair) = most_frequent_pair(&sequences) else {
+                break;
+            };
+            let merged_id = (BYTE_TOKENS + merges.len()) as TokenId;
+
+            sequences = sequences
+                .iter()
+                .map(|ids| collapse_pair(ids, pair, merged_id))
+                .collect();
+            merges.push(pair);
+        }
+
+        Self::with_merges(&merges)
+    }
+
     /// How many tokens this vocab defines.
     pub fn len(&self) -> usize {
         self.tokens.len()
@@ -122,6 +163,30 @@ impl Vocab {
             .copied()
             .collect()
     }
+}
+
+/// The most frequent adjacent pair across `sequences`, or `None` when no
+/// sequence has two tokens left to pair.
+///
+/// Ties resolve to the smallest pair: counts are accumulated in a `BTreeMap`
+/// (sorted) and the scan keeps the first strict maximum, so the choice never
+/// depends on iteration order.
+fn most_frequent_pair(sequences: &[Vec<TokenId>]) -> Option<(TokenId, TokenId)> {
+    let mut counts: BTreeMap<(TokenId, TokenId), usize> = BTreeMap::new();
+
+    for ids in sequences {
+        for window in ids.windows(2) {
+            *counts.entry((window[0], window[1])).or_insert(0) += 1;
+        }
+    }
+
+    counts
+        .into_iter()
+        .fold(None, |best, (pair, count)| match best {
+            Some((_, best_count)) if count <= best_count => best,
+            _ => Some((pair, count)),
+        })
+        .map(|(pair, _)| pair)
 }
 
 /// Replace every non-overlapping adjacent occurrence of `pair` with `merged_id`.
@@ -177,6 +242,31 @@ mod tests {
             (TokenId::from(b'l'), TokenId::from(b'e')),
             (256, TokenId::from(b't')),
         ])
+    }
+
+    fn encoded_len(vocab: &Vocab, corpus: &[&str]) -> usize {
+        corpus.iter().map(|text| vocab.encode(text).len()).sum()
+    }
+
+    #[test]
+    fn training_learns_merges_that_compress_the_corpus_losslessly() {
+        let corpus = ["let x = 1", "let y = 2", "let z = 3"];
+        let target = BYTE_TOKENS + 4;
+
+        let vocab = Vocab::train(&corpus, target);
+
+        assert_eq!(vocab.len(), target, "trainer missed the requested size");
+        assert!(
+            encoded_len(&vocab, &corpus) < encoded_len(&Vocab::byte_level(), &corpus),
+            "training did not compress the corpus it was trained on"
+        );
+        for text in corpus {
+            assert_eq!(
+                vocab.decode(&vocab.encode(text)),
+                text.as_bytes(),
+                "trained vocab lost bytes for {text:?}"
+            );
+        }
     }
 
     #[test]
