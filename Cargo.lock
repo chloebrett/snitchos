@@ -256,6 +256,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cram"
+version = "0.0.1"
+dependencies = [
+ "kvetch-model",
+]
+
+[[package]]
 name = "cram-corpus"
 version = "0.0.1"
 dependencies = [

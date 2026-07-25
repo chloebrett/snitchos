@@ -1,0 +1,23 @@
+[package]
+name = "kvetch-model"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# One dependency, and only one. This crate is the forward pass the on-target
+# kvetch runner links and the reference the host-side `cram` trainer must agree
+# with, so a training framework belongs on one side of that line only.
+#
+# `libm` is the exception: softmax and the activation need `exp` on f32, which
+# `core` does not provide, and hand-rolling transcendentals to preserve a
+# zero-dependency rule would trade a well-tested 30 KB crate for our own
+# numerics bugs. The eventual int8 path replaces these with fixed-point LUTs
+# (see docs/llm-design.md) and will not need it.
+[dependencies]
+libm = "0.2"
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false

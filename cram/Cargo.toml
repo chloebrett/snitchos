@@ -1,0 +1,20 @@
+[package]
+name = "cram"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The forward pass and the `Gemm` seam this crate provides fast backends for.
+kvetch-model = { path = "../kvetch-model" }
+
+# TODO(candle baseline): a `candle` feature pulling `candle-core`, off by
+# default, so "our AMX backend is within 1.5x of a real framework" is measured
+# rather than asserted. Not added yet — it needs a network fetch, and declaring
+# the optional dependency forces registry resolution even with the feature off.
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false

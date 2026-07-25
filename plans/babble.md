@@ -6,8 +6,9 @@ capability-mediated IPC endpoint from a userspace process, and its output is
 byte-identical on host and target — the four contracts the ladder inherits
 (oracle API, bias tables, endpoint protocol, eval floor) all exist and are
 gated.
-(9 deferred to when the corpus pipeline starts — its summary format should be
-built against the real validator/metrics harness, not guessed at; 3 deferred: it is
+(9 **superseded** — `cram-corpus` does Tier-0 generation better than the planned
+`babble gen`: a cached corpus with a host-tested `Manifest` deciding when the
+cache is stale, rather than a naive file-writer; 3 deferred: it is
 the char-level view, which stim needs and babble does not — babble appends
 whole space-separated tokens, so maximal munch cannot bite it). The oracle
 (`stitch/src/oracle.rs`) answers `valid_next` across the grammar; 9 tests
