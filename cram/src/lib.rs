@@ -12,6 +12,7 @@ use std::ffi::c_int;
 
 use kvetch_model::{Gemm, GemmSpec};
 
+pub mod optim;
 pub mod train;
 
 /// Rows per block in [`BlockedGemm`]. Sized so a block's slice of the output

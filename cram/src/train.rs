@@ -455,6 +455,8 @@ fn added(left: &[f32], right: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockedGemm;
+    use crate::optim::{AdamW, AdamWConfig};
     use kvetch_model::{
         ModelConfig, NaiveGemm, attention, pseudo_random_weights, rms_norm, rope, silu,
     };
@@ -717,6 +719,68 @@ mod tests {
         let (_, gradient) = loss_and_gradient(&model, &tokens, &targets, &NaiveGemm);
 
         assert_matches_finite_differences(&mut weights, &gradient, loss_of);
+    }
+
+    /// The rig's own smoke test: can it memorize eight fixed sequences?
+    ///
+    /// A model that cannot drive training loss toward zero on a handful of
+    /// examples it sees over and over is broken, and this is the cheapest place
+    /// to find that out. It says nothing about generalization — memorizing is
+    /// exactly what is being asked for — but every real training bug that
+    /// matters shows up here first.
+    #[test]
+    fn the_rig_can_memorize_a_single_batch() {
+        let config = ModelConfig {
+            d_model: 32,
+            layers: 2,
+            heads: 4,
+            ffn: 64,
+        };
+        let vocab = 16;
+
+        let batch: Vec<(Vec<u16>, Vec<u16>)> = (0..8u16)
+            .map(|index| {
+                let tokens: Vec<u16> = (0..6).map(|step| (index * 3 + step) % 15 + 1).collect();
+                let targets: Vec<u16> = tokens[1..].iter().copied().chain([0]).collect();
+                (tokens, targets)
+            })
+            .collect();
+
+        let mut weights = pseudo_random_weights(config.param_count(vocab), 5150);
+        for value in &mut weights {
+            *value *= 4.0;
+        }
+        let mut optimizer = AdamW::new(
+            weights.len(),
+            AdamWConfig {
+                learning_rate: 3e-3,
+                weight_decay: 0.0,
+                ..AdamWConfig::default()
+            },
+        );
+
+        let mut loss = f32::INFINITY;
+        for _ in 0..300 {
+            let model = Model::new(config, vocab, weights.clone()).expect("weight count matches");
+            let mut batch_gradient = vec![0.0; weights.len()];
+            loss = 0.0;
+
+            for (tokens, targets) in &batch {
+                let (sequence_loss, gradient) =
+                    loss_and_gradient(&model, tokens, targets, &BlockedGemm);
+                loss += sequence_loss / batch.len() as f32;
+                for (slot, value) in batch_gradient.iter_mut().zip(&gradient) {
+                    *slot += value / batch.len() as f32;
+                }
+            }
+
+            optimizer.step(&mut weights, &batch_gradient);
+        }
+
+        assert!(
+            loss < 0.05,
+            "training did not memorize the batch: final loss {loss}"
+        );
     }
 
     #[test]
