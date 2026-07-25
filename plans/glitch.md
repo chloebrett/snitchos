@@ -1,6 +1,12 @@
 # `glitch` — the userspace audio server (v1)
 
-**Status:** 📋 **PLAN — not started.** `glitch` makes the PWMDAC a **capability** held
+**Status:** 🚧 **IN PROGRESS — kernel spine done (Increments 1–4).** `Object::AudioSink`
++ `Rights::AUDIO` + `authorize_audio`, the `AudioWrite` syscall + cap-gated handler +
+`pwmdac::play_samples`, and the `glitch-proto` `Play`/`Reply` codec all shipped, TDD'd,
+mutation-verified; kernel builds, `audio-beep` itest still green. **Next: Increment 5**
+(the userspace server) — start with **5a** (extract `synth` crate, `Tone`/`Gain` out of
+`kernel-devices`; `user/` must not depend on `kernel-devices`), then **5b** (`user/runtime`
+`AudioWrite` wrapper), then **5c** (the `serve` loop). `glitch` makes the PWMDAC a **capability** held
 by a userspace server, so every source of sound is a *client* of one disciplined thing
 rather than code racing `WDATA` directly. v1 establishes that spine — the DAC-as-cap
 boundary — with the existing beep re-cast as glitch's first client. It is the foundation
@@ -120,7 +126,15 @@ builds clean; clippy-clean; the existing `audio-beep` itest stays green (additiv
 `pwmdac.rs:146-156` body, relocated) → return. No new host logic beyond Increment 1's
 resolver; covered by Increment 8.
 
-## Increment 4 — `glitch_proto` (the `Play` wire type)
+## Increment 4 — `glitch_proto` (the `Play` wire type) — ✅ DONE
+
+Shipped the `glitch-proto` crate (top-level, mirrors `fs-proto`): `Play { freq_hz,
+duration_ms }` + `Reply { Played, Refused }` with tagged `[u64; MSG_WORDS]`
+encode/decode, `WireError` for malformed tags/statuses. 6 tests (round-trips, locked
+layouts, reject-unknown), mutation 5 caught / 2 unviable / 0 missed, clippy-clean.
+**Decision resolving the plan's gain/peak tension:** v1 `Play` carries *only* freq +
+duration — **volume is the server's policy** (consistent with the "no volume protocol"
+non-goal); glitch picks a fixed low amplitude. Per-request gain is a v2 protocol add.
 
 **RED** (new `user/glitch-proto` crate, host-tested): `Play { freq_hz: u32,
 duration_ms: u32, gain_q16: u32, peak: i16 }` `encode`/`decode` round-trips through a
@@ -130,18 +144,41 @@ duration_ms: u32, gain_q16: u32, peak: i16 }` `encode`/`decode` round-trips thro
 
 ## Increment 5 — the `glitch` server
 
-**RED** (host-test the pure core): factor request-handling into a pure
-`plan_play(Play) -> impl Iterator<Item = i16>` (freq/dur/gain → samples via
-`Tone::square`) and test it (count = `fs*dur`, amplitude respects gain, rejects bad
-freq). *Open sub-decision:* reuse `kernel_devices::pwmdac::{Tone, Gain}` if a `user/`
-crate may depend on `kernel-devices` (it's `no_std`, dep-free); else lift the ~10-line
-square generator into a shared `no_std` crate. Confirm at this step.
+**Sub-decision — RESOLVED (user, 2026-07-25):** a `user/` crate must **not** depend on
+`kernel-devices` (it's a kernel-side crate). And the kernel no longer needs `Tone`/`Gain`
+at all — once glitch generates samples in userspace and the kernel just *writes* what it's
+handed (`play_samples`), the kernel has no reason to synthesize tones. So:
+
+### 5a — extract a shared synth crate *(do first)*
+
+Move the pure synthesis — `Tone` (+ `square`) and `Gain` — **out of** `kernel-devices`
+into a **new dependency-free `no_std` crate** (working name `synth`; final name TBD). It
+has no kernel *and* no user-runtime deps, so both sides may use it — the clean boundary
+that keeps `user/` off `kernel-devices`. Tests move with it (they're already pure). What
+**stays** in `kernel-devices/src/pwmdac.rs` is the MMIO-layout logic the kernel needs:
+`Ctrl`/`plan_rate`/`sample_interval_ticks` (pacing is the kernel's, in `play_samples`) +
+`syscrg`/`iomux`. Update the kernel's `audio_beep_entry` import to `synth` (it keeps
+working until retired). Net: `kernel-devices` sheds DSP it never should have owned.
+
+### 5b — `user/runtime` `AudioWrite` wrapper
+
+Add the syscall binding to `user/runtime` (mirror the other syscall wrappers): pass the
+`AudioSink` handle + a `&[i16]` (ptr + count) to `a0`/`a1`/`a2` of syscall `32`. Returns
+`Ok`/`Denied`. Host-side the wrapper is thin glue; exercised by Increment 8.
+
+### 5c — the server
+
+**RED** (host-test the pure core): `plan_play(Play) -> impl Iterator<Item = i16>`
+(freq/duration → `synth::Tone::square` at a **fixed server-owned gain/peak** — volume is
+glitch's policy, per the `Play` decision) tested for count = `fs·dur`, amplitude, and
+rejecting a bad freq.
 
 **GREEN** (`user/glitch/src/lib.rs`, `serve() -> !` mirroring `fs::serve`
 `user/fs/src/lib.rs:43`): resolve endpoint `delegated_handle(0)`, AudioSink
-`delegated_handle(1)`; register `snitchos.glitch.plays_total`; loop
-`receive_with_reply` → decode `Play` → open a `glitch.play` span → `AudioWrite(audiosink,
-plan_play(req))` → bump the metric → `reply`. Refusal path snitches.
+`delegated_handle(1)`; register `snitchos.glitch.plays_total`; loop `receive_with_reply` →
+decode `Play` → open a `glitch.play` span → chunk `plan_play(req)` into
+`runtime::audio_write(audiosink, chunk)` calls (≤ `MAX_SAMPLES = 256`/call) → bump the
+metric → `reply(Reply::Played)`. Refusal path snitches (`Reply::Refused`).
 
 ## Increment 6 — the `beep` client
 
