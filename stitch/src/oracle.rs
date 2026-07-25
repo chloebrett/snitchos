@@ -333,6 +333,26 @@ const fn representative(class: TokenClass) -> Option<&'static str> {
     })
 }
 
+/// How to name a class in a diagnostic. Fixed-lexeme tokens name themselves in
+/// backticks; the payload-carrying classes get a description, since their
+/// representative lexeme (`x`, `0`) would read as a literal demand.
+#[must_use]
+pub fn describe(class: TokenClass) -> String {
+    match class {
+        TokenClass::Int => "an integer".to_string(),
+        TokenClass::Float => "a float".to_string(),
+        TokenClass::Bool => "a boolean".to_string(),
+        TokenClass::Str => "a string".to_string(),
+        TokenClass::Ident => "a name".to_string(),
+        TokenClass::Placeholder => "a placeholder".to_string(),
+        TokenClass::Eof => "end of input".to_string(),
+        fixed => match representative(fixed) {
+            Some(lexeme) => format!("`{lexeme}`"),
+            None => String::new(),
+        },
+    }
+}
+
 /// Could a token of `class` legally follow `prefix`?
 ///
 /// Asked of the parser itself rather than of a second copy of the grammar:

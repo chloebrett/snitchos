@@ -27,12 +27,34 @@ impl ParseError {
         Self { message: message.into(), span }
     }
 
+    /// The token classes that would have been legal where this error occurred.
+    ///
+    /// Not a second, hand-maintained expected-list: it is
+    /// [`crate::oracle::valid_next`] asked at the failure position, so the
+    /// diagnostic and the completion mask can never disagree. Empty when the
+    /// prefix is dead, or when the failure is in expression-entry parsing
+    /// (the oracle answers for whole programs).
+    ///
+    /// Safe from recursion because the oracle parses — it is consulted on a
+    /// returned error, never from inside a parse.
+    #[must_use]
+    pub fn expected(&self, src: &str) -> crate::oracle::TokenSet {
+        crate::oracle::valid_next(src, self.span.start)
+    }
+
     /// Render as `line:col: message`, followed by the offending source line and
-    /// a caret under the span's start. Line and (character-counted) column are
+    /// a caret under the span's start, and — when the oracle can name them —
+    /// the legal continuations. Line and (character-counted) column are
     /// 1-based.
     #[must_use]
     pub fn render(&self, src: &str) -> String {
-        crate::source::caret_render(src, self.span, &self.message)
+        let caret = crate::source::caret_render(src, self.span, &self.message);
+        let legal = self.expected(src).to_vec();
+        if legal.is_empty() {
+            return caret;
+        }
+        let names: Vec<String> = legal.into_iter().map(crate::oracle::describe).collect();
+        format!("{caret}\nexpected one of: {}", names.join(", "))
     }
 }
 
@@ -2193,6 +2215,30 @@ mod tests {
         // unexpected token, not at byte 0.
         let err2 = parse_program("f(x) x").expect_err("should fail on missing =");
         assert_ne!(err2.span, Span::default(), "ParseError span for program error should not be Span::default()");
+    }
+
+    #[test]
+    fn a_parse_error_knows_what_would_have_been_legal() {
+        use crate::oracle::TokenClass;
+        // `greet(a b)` — a second parameter name where `:`, `,` or `)` was due.
+        // The expectation is not hand-maintained here or in the parser: it is
+        // the continuation oracle's answer at the failure position.
+        let src = "greet(a b)";
+        let err = parse_program(src).expect_err("two parameter names in a row");
+        let mut want = vec![TokenClass::Colon, TokenClass::Comma, TokenClass::RParen];
+        want.sort_unstable();
+        assert_eq!(err.expected(src).to_vec(), want);
+    }
+
+    #[test]
+    fn a_parse_error_renders_the_legal_continuations() {
+        let src = "greet(a b)";
+        let err = parse_program(src).expect_err("two parameter names in a row");
+        let rendered = err.render(src);
+        assert!(
+            rendered.ends_with("expected one of: `)`, `,`, `:`"),
+            "rendered error should name the legal continuations, got:\n{rendered}"
+        );
     }
 
     #[test]
