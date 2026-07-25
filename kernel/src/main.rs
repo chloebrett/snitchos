@@ -27,6 +27,8 @@ mod trap;
 mod workloads;
 
 pub(crate) use device::{console, fwcfg, pwmdac, ramfb, uart, virtio_console};
+#[cfg(feature = "vf2")]
+pub(crate) use device::plic;
 pub(crate) use mem::{frame, heap, heap_smoke, mmu};
 pub(crate) use obs::{counter, heartbeat, tracing};
 pub(crate) use sched::{demo_tasks, process};
@@ -243,6 +245,12 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             // `mmu::enable` has run so the higher-half MMIO mapping is live.
             unsafe { console::init(uart_base, uart_reg_shift, uart_io_width) };
         }
+
+        // Route the UART's PLIC interrupt to hart-0 S-mode. Board-only and inert
+        // until the UART's THRE interrupt is enabled (a later increment) — nothing
+        // asserts yet, so this is a no-op at runtime beyond the register writes.
+        #[cfg(feature = "vf2")]
+        plic::init();
 
         dtb::print_info(&dtb, uart_base);
 

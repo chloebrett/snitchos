@@ -282,9 +282,16 @@ Increments:
    ✅ DONE (9 tests, 41/41 mutants caught — a `|`→`^` miss killed by a
    double-enable idempotency test).
 3. **Kernel MMIO glue** (`kernel/`) — the `PlicTransport` impl over volatile
-   registers + the DTB-derived (base, source, context); the untested adapter, like
-   `fwcfg`'s `Mmio`. Only exercised once wired into the trap handler, so it lands
-   with 4.
+   registers, `init()` routing the UART source to hart-0 S-context. **Commit A: ✅
+   DONE** (`kernel/src/device/plic.rs`, `init()` called in kmain).
+   - **Gated `cfg(vf2)` (board-only).** snemu returns `OutOfRange` for writes below
+     RAM base (`mem.rs`), so a PLIC write faults the itest guest — the module stays
+     out of the non-vf2 itest build (snemu gate provably unaffected) and is live on
+     the board. **Un-gate once snemu models a PLIC** (then it's testable in the
+     deterministic gate). Source 10 / context 1 / base `0x0c00_0000` hardcoded for
+     QEMU-`virt`; `// board: derive from DTB` markers left.
+   - Inert at runtime: `init()` only enables the source; nothing asserts until the
+     UART's THRE interrupt is turned on (Commit C).
 4. **External-interrupt trap dispatch + UART IER/ISR** — `SupervisorExternalInterrupt`
    → PLIC claim → UART ISR (drain TX ring to FIFO, fill RX ring) → complete;
    enable `SEIE` + the UART's THRE/RX interrupt enables.

@@ -190,7 +190,7 @@ fork).
 >
 > A ladder, not a cliff, each rung reusing the last:
 > 1. **TX → host** — SnitchOS FSKs frames out, a host demodulator recovers them.
->    Reachable *today* on the Tier-0 work (`sing` + an NCO + FSK); no board input
+>    Reachable *today* on the Tier-0 work (`glitch` + an NCO + FSK); no board input
 >    needed. Deterministic: demodulate a recorded snemu boot, get the frames back.
 > 2. **host → board RX** — needs the JH7110 mic/ADC driver + a fixed-point
 >    demodulator (Goertzel + bit-timing recovery) — a motivating first consumer of
@@ -198,7 +198,7 @@ fork).
 > 3. **board ↔ board** — full duplex, acoustic-coupler style (speaker→mic across
 >    air, à la 1970s handset cups) or a line-out→line-in cable.
 >
-> Everything before this in the audio arc (beep → `sing` server → sonification →
+> Everything before this in the audio arc (beep → `glitch` server → sonification →
 > modem TX) is a rung toward it.
 >
 > **What a Frame-network buys — distributed primitives, reimagined honestly.** The
@@ -209,13 +209,41 @@ fork).
 >   can't teleport (it's a local slot/generation), so the mechanism is a **local
 >   proxy** holding the real caps and mediating invocation-*requests* carried as
 >   frames (CapTP / E-lineage). Extends the explicit-authority shell across the gap.
-> - **Loss-tolerance as a visible property (`~>`).** A byte pipe (`|`) corrupts
->   everything after a dropped byte; a *frame* pipe drops one frame and resyncs — which
->   is exactly the COBS "Resync" transport policy the UART-telemetry work already
->   built (`DecodeError.consumed`, `0x00`-delimited). So `a ~> b` = "best-effort,
->   framed, may drop, resyncs" — the surface syntax for that policy, and a natural
->   Stitch operator (making reliability part of a program's visible shape, the way
->   caps make authority visible). Framed data is what *makes* fuzzy piping viable.
+> - **Cross-machine `~>` — the shipped typed/cap-checked pipe over a new transport.**
+>   `~>` is *already* Stitch's cross-process pipe: `a ~> b` is legal iff `a.out`
+>   marshals into `b.in` (structural — the "hitch") *and* passes the cap-compatibility
+>   check, rejected pre-spawn. The acoustic link is just a new **transport** for it —
+>   extend the boundary to a Frame-over-audio link to another instance and you get
+>   cross-*machine* `~>` (the design already lists cross-*language* `~>` as pending;
+>   cross-machine is its sibling). "ssh" above and `~>` here are the **same
+>   mechanism** — one interactive-session flavour, one typed-pipe flavour — both
+>   proxy-mediated. The transport's lossiness is orthogonal: the COBS Resync policy
+>   (`DecodeError.consumed`, `0x00`-delimited) absorbs a dropped frame, independent of
+>   `~>`'s typed/authority meaning.
+> - **Reliability is a transport policy, chosen per channel (TCP-vs-UDP over sound).**
+>   Extends the Lossless/Resync policy pair with a third: **Reliable (ARQ)** — CRC per
+>   frame + retransmit-on-NAK, ordered. But *telemetry doesn't want retry* (a dropped
+>   heartbeat is stale — retransmitting is worse than useless), so sonification/gossip
+>   channels stay best-effort (Resync); only *data* channels (`~>` bytes, an ssh
+>   session) opt into Reliable. Same acoustic PHY, policy per channel. The maximalist
+>   version is **literal PPP-over-the-modem → TCP/IP** (actual dial-up; builds on the
+>   `kernel-net` crate), vs. the lighter frame-native ARQ.
+> - **Half-duplex turn-taking = `Call`/`Reply` IPC.** Acoustic is naturally
+>   half-duplex (one speaker/mic, shared air), so it needs turn-taking — a "walkie-
+>   talkie" *over* protocol, whose per-turn **line-turnaround** delay is the source of
+>   the lag. But that's not bolted on: it *is* the kernel's shipped `Call`/`Reply`
+>   rendezvous — the message boundary is the "over," the `Reply` hands the line back.
+>   Consequences: interaction is **line-mode** (char-at-a-time would pay a turnaround
+>   per key — and line-mode is historically authentic + fine for a REPL); a lost
+>   turn-token deadlocks/collides, fixed by a **turnaround timeout** — which is the
+>   *same* machinery as ARQ (a lost "over" is a lost ACK). Escape hatch for smooth
+>   char-mode: **full-duplex** via frequency-division (each direction its own tone
+>   band, à la Bell 103) or a stereo/2-wire cable (full-duplex free).
+> - **Throughput reality:** a from-scratch FSK modem is ~300–1200 bps; the Shannon
+>   ceiling of a voiceband channel is ~35 kbps (why V.34 stopped at 33.6k), and
+>   over-the-air acoustic is ~100 bps–1 kbps. At ~1200 bps an ssh session is a
+>   usably-slow vintage terminal and telemetry is a few frames/sec — enough for the
+>   demos, and reliability/ARQ spends some of that budget on ACKs + retransmits.
 
 ## Floating point: deliberately none (a kernel-wide invariant)
 

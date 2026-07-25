@@ -8,6 +8,10 @@
 
 pub mod console;
 pub mod fwcfg;
+// Board-only: the PLIC base faults snemu's bus, so it stays out of the itest
+// build until snemu models a PLIC. See `device/plic.rs`.
+#[cfg(feature = "vf2")]
+pub mod plic;
 pub mod pwmdac;
 pub mod ramfb;
 pub mod uart;
