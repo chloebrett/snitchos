@@ -3,11 +3,10 @@
 //! this module owns only the register pokes; *what* to write and *in what order*
 //! lives in the pure crate.
 //!
-//! **Board-only (`cfg(vf2)`) for now.** The PLIC base sits below RAM, and snemu
-//! models no PLIC — a write there faults its bus (`OutOfRange`) and halts the
-//! guest, so this must stay out of the snemu/QEMU itest build until snemu grows a
-//! PLIC model. QEMU `virt` and the JH7110 both have a real PLIC, so on the board
-//! this is live.
+//! Runs everywhere: QEMU `virt` and the JH7110 have a real PLIC, and snemu now
+//! models one, so this is exercised in the itest gate too. Inert until the UART's
+//! THRE interrupt is enabled (see the trap handler) — [`init`] just routes the
+//! source, and nothing asserts until a device raises its line.
 
 use kernel_devices::plic::{self, PlicTransport};
 
@@ -56,4 +55,22 @@ impl PlicTransport for Mmio {
 /// (a later increment). Call once at boot, after `mmu::enable`.
 pub fn init() {
     plic::enable_source(&mut Mmio, HART0_S_CONTEXT, UART_SOURCE);
+}
+
+/// Claim the highest-priority pending interrupt for hart 0's S-context, or `None`
+/// if the claim came back empty. The external-interrupt handler calls this, then
+/// dispatches on the source id and [`complete`]s it.
+pub fn claim() -> Option<u32> {
+    plic::claim(&Mmio, HART0_S_CONTEXT)
+}
+
+/// Signal completion of `source`, re-arming it for the next interrupt.
+pub fn complete(source: u32) {
+    plic::complete(&mut Mmio, HART0_S_CONTEXT, source);
+}
+
+/// Whether `source` is the UART's — the one interrupt the kernel routes today.
+#[must_use]
+pub fn is_uart(source: u32) -> bool {
+    source == UART_SOURCE
 }

@@ -301,9 +301,16 @@ Increments:
      QEMU-`virt`; `// board: derive from DTB` markers left.
    - Inert at runtime: `init()` only enables the source; nothing asserts until the
      UART's THRE interrupt is turned on (Commit C).
-4. **External-interrupt trap dispatch + UART IER/ISR** — `SupervisorExternalInterrupt`
-   → PLIC claim → UART ISR (drain TX ring to FIFO, fill RX ring) → complete;
-   enable `SEIE` + the UART's THRE/RX interrupt enables.
+4. **External-interrupt trap dispatch + `SEIE`** — **Commit B: ✅ DONE.**
+   - **Un-gated the `cfg(vf2)`** now that snemu models the PLIC: `plic::init` +
+     claim/complete wrappers, the `SupervisorExternalInterrupt` trap arm
+     (`handle_external`: claim → dispatch → complete), and `enable_external_interrupts`
+     (`sie.SEIE`) all run in the itest build.
+   - **Inert:** the only routed source is the UART, whose THRE interrupt isn't
+     enabled yet (Commit C), so `handle_external` doesn't run at runtime. Validated
+     by the gate staying green — which *also* exercises snemu's PLIC model (the
+     kernel's PLIC register writes hit it) and confirms no spurious assertion.
+   - The UART ISR body (drain TX ring) is the `// Next increment` stub.
 5. **Wire the TX ring** into the emit path (push = non-blocking drop-and-count);
    the THRE ISR drains at wire speed.
 6. **QEMU itest** — interrupt-driven TX works end to end (snemu can't cover it).

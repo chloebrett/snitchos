@@ -26,9 +26,7 @@ mod syscall;
 mod trap;
 mod workloads;
 
-pub(crate) use device::{console, fwcfg, pwmdac, ramfb, uart, virtio_console};
-#[cfg(feature = "vf2")]
-pub(crate) use device::plic;
+pub(crate) use device::{console, fwcfg, plic, pwmdac, ramfb, uart, virtio_console};
 pub(crate) use mem::{frame, heap, heap_smoke, mmu};
 pub(crate) use obs::{counter, heartbeat, tracing};
 pub(crate) use sched::{demo_tasks, process};
@@ -246,10 +244,10 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             unsafe { console::init(uart_base, uart_reg_shift, uart_io_width) };
         }
 
-        // Route the UART's PLIC interrupt to hart-0 S-mode. Board-only and inert
-        // until the UART's THRE interrupt is enabled (a later increment) — nothing
-        // asserts yet, so this is a no-op at runtime beyond the register writes.
-        #[cfg(feature = "vf2")]
+        // Route the UART's PLIC interrupt to hart-0 S-mode. Inert until the UART's
+        // THRE interrupt is enabled (a later increment) — nothing asserts yet, so
+        // this is a no-op at runtime beyond the register writes. snemu models the
+        // PLIC, so this runs under the itest gate too, not just the board.
         plic::init();
 
         dtb::print_info(&dtb, uart_base);
@@ -315,6 +313,14 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: trap vector installed; sstatus.SIE already enabled
     // by init_timer above.
     unsafe { trap::enable_software_interrupts() };
+
+    // Enable S-mode external (PLIC) interrupts. Inert until a source asserts — the
+    // only routed source is the UART, whose THRE interrupt is not yet enabled — so
+    // `handle_external` doesn't run at runtime. Wires the delivery path; the drain
+    // lands in a later increment.
+    //
+    // SAFETY: trap vector installed; `plic::init` routed the source; sstatus.SIE on.
+    unsafe { trap::enable_external_interrupts() };
 
     // Smoke: send ourselves a Wakeup IPI. The trap handler reads
     // ipi_pending via Acquire, bumps RECEIVED_TOTAL, and returns.

@@ -180,6 +180,7 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
         // sound and we are its sole accessor for the duration of the handler.
         TrapCause::SupervisorTimerInterrupt => handle_timer(unsafe { &*frame }),
         TrapCause::SupervisorSoftwareInterrupt => crate::ipi::handle_pending(),
+        TrapCause::SupervisorExternalInterrupt => handle_external(),
         TrapCause::EnvCallFromUMode => {
             // SAFETY: `frame` points at the `TrapFrame` `trap_entry` just
             // built on this hart's kernel stack; we are its sole accessor
@@ -314,6 +315,22 @@ fn handle_timer(frame: &TrapFrame) {
     crate::sched::maybe_preempt(frame.sstatus & SSTATUS_SPP == 0);
 }
 
+/// Handle a supervisor external (PLIC) interrupt: claim the top pending source,
+/// dispatch on it, and complete it so the source re-arms.
+///
+/// Today the only routed source is the UART; the drain of its TX ring lands in a
+/// later increment, so a claimed UART interrupt is currently just acknowledged.
+/// Nothing asserts until the UART's THRE interrupt is enabled, so at runtime this
+/// does not yet run — it is the wired-but-inert half of the interrupt path.
+fn handle_external() {
+    while let Some(source) = crate::plic::claim() {
+        if crate::plic::is_uart(source) {
+            // (Next increment: drain the UART TX ring into the FIFO here.)
+        }
+        crate::plic::complete(source);
+    }
+}
+
 /// One-time timer setup: set the interval, arm the first deadline,
 /// enable interrupts. Call once from kmain after the trap vector is
 /// installed.
@@ -364,6 +381,21 @@ pub unsafe fn enable_software_interrupts() {
     unsafe {
         // sie.SSIE = bit 1.
         asm!("csrs sie, {}", in(reg) 1u64 << 1);
+    }
+}
+
+/// Enable S-mode external (PLIC) interrupts. `sie.SEIE` = bit 9. Inert until a
+/// PLIC source actually asserts (the UART's THRE interrupt is enabled in a later
+/// increment), since `handle_external` only runs when the PLIC signals.
+///
+/// # Safety
+///
+/// Trap vector must be installed and the PLIC routed (`plic::init`). Any already-
+/// asserting source fires immediately on return.
+pub unsafe fn enable_external_interrupts() {
+    unsafe {
+        // sie.SEIE = bit 9.
+        asm!("csrs sie, {}", in(reg) 1u64 << 9);
     }
 }
 
