@@ -951,6 +951,42 @@ pub fn audio_beep_emits_samples(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// glitch v1 acceptance (`workload=glitch-beep`): the whole userspace-audio path.
+/// A `beep` client `call`s the `glitch` server over IPC; the server (holding the
+/// endpoint + an `AudioSink` cap) synthesizes a 440 Hz tone and streams it through
+/// the cap-gated `AudioWrite` syscall; the kernel drives `WDATA`. Asserts **both**
+/// the server's own `snitchos.glitch.plays_total` (proves the client → IPC → serve
+/// loop ran) *and* `snitchos.audio.samples_emitted_total` (proves the cap-gated
+/// syscall reached the DAC). The two metrics have no guaranteed wire order —
+/// `plays_total` is a userspace `EmitMetric`, `samples_emitted` a heartbeat-drained
+/// kernel counter — so one forward pass sets a flag for each and completes when both
+/// are seen. Under snemu the synthetic PWMDAC accepts the writes; `--audio-out` is
+/// the by-ear proof.
+pub fn glitch_beep_plays(h: &mut View) -> Result<(), String> {
+    let seen_plays = core::cell::Cell::new(false);
+    let seen_samples = core::cell::Cell::new(false);
+    h.wait_for(SEC * 30, |f, strings| {
+        if let OwnedFrame::Metric { name_id, value, .. } = f
+            && *value >= 1
+        {
+            match strings.get(name_id).map(String::as_str) {
+                Some("snitchos.glitch.plays_total") => seen_plays.set(true),
+                Some("snitchos.audio.samples_emitted_total") => seen_samples.set(true),
+                _ => {}
+            }
+        }
+        seen_plays.get() && seen_samples.get()
+    })
+    .ok_or(
+        "glitch-beep never reached both glitch.plays_total >= 1 and \
+         audio.samples_emitted_total >= 1 within 30s — the beep client's `call` \
+         didn't reach the server, the server never replied Played, or the \
+         cap-gated AudioWrite didn't reach WDATA (AudioSink not at \
+         delegated_handle(1), or the syscall refused)",
+    )?;
+    Ok(())
+}
+
 /// v0.6 step 1: cooperative single-hart producer/consumer histogram.
 /// Producer task generates LCG samples in batches; consumer task
 /// drains them under a `kernel::sync::Mutex` and bins them into a

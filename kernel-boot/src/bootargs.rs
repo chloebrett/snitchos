@@ -144,6 +144,13 @@ workloads! {
         /// FS requests against it; the server demuxes inode + rights by badge. One
         /// hart.
         Fs,
+        /// `glitch` v1: the userspace audio server holding the PWMDAC as a
+        /// capability. A `glitch-server` (`RECV` on the endpoint **plus** an
+        /// `AudioSink` cap) synthesizes tones on request; a `beep` client
+        /// (`SEND`) `call`s it to play 440 Hz. Proves the full client → IPC →
+        /// cap-gated `AudioWrite` → `WDATA` path, re-casting the in-kernel Tier-0
+        /// beep as a client of a disciplined server. See `plans/glitch.md`.
+        GlitchBeep,
         /// Userspace heap-growth probe: runs the `heap-grow` program, which
         /// allocates far past the runtime's per-region map size — forcing the
         /// `talc` allocator to `map_anon` more frames from the kernel on demand.
@@ -176,6 +183,12 @@ workloads! {
         /// `Kill` and is refused (`SyscallRefused{Kill}`) — proving the kill authorization
         /// is real, not ambient. It survives the refusal and reports it.
         KillNoCap,
+        /// The completion endpoint served by a model with **no weights**: a
+        /// `kvetch` server backed by `babble` (rung 0 of the generative ladder)
+        /// plus a client asking for one completion of a fixed prefix. Proves
+        /// the whole serving path — protocol, serve loop, telemetry, seed
+        /// discipline — before any checkpoint exists. `docs/babble-design.md`.
+        KvetchBabble,
         /// Many long-**lived** tasks: spawn a large fixed set of tasks that each
         /// loop-yield forever (never exit), so the scheduler's task table genuinely
         /// holds N *live* entries. Stresses the O(1) `TaskDirectory` lookup — the
@@ -693,6 +706,16 @@ mod tests {
     #[test]
     fn selects_audio_beep() {
         assert_eq!(select("workload=audio-beep"), Some(WorkloadKind::AudioBeep));
+    }
+
+    #[test]
+    fn selects_glitch_beep() {
+        assert_eq!(select("workload=glitch-beep"), Some(WorkloadKind::GlitchBeep));
+    }
+
+    #[test]
+    fn selects_kvetch_babble() {
+        assert_eq!(select("workload=kvetch-babble"), Some(WorkloadKind::KvetchBabble));
     }
 
     #[test]

@@ -579,8 +579,10 @@ pub fn debug_write_raw(ptr: usize, len: usize) -> usize {
 }
 
 /// Largest sample batch one [`audio_write`] carries — matches the kernel's
-/// `MAX_SAMPLES`. The `glitch` server chunks longer audio into repeated calls.
-pub const AUDIO_WRITE_MAX: usize = 256;
+/// `MAX_SAMPLES`, itself bounded by the per-syscall user-copy cap
+/// (`MAX_USER_STR_LEN` = 256 bytes ÷ 2 bytes/sample = 128). A larger batch is
+/// refused as an over-long range; the `glitch` server chunks to this.
+pub const AUDIO_WRITE_MAX: usize = 128;
 
 /// Emit signed-PCM `samples` to the DAC via the `AudioWrite` syscall, gated on the
 /// `AudioSink` capability at handle `sink`. The kernel owns the DAC MMIO + per-sample

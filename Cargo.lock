@@ -588,6 +588,7 @@ version = "0.0.1"
 dependencies = [
  "glitch-core",
  "glitch-proto",
+ "hitch",
  "snitchos-user",
 ]
 
@@ -959,6 +960,16 @@ dependencies = [
  "kernel-mem",
  "protocol",
  "snitchos-abi",
+]
+
+[[package]]
+name = "kvetch"
+version = "0.0.1"
+dependencies = [
+ "babble",
+ "kvetch-proto",
+ "snitchos-std",
+ "snitchos-user",
 ]
 
 [[package]]

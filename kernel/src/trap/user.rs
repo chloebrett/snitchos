@@ -197,9 +197,19 @@ pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE
 /// The `workload=fs` programs (v0.10 RAMfs): an `fs-server` (`RECV | MINT`)
 /// that mints a root File cap on connect and serves the filesystem, and an
 /// `fs-client` (`SEND`) that attaches and issues requests.
+/// The `kvetch-babble` completion server: babble behind an IPC endpoint.
+pub static KVETCH_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KVETCH_SERVER_ELF"));
+
+/// The `kvetch-babble` client: one fixed completion request, answer on the wire.
+pub static KVETCH_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KVETCH_CLIENT_ELF"));
+
 pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"));
 pub static FS_SERVER_SEEDED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_SEEDED_ELF"));
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
+/// `workload=glitch-beep`: the audio server (holds the endpoint + `AudioSink`).
+pub static GLITCH_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_GLITCH_SERVER_ELF"));
+/// `workload=glitch-beep`: the beep client (holds `SEND` on the glitch endpoint).
+pub static BEEP_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BEEP_ELF"));
 pub static VIEWER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_VIEWER_ELF"));
 pub static VIEW_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_VIEW_DEMO_ELF"));
 pub static SHELL_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SHELL_ELF"));
@@ -301,6 +311,11 @@ enum Launch {
     /// `rights_bits`. Its `TelemetrySink` is bare authority like every program's;
     /// any metric it wants it registers at runtime (debt #2).
     Ipc { rights_bits: u32 },
+    /// Like [`Launch::Ipc`], plus an `AudioSink` cap — the glitch server's launch:
+    /// it needs the endpoint (to receive `Play`s) **and** the authority to drive
+    /// the DAC. The `AudioSink` lands at cap-table slot 3 (`delegated_handle(1)`),
+    /// right after the endpoint (slot 2), which is what `glitch::serve` reads.
+    IpcAudio { rights_bits: u32 },
 }
 
 /// A userspace program: its embedded ELF plus how to launch it. One `'static`
@@ -447,6 +462,15 @@ pub static BADGE_HANDOUT_SERVER: ProgramSpec =
 /// `workload=badge-handout`: the client (`SEND`).
 pub static BADGE_HANDOUT_CLIENT: ProgramSpec = ipc_user(BADGE_HANDOUT_CLIENT_ELF, Rights::SEND.bits());
 
+/// `workload=kvetch-babble`: the completion server (`RECV`). The model behind
+/// the endpoint is babble — rung 0, no weights — so the serving path is proved
+/// before any checkpoint exists. See `docs/babble-design.md`.
+pub static KVETCH_SERVER: ProgramSpec = ipc_user(KVETCH_SERVER_ELF, Rights::RECV.bits());
+
+/// `workload=kvetch-babble`: a client that asks for one completion of a fixed
+/// prefix and puts its length + checksum on the wire (`SEND`).
+pub static KVETCH_CLIENT: ProgramSpec = ipc_user(KVETCH_CLIENT_ELF, Rights::SEND.bits());
+
 /// `workload=fs`: the FS server (`RECV | MINT`). A plain bootstrap sink like
 /// every other IPC program — it registers its own `snitchos.fs.denied` gauge at
 /// runtime (debt #2), so the kernel no longer special-cases its telemetry.
@@ -455,6 +479,15 @@ pub static FS_SERVER: ProgramSpec =
 
 /// `workload=fs`: the FS client (`SEND`), default user telemetry.
 pub static FS_CLIENT: ProgramSpec = ipc_user(FS_CLIENT_ELF, Rights::SEND.bits());
+
+/// `workload=glitch-beep`: the glitch audio server. `RECV` on the endpoint (it
+/// only receives `Play`s and replies — no minting, so no `MINT`, least authority)
+/// **plus** an `AudioSink` cap granted by the `IpcAudio` launch path.
+pub static GLITCH_SERVER: ProgramSpec =
+    ProgramSpec { elf: GLITCH_SERVER_ELF, launch: Launch::IpcAudio { rights_bits: Rights::RECV.bits() } };
+
+/// `workload=glitch-beep`: the beep client (`SEND` on the glitch endpoint).
+pub static BEEP: ProgramSpec = ipc_user(BEEP_ELF, Rights::SEND.bits());
 
 /// `workload=stitch-fs`: the FS server seeded from the build-time fs-image
 /// (`RECV | MINT`). Same serve loop as [`FS_SERVER`] but its `RamFs` starts
@@ -503,7 +536,14 @@ pub extern "C" fn program_entry() -> ! {
                 .get()
                 .expect("ipc endpoint created before an IPC program runs");
             let rights = Rights::from_bits(*rights_bits);
-            run_ipc(spec.elf, ep, rights)
+            run_ipc(spec.elf, ep, rights, false)
+        }
+        Launch::IpcAudio { rights_bits } => {
+            let ep = *crate::ipc::DEMO_ENDPOINT
+                .get()
+                .expect("ipc endpoint created before an IPC program runs");
+            let rights = Rights::from_bits(*rights_bits);
+            run_ipc(spec.elf, ep, rights, true)
         }
     }
 }
@@ -711,6 +751,16 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL, priority: Priority::Normal }],
     }),
+    // The completion endpoint, served by a model with no weights: kvetch backed
+    // by babble, plus a client asking for one completion. Server first — it must
+    // be receiving before the client calls.
+    (WorkloadKind::KvetchBabble, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "kvetch_server", program: &KVETCH_SERVER, priority: Priority::Normal },
+            ProgramSpawn { name: "kvetch_client", program: &KVETCH_CLIENT, priority: Priority::Normal },
+        ],
+    }),
     // Stitch REPL with a filesystem: the seeded FS server plus the REPL holding
     // the FS endpoint cap (`SEND`), so `:load <name>` reads a baked-in `.st`
     // file off the ramfs and runs it — telemetry crosses the wire as usual.
@@ -907,6 +957,15 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
             ProgramSpawn { name: "fs_client", program: &FS_CLIENT, priority: Priority::Normal },
         ],
     }),
+    // glitch v1: the audio server (endpoint + AudioSink) first, so it's blocked in
+    // `receive` before the beep client `call`s it to play 440 Hz.
+    (WorkloadKind::GlitchBeep, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "glitch_server", program: &GLITCH_SERVER, priority: Priority::Normal },
+            ProgramSpawn { name: "beep", program: &BEEP, priority: Priority::Normal },
+        ],
+    }),
 ];
 
 /// Build a fresh address space, grant the process its bootstrap
@@ -1050,6 +1109,7 @@ fn run_ipc(
     image: &'static [u8],
     endpoint: kernel_proc::ipc::EndpointId,
     rights: kernel_proc::cap::Rights,
+    grant_audio: bool,
 ) -> ! {
     use kernel_proc::cap::{Capability, Object};
 
@@ -1065,14 +1125,29 @@ fn run_ipc(
         0, // kernel-minted root grant: the ur-source of this endpoint's tree
     );
 
+    // The glitch server also needs the DAC as authority: grant an `AudioSink` cap
+    // right after the endpoint, so it lands at slot 3 (`delegated_handle(1)`) — a
+    // kernel-minted root grant, the ur-source of the DAC's derivation tree.
+    let audio_handle = grant_audio.then(|| {
+        process.caps.lock().insert_with_id(
+            Capability { object: Object::AudioSink, rights: kernel_proc::cap::Rights::AUDIO },
+            crate::process::next_cap_id(),
+            0,
+        )
+    });
+
     // Snitch every grant (counter + rich CapEvent) with its *stored* cap id, as
-    // `run` does — now three: the two bootstrap authorities plus this endpoint.
+    // `run` does — the two bootstrap authorities, this endpoint, and (for the
+    // glitch server) the `AudioSink`.
     let holder = crate::sched::current_task_id().0;
-    let grants = [
+    let mut grants = alloc::vec![
         (bootstrap_handle, protocol::CapObject::TelemetrySink, kernel_proc::cap::Rights::EMIT.bits()),
         (span_handle, protocol::CapObject::SpanSink, kernel_proc::cap::Rights::EMIT.bits()),
         (endpoint_handle, protocol::CapObject::Endpoint, rights.bits()),
     ];
+    if let Some(handle) = audio_handle {
+        grants.push((handle, protocol::CapObject::AudioSink, kernel_proc::cap::Rights::AUDIO.bits()));
+    }
     for (handle, object, rights_bits) in grants {
         if let Some(id) = cap_grants_metric_id() {
             tracing::emit_metric(id, 1);

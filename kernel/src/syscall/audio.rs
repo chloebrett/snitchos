@@ -4,15 +4,23 @@
 //! samples out of user memory, and hands them to the kernel's PWMDAC driver (the
 //! MMIO the `glitch` audio server can't do itself). See `plans/glitch.md`.
 
+use kernel_mem::mmu::MAX_USER_STR_LEN;
 use kernel_proc::cap::{authorize_audio, Handle};
 use protocol::RefusalReason;
 use snitchos_abi::Syscall;
 
 use crate::trap::TrapFrame;
 
-/// Largest sample batch one `AudioWrite` accepts, bounding the copy buffer. The
-/// `glitch` server chunks longer audio into repeated paced calls.
-const MAX_SAMPLES: usize = 256;
+/// Largest sample batch one `AudioWrite` accepts, bounding the copy buffer. Capped
+/// by the kernel's per-syscall user-copy limit (`MAX_USER_STR_LEN` bytes): a sample
+/// is 2 bytes, so at most `MAX_USER_STR_LEN / 2` samples cross in one call — a
+/// larger batch is refused by `copy_from_user` as an over-long range. The `glitch`
+/// server chunks longer audio into repeated paced calls (`AUDIO_WRITE_MAX`).
+const MAX_SAMPLES: usize = MAX_USER_STR_LEN / 2;
+
+// A batch of `MAX_SAMPLES` i16s must fit the per-copy byte cap, or every write
+// would be refused (the bug the glitch-beep itest caught).
+const _: () = assert!(MAX_SAMPLES * 2 <= MAX_USER_STR_LEN);
 
 /// `AudioWrite`: `a0` = `AudioSink` handle, `a1` = ptr to `[i16]` samples in the
 /// caller's memory, `a2` = sample count. Validates the cap, copies the samples in,

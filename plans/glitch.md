@@ -212,28 +212,53 @@ span, then decodes the reply and emits `snitchos.beep.played_total` on
 Added the `hitch` dep (`default-features = false`) for the `#[entry(needs)]` note.
 Compiles clean for riscv; exercised end-to-end by Increment 8.
 
-## Increment 7 — boot layout, `SPAWNABLE`, AudioSink grant
+## Increment 7 — boot layout, AudioSink grant — ✅ DONE
 
-- Add `glitch` + `beep` ELFs to `SPAWNABLE` (`kernel/src/trap/user.rs:609`) + the
-  `include_bytes!(env!("SNITCHOS_GLITCH_ELF"))` statics + build-script env wiring
-  (pattern at `user.rs:30-60`).
-- A `UserLayout` (`user.rs:658`) for the workload: `run_ipc` (`user.rs:1048`) grants
-  glitch its endpoint **and** a second `insert_with_id(Object::AudioSink, …)` cap, added
-  to the `grants` array (`user.rs:1070-1074`) so it's snitched; `beep` gets a minted
-  `SEND`.
-- **RED (host):** add `WorkloadKind::GlitchBeep` (sorted) in `kernel-boot` — the
-  `selects_*` + sorted-order tests cover it. **GREEN:** the `kmain` dispatch arm.
+- **`kernel-boot`:** `WorkloadKind::GlitchBeep` added (sorted, between `Fs`/`HeapGrow`),
+  TDD'd (`selects_glitch_beep` RED→GREEN; sorted-order + `every_workload_selects` cover
+  it). 73 host tests green.
+- **New `AudioSink` launch path:** rather than reuse fs's `RECV|MINT`, added a
+  `Launch::IpcAudio { rights_bits }` variant + a `grant_audio: bool` param to `run_ipc`:
+  after the endpoint it `insert_with_id`s an `Object::AudioSink`/`Rights::AUDIO` cap
+  (kernel-minted root grant, `parent_cap_id: 0`) at slot 3 = `delegated_handle(1)`, and
+  pushes it onto the (now `Vec`) snitched `grants`. `GLITCH_SERVER` = `IpcAudio { RECV }`
+  — **least authority: RECV only, no MINT** (it never mints; the plan's `RECV|MINT` was
+  fs-copy inertia). `BEEP` = `ipc_user(SEND)`.
+- **Statics + build wiring:** `GLITCH_SERVER_ELF`/`BEEP_ELF` statics; new
+  `user/glitch/src/bin/glitch-server.rs` (calls `glitch::serve()`); `build.rs`
+  `build(&["glitch"])` phase + two `USER_PROGRAMS` rows. **No `SPAWNABLE` rows** —
+  glitch-beep is LAYOUTS/`run_ipc`-launched, not `Spawn`-launched (skipped the plan's
+  SPAWNABLE step as unneeded).
+- **`kmain`:** `GlitchBeep` added next to `Fs` in the two userspace-workload match lists
+  (exhaustive pre-secondary arm + `hart_1_probe`-suppression `matches!`). The `LAYOUTS`
+  entry (server then client, `needs_endpoint: true`) is dispatched generically — no new
+  arm. Kernel + userspace build clean (exit 0).
 
-## Increment 8 — itest `glitch-beep-plays` *(acceptance)*
+## Increment 8 — itest `glitch-beep-plays` *(acceptance)* — ✅ DONE
 
-**RED:** an `xtask-itest` scenario booting `workload=glitch-beep` under snemu, asserting
-`snitchos.audio.samples_emitted_total >= 1` **and** `snitchos.glitch.plays_total >= 1`
-(proves the full client → glitch IPC → `AudioWrite` → cap-check → `WDATA` path, plus the
-server's own observability). Register in the catalog (`xtask-itest/src/itest.rs`).
+Shipped `scenarios::glitch_beep_plays` + registered `cpu "glitch-beep-plays" … {"glitch-beep"}`.
+Asserts **both** `snitchos.glitch.plays_total >= 1` and `snitchos.audio.samples_emitted_total
+>= 1` in one forward pass (two `Cell` flags — the metrics have no guaranteed wire order:
+`plays_total` is a userspace `EmitMetric`, `samples_emitted` a heartbeat-drained kernel
+counter). **`1/1 pass under snemu (100% fidelity)`.**
 
-**GREEN:** wiring from Increments 1–7. snemu's PWMDAC device (Tier 0) accepts the writes;
-the AudioSink `CapEvent` and the `glitch.play` span appear on the wire. Optional stronger
-assert: the AudioSink `CapEvent::Transferred` frame is present.
+**Bug the itest caught (the whole point of Increment 8):** the first run FAILED with
+`SyscallRefused { syscall: 32, reason: BadUserRange, task_id: glitch_server }` — every cap
+grant and IPC hop was correct (the frame dump showed AudioSink `rights: 128` granted, the
+`glitch.play` span, the Reply transfer), but `AudioWrite` was refused. Root cause:
+`kernel_mem::mmu::user_range_ok` caps **any** single `copy_from_user` at `MAX_USER_STR_LEN =
+256 bytes`; `MAX_SAMPLES = 256` samples = 512 bytes overran it. Fixed by tying
+`MAX_SAMPLES = MAX_USER_STR_LEN / 2` (= 128) with a `const _: () = assert!(…)` compile-time
+guard, and `AUDIO_WRITE_MAX = 128` in the runtime. Diagnosed via
+`cargo run -p xtask-itest -- snemu boot --workload glitch-beep --frames`.
+
+## v1 COMPLETE
+
+All 8 increments shipped. `workload=glitch-beep` boots a userspace `glitch` server holding
+the DAC as an `AudioSink` capability; a `beep` client asks it to play 440 Hz over IPC; the
+server synthesizes (`glitch-core`/`synth`) and streams samples through the cap-gated
+`AudioWrite` syscall; the kernel drives `WDATA`. The discipline is proved: the DAC is a
+cap, every sound source is a client, and it's all observable on the wire.
 
 ## Acceptance
 

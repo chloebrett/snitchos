@@ -46,9 +46,13 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("badge-mint", "SNITCHOS_BADGE_MINT_ELF"),
     ("badge-handout-server", "SNITCHOS_BADGE_HANDOUT_SERVER_ELF"),
     ("badge-handout-client", "SNITCHOS_BADGE_HANDOUT_CLIENT_ELF"),
+    ("kvetch-server", "SNITCHOS_KVETCH_SERVER_ELF"),
+    ("kvetch-client", "SNITCHOS_KVETCH_CLIENT_ELF"),
     ("fs-server", "SNITCHOS_FS_SERVER_ELF"),
     ("fs-server-seeded", "SNITCHOS_FS_SERVER_SEEDED_ELF"),
     ("fs-client", "SNITCHOS_FS_CLIENT_ELF"),
+    ("glitch-server", "SNITCHOS_GLITCH_SERVER_ELF"),
+    ("beep", "SNITCHOS_BEEP_ELF"),
     ("satisfier", "SNITCHOS_SATISFIER_ELF"),
     ("spawn-image-demo", "SNITCHOS_SPAWN_IMAGE_DEMO_ELF"),
     ("notify_waiter", "SNITCHOS_NOTIFY_WAITER_ELF"),
@@ -202,6 +206,12 @@ fn build_and_embed_user(kernel_dir: &str) {
     // holds) → a `Use` grant, vs `fs-probe`'s narrower `SEND` → an attenuating `Mint`.
     copy_if_different(&format!("{bin_dir}/fs-warden"), &ws.join("fs-image/bin/fs-warden"));
     build(&["fs"]);
+    // The completion server + its client. Separate from `fs` only because it is
+    // a separate package; nothing here depends on the fs image.
+    build(&["kvetch"]);
+    // The `glitch` audio server + its `beep` client. A separate package; its bins
+    // (`glitch-server`, `beep`) embed via USER_PROGRAMS, no fs-image dependency.
+    build(&["glitch"]);
 
     for (bin, env_var) in USER_PROGRAMS {
         embed(&format!("{bin_dir}/{bin}"), env_var);

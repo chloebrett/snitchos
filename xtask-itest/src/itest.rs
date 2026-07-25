@@ -202,6 +202,7 @@ catalog! {
     cpu "heap-oom"                        scenarios::heap_oom                       [heap, oom]    {"heap-oom"};
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"cooperative"};
     cpu "audio-beep-emits-samples"        scenarios::audio_beep_emits_samples       [audio]         {"audio-beep"};
+    cpu "glitch-beep-plays"               scenarios::glitch_beep_plays              [audio]         {"glitch-beep"};
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};
