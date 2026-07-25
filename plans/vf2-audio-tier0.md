@@ -1,6 +1,11 @@
 # Tier 0 — first beep from the VF2 audio jack (CPU PIO)
 
-**Status:** ✅ **THE BEEP WORKS (under snemu).** Increments 1–8 + 9a all shipped: the
+**Status:** ✅ **THE BEEP WORKS ON REAL HARDWARE (VF2, 2026-07-25).** Audible tone out the
+3.5mm jack. The pinmux (GPIO 33/34 → PWMDAC via `SYS_IOMUX`, `kernel-devices/src/iomux.rs`)
+was the last missing piece. Hardware confirmed: DAC latches `WDATA` + `mtime` pacing sets the
+rate (no FIFO — the open unknown resolved), clock tree adequate, format correct. It sounds
+saw-ish (the jack's AC coupling droops the square's flat tops — benign; a sine (4b) fixes it).
+Below is also true under snemu: Increments 1–8 + 9a all shipped: the
 pure layer (`kernel-devices/src/{pwmdac,syscrg}.rs`), the snemu PWMDAC device + WAV
 decoder (`snemu/src/{pwmdac,audio}.rs`) + `--audio-out`, the kernel driver
 (`kernel/src/device/pwmdac.rs`, address-driven per fork (a)), the `audio-beep` workload,

@@ -35,6 +35,7 @@ pub mod line_edit;
 pub mod lower;
 pub mod natives;
 pub mod ops;
+pub mod oracle;
 pub mod parser;
 pub mod pattern;
 pub mod platform;

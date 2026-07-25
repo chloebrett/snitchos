@@ -172,6 +172,51 @@ channel," which is on-thesis. The roadmap already gestures at it:
 forensics") and `docs/arcade-and-real-hardware-direction.md:189` (the PWM-vs-I2S-DMA
 fork).
 
+> ### Far-future capstone: `Frame` as a network protocol over an acoustic PHY
+>
+> The north star the whole audio arc points at (impractical today, noted so it
+> isn't lost). The insight: **because SnitchOS's I/O is already `Frame`s, the
+> transport is pluggable** — Frame-over-audio is a peer of Frame-over-UART (the
+> `run_source` seam already abstracts "source"). Make it *bidirectional between two
+> instances* and `Frame` stops being a telemetry format and becomes a **network
+> protocol**; two acoustically-coupled microkernels gossiping their own
+> observability is just the most delightful demo of that general truth (Frame-over-
+> IR / -socket / -QR would work too; audio's the one that sounds like 1996).
+>
+> Built from scratch, the stack is: **acoustic PHY** (PWMDAC out, PDM/I2S mic in) →
+> **FSK modem / data-link** (mod/demod; clock recovery is the hard DSP) → **COBS
+> frame transport** (already done) → an app protocol where instances stream
+> telemetry at each other or RPC over sound. No new wire protocol — reuse `Frame`.
+>
+> A ladder, not a cliff, each rung reusing the last:
+> 1. **TX → host** — SnitchOS FSKs frames out, a host demodulator recovers them.
+>    Reachable *today* on the Tier-0 work (`sing` + an NCO + FSK); no board input
+>    needed. Deterministic: demodulate a recorded snemu boot, get the frames back.
+> 2. **host → board RX** — needs the JH7110 mic/ADC driver + a fixed-point
+>    demodulator (Goertzel + bit-timing recovery) — a motivating first consumer of
+>    userspace DSP (hence lazy-FP-context-switch).
+> 3. **board ↔ board** — full duplex, acoustic-coupler style (speaker→mic across
+>    air, à la 1970s handset cups) or a line-out→line-in cable.
+>
+> Everything before this in the audio arc (beep → `sing` server → sonification →
+> modem TX) is a rung toward it.
+>
+> **What a Frame-network buys — distributed primitives, reimagined honestly.** The
+> acoustic PHY is a forcing function against the two biggest lies in the Unix model:
+> - **Remote access as capability delegation, not ambient login.** "ssh into another
+>   instance" = the host *delegates a specific cap bundle* to the remote principal
+>   over the link; every remote invocation is a `CapEvent` the host sees. A live cap
+>   can't teleport (it's a local slot/generation), so the mechanism is a **local
+>   proxy** holding the real caps and mediating invocation-*requests* carried as
+>   frames (CapTP / E-lineage). Extends the explicit-authority shell across the gap.
+> - **Loss-tolerance as a visible property (`~>`).** A byte pipe (`|`) corrupts
+>   everything after a dropped byte; a *frame* pipe drops one frame and resyncs — which
+>   is exactly the COBS "Resync" transport policy the UART-telemetry work already
+>   built (`DecodeError.consumed`, `0x00`-delimited). So `a ~> b` = "best-effort,
+>   framed, may drop, resyncs" — the surface syntax for that policy, and a natural
+>   Stitch operator (making reliability part of a program's visible shape, the way
+>   caps make authority visible). Framed data is what *makes* fuzzy piping viable.
+
 ## Floating point: deliberately none (a kernel-wide invariant)
 
 The kernel has emitted **zero floating-point instructions** to date. That is

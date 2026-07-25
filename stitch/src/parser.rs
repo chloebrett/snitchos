@@ -1235,6 +1235,8 @@ impl Parser {
 
     /// Parse a single (non-or) pattern.
     fn parse_pattern_atom(&mut self) -> Result<Pattern, ParseError> {
+        // Captured before the bump — see `parse_atom`.
+        let leading = self.current_span();
         Ok(match self.bump().clone() {
             TokenKind::Int(n) => Pattern::Int(n),
             TokenKind::Float(f) => Pattern::Float(f),
@@ -1243,8 +1245,9 @@ impl Parser {
                 [StrPart::Lit(text)] => Pattern::Str(text.clone()),
                 [] => Pattern::Str(String::new()),
                 _ => {
-                    return Err(self.err(
+                    return Err(ParseError::at(
                         "string interpolation isn't allowed in a pattern — match on a plain string literal",
+                        leading,
                     ));
                 }
             },
@@ -1271,9 +1274,10 @@ impl Parser {
                 }
             }
             other => {
-                return Err(self.err(format!(
-                    "unexpected token in pattern: {other:?}"
-                )));
+                return Err(ParseError::at(
+                    format!("unexpected token in pattern: {other:?}"),
+                    leading,
+                ));
             }
         })
     }
@@ -1301,6 +1305,9 @@ impl Parser {
 
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
         let start = self.cur_start();
+        // Captured before the bump: the rejection arms below must blame the
+        // token they rejected, not the one after it.
+        let leading = self.current_span();
         // Clone the leading token so its borrow ends before we recurse.
         Ok(match self.bump().clone() {
             TokenKind::Int(n) => self.spanned(start, ExprKind::Int(n)),
@@ -1347,8 +1354,10 @@ impl Parser {
             TokenKind::Match => self.parse_match(start)?,
             TokenKind::Handle => self.parse_handle(start)?,
             TokenKind::Without => self.parse_without(start)?,
-            TokenKind::Semicolon => return Err(self.err(NO_SEMICOLONS)),
-            other => return Err(self.err(format!("unexpected token: {other:?}"))),
+            TokenKind::Semicolon => return Err(ParseError::at(NO_SEMICOLONS, leading)),
+            other => {
+                return Err(ParseError::at(format!("unexpected token: {other:?}"), leading));
+            }
         })
     }
 }
@@ -2184,6 +2193,21 @@ mod tests {
         // unexpected token, not at byte 0.
         let err2 = parse_program("f(x) x").expect_err("should fail on missing =");
         assert_ne!(err2.span, Span::default(), "ParseError span for program error should not be Span::default()");
+    }
+
+    #[test]
+    fn an_unexpected_token_error_points_at_that_token() {
+        use crate::lexer::Span;
+        // The offending `)` is at bytes 0..1. Reporting the *following* token's
+        // span puts the caret one token too far right — and any consumer that
+        // asks "where did parsing stop?" (the continuation oracle does exactly
+        // this) reads a position that implies the `)` was accepted.
+        let err = parse(")").expect_err("`)` cannot open an expression");
+        assert_eq!(err.span, Span { start: 0, end: 1 });
+
+        // Same defect in pattern position: the `)` sits at bytes 10..11.
+        let err = parse("match x { ) => 1 }").expect_err("`)` is not a pattern");
+        assert_eq!(err.span, Span { start: 10, end: 11 });
     }
 
     #[test]

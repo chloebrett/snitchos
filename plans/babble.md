@@ -1,6 +1,21 @@
 # babble — the weight-free model (TDD plan)
 
-**Status:** 📋 **PLANNED — not started.** TDD decomposition of
+**Status:** 🚧 **IN PROGRESS — increments 1–2 done.** The oracle
+(`stitch/src/oracle.rs`) answers `valid_next` across the grammar; 9 tests
+green. **Mechanism changed from the design doc's "instrument `expect`/`peek`"
+to *trial-by-append*** — append a class's representative lexeme and read
+*where* the parser fails: an error at the appended token means rejected
+(dead), an error beyond it (or none) means consumed-and-wants-more (viable).
+The real parser answers every query, so the oracle cannot drift from the
+grammar — no second copy of grammar knowledge exists. Cost is one parse per
+class (58) per query; fine for babble, and the deferred snapshot-caching is
+the stim-time fix. **Found and fixed a real parser bug on the way**: the
+three post-`bump` `self.err()` sites in `parse_atom`/`parse_pattern_atom`
+blamed the token *after* the offending one (the caret pointed one token too
+far right, and it made the oracle unsound); `expect` had always been
+correct. One snapshot updated — it had pinned the buggy span.
+
+TDD decomposition of
 [../docs/babble-design.md](../docs/babble-design.md): the continuation
 oracle in `stitch`, the seeded biased grammar-walk sampler, the batch CLI
 (Tier-0 corpus hat), and kvetch v0 (the serving hat — babble behind an IPC
@@ -55,7 +70,7 @@ in this test so the API can't drift silently).
 ## Increment 2 — replay-with-sentinel across the grammar
 
 **RED**: table-driven expected-sets through every major production —
-`"after `use M.{` → exactly {ident, `}`}"` style, one row per grammar
+`"after `use M.{`→ exactly {ident,`}`}"` style, one row per grammar
 decision point (module header, fn params, match arms, handler clauses,
 expression operators, call args). Rows are cheap; aim for one per
 `expect`/`peek` site in the parser.
@@ -87,9 +102,9 @@ representative malformed programs, snapshotted; then the new assertion —
 
 **GREEN**: parser error paths call the oracle (or share its tables) instead
 of hand-maintained expected-lists. First consumer live; error messages
-improve as a side effect. *(Skippable if it balloons — the oracle API is
+improve as a side effect. _(Skippable if it balloons — the oracle API is
 the deliverable, not the refactor — but assess before skipping: it's the
-increment that keeps oracle and parser honest against each other forever.)*
+increment that keeps oracle and parser honest against each other forever.)_
 
 ## Increment 5 — sampler: seeded determinism + membership
 
@@ -108,7 +123,7 @@ category — no CSPRNG, per the entropy doc).
 **RED**: with default tables, N seeds all terminate within a byte bound;
 mean program length lands in a target band (loose — this is a tunability
 assertion, not a golden value); a pathological table (no damping) is
-*rejected at load* rather than looping forever (table validation, not
+_rejected at load_ rather than looping forever (table validation, not
 runtime hope); tables round-trip from the TOML file.
 
 **GREEN**: per-kind weights + depth-indexed damping; `Tables::load` with
@@ -161,7 +176,7 @@ law — same reordering rule as `protocol::Frame`.)
 **RED**: `request_seed(boot_seed, counter)` is pure, documented-stable
 (pinned test vectors — this function is cross-engine wire law: host-side
 replay must reproduce target-side draws forever), distinct across
-counters, and contains no time input *by construction* (signature takes no
+counters, and contains no time input _by construction_ (signature takes no
 clock — the test is the signature).
 
 **GREEN**: one hash function (FNV/SipHash-class, seeded; not security
