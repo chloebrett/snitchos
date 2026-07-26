@@ -41,7 +41,7 @@ fn a_budget_stopped_rung_is_not_punished_for_stopping_mid_line() {
     // token budget. "As sampled" should fail it; "complete items" should not.
     struct Truncated;
     impl Generator for Truncated {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "truncated"
         }
         fn stops_at_budget(&self) -> bool {
@@ -64,7 +64,7 @@ fn a_rung_that_finishes_is_judged_on_what_it_emitted() {
     // would chop a legal program and report a false failure.
     struct Whole;
     impl Generator for Whole {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "whole"
         }
         fn sample(&self, _seed: u64) -> String {

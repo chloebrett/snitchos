@@ -46,7 +46,7 @@ pub struct Context<'a> {
 /// set is what makes their scores comparable at all.
 pub trait Predictor {
     /// The name this rung reports under.
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 
     /// Weights over `legal`, in any positive scale. The harness normalizes, so
     /// an implementation may return logits-turned-weights, integer bias-table
@@ -67,7 +67,7 @@ pub trait Predictor {
 pub struct Uniform;
 
 impl Predictor for Uniform {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "uniform"
     }
 
@@ -92,7 +92,7 @@ impl Default for Babble {
 }
 
 impl Predictor for Babble {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "babble"
     }
 
@@ -111,8 +111,22 @@ impl Predictor for Babble {
 /// One scored decision.
 #[derive(Debug, Clone)]
 pub struct Decision {
+    /// Index into the programs `score` was given.
+    ///
+    /// Without it, `position` is a byte offset into an unnamed program, and a
+    /// diagnostic that resolves it against the wrong source prints a confidently
+    /// wrong line — which the first version of this did.
+    pub program: usize,
     /// Byte offset in the program where the class was to be chosen.
     pub position: usize,
+    /// Tokens before this decision, within its program.
+    ///
+    /// Carried so a report can separate "this rung is bad at Stitch" from "this
+    /// rung is being scored outside the regime it operates in". babble stops
+    /// generating by ~50 tokens; scoring it at token 8,000 of `stim.st` asks it
+    /// a question it was never built to answer, and without this field that
+    /// shows up only as a bad number with no explanation.
+    pub emitted: u32,
     /// What the human actually wrote there.
     pub actual: TokenClass,
     /// How many classes the oracle admitted.
@@ -145,6 +159,9 @@ pub struct Report {
     pub free_nll: f64,
     pub decisions: usize,
     pub forced: usize,
+    /// Every scored decision, kept so a report can be re-cut without re-running
+    /// a scoring pass that costs minutes.
+    pub scored: Vec<Decision>,
     /// Decisions where the oracle did not admit what a human actually wrote.
     ///
     /// Should be zero. A nonzero count means the oracle and the parser disagree,
@@ -160,6 +177,23 @@ impl Report {
     pub fn free_perplexity(&self) -> f64 {
         self.free_nll.exp()
     }
+
+    /// Mean free NLL over decisions in the first `tokens` of their program.
+    ///
+    /// The regime check. A rung whose early score is competitive and whose
+    /// overall score is not is being asked questions outside the range it was
+    /// built for — which is a different finding from "this rung is bad", and
+    /// they are indistinguishable without this cut.
+    #[must_use]
+    pub fn free_nll_before(&self, tokens: u32) -> f64 {
+        let early: Vec<f64> = self
+            .scored
+            .iter()
+            .filter(|decision| !decision.is_forced() && decision.emitted < tokens)
+            .map(|decision| decision.nll)
+            .collect();
+        if early.is_empty() { 0.0 } else { early.iter().sum::<f64>() / early.len() as f64 }
+    }
 }
 
 /// Score `rung` on `programs`, which it must never have trained on.
@@ -172,7 +206,7 @@ pub fn score<P: Predictor + ?Sized>(rung: &P, programs: &[String]) -> Report {
     let mut decisions = Vec::new();
     let mut rejected = Vec::new();
 
-    for program in programs {
+    for (index, program) in programs.iter().enumerate() {
         // Tracked as the walk proceeds rather than recovered per position: the
         // recovering version re-lexed the prefix every time, which is quadratic
         // in program length.
@@ -185,7 +219,14 @@ pub fn score<P: Predictor + ?Sized>(rung: &P, programs: &[String]) -> Report {
             let legal = valid_next_in(program, position, Entry::Program);
 
             if !legal.contains(actual) {
-                rejected.push(Decision { position, actual, legal_count: legal.len(), nll: 0.0 });
+                rejected.push(Decision {
+                    program: index,
+                    position,
+                    emitted,
+                    actual,
+                    legal_count: legal.len(),
+                    nll: 0.0,
+                });
                 continue;
             }
 
@@ -198,7 +239,9 @@ pub fn score<P: Predictor + ?Sized>(rung: &P, programs: &[String]) -> Report {
                 .map_or(0.0, |(_, weight)| *weight);
 
             decisions.push(Decision {
+                program: index,
                 position,
+                emitted,
                 actual,
                 legal_count: legal.len(),
                 nll: -(weight / total).ln(),
@@ -227,6 +270,7 @@ pub fn score<P: Predictor + ?Sized>(rung: &P, programs: &[String]) -> Report {
         free_nll: mean(&free),
         decisions: decisions.len(),
         forced: decisions.len() - free.len(),
+        scored: decisions,
         rejected_by_oracle: rejected,
     }
 }

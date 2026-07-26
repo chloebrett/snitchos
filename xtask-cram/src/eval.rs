@@ -56,6 +56,7 @@ pub fn run(options: &EvalOptions) -> std::io::Result<()> {
     let reports: Vec<Report> = rungs.iter().map(|rung| score(rung.as_ref(), &sources)).collect();
     println!("held-out masked NLL  ({:.1}s)\n", started.elapsed().as_secs_f64());
     print_nll_table(&reports);
+    let disagreed = print_oracle_disagreements(&reports, &sources);
 
     print_floor_verdict(&reports);
 
@@ -87,6 +88,12 @@ pub fn run(options: &EvalOptions) -> std::io::Result<()> {
         );
     }
 
+    if disagreed {
+        // Nonzero exit, but only after everything else has printed: the numbers
+        // are still worth reading, they are just measured over a corpus with a
+        // hole in it.
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -94,28 +101,69 @@ fn bad_input(message: String) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
+/// How far into a program babble is still operating in the regime it generates
+/// in. Its walk winds down at 24 tokens and its programs average ~27, so a
+/// decision past this point asks it something it never has to answer.
+const REGIME: u32 = 50;
+
 fn print_nll_table(reports: &[Report]) {
-    println!("  {:<12} {:>10} {:>10} {:>12} {:>10} {:>8}", "rung", "nll", "free-nll", "perplexity", "decisions", "forced");
+    println!(
+        "  {:<12} {:>10} {:>10} {:>12} {:>12} {:>10} {:>8}",
+        "rung", "nll", "free-nll", "perplexity", "free<50tok", "decisions", "forced"
+    );
     for report in reports {
         println!(
-            "  {:<12} {:>10.4} {:>10.4} {:>12.2} {:>10} {:>8}",
+            "  {:<12} {:>10.4} {:>10.4} {:>12.2} {:>12.4} {:>10} {:>8}",
             report.rung,
             report.masked_nll,
             report.free_nll,
             report.free_perplexity(),
+            report.free_nll_before(REGIME),
             report.decisions,
             report.forced,
         );
     }
-    for report in reports {
-        assert!(
-            report.rejected_by_oracle.is_empty(),
-            "{}: the oracle rejected {} human-written tokens — that is a `stitch` bug, \
-             and every number above is measured over a corpus with holes in it",
-            report.rung,
-            report.rejected_by_oracle.len()
+}
+
+/// The oracle disagreeing with the parser is a `stitch` bug, and it silently
+/// removes decisions from every mean above — so it is reported loudly, with
+/// enough context to find it, rather than asserted away before the rest of the
+/// report prints.
+fn print_oracle_disagreements(reports: &[Report], sources: &[String]) -> bool {
+    let Some(report) = reports.iter().find(|report| !report.rejected_by_oracle.is_empty()) else {
+        return false;
+    };
+    println!(
+        "\n  WARNING  the oracle rejected {} token(s) a human actually wrote.\n\
+         \x20          Those decisions are excluded from every mean above, and the\n\
+         \x20          disagreement is between `stitch`'s oracle and its parser.",
+        report.rejected_by_oracle.len()
+    );
+    for decision in &report.rejected_by_oracle {
+        let context = sources
+            .get(decision.program)
+            .and_then(|source| locate(source, decision.position))
+            .unwrap_or_default();
+        println!(
+            "           program {} wrote {:?} at byte {} (oracle admitted {} classes)\n\
+             \x20            {}",
+            decision.program, decision.actual, decision.position, decision.legal_count, context
         );
     }
+    true
+}
+
+/// A one-line window around `position`, for a diagnostic that has to be
+/// actionable without opening the file.
+fn locate(source: &str, position: usize) -> Option<String> {
+    if position >= source.len() {
+        return None;
+    }
+    let line_start = source[..position].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source[position..].find('\n').map_or(source.len(), |index| position + index);
+    let line = source.get(line_start..line_end)?;
+    let number = source[..position].matches('\n').count() + 1;
+    Some(format!("line {number}: {}", line.trim()))
 }
 
 /// Which row is actually the floor.
@@ -138,11 +186,24 @@ fn print_floor_verdict(reports: &[Report]) {
         best.rung, best.free_nll
     );
     if best.rung != "babble" {
+        let babble = reports.iter().find(|report| report.rung == "babble");
         println!(
             "  NOTE  uniform-over-legal beat babble's tuned tables. Those tables were\n\
-             \x20       tuned for termination, not for resembling real Stitch, so this is a\n\
-             \x20       finding about the tables rather than about the harness."
+             \x20       tuned to make walks *terminate*, not to resemble real Stitch, and\n\
+             \x20       their finishing pressure saturates on a long file — a regime babble\n\
+             \x20       never generates in, since its own walks stop by ~27 tokens."
         );
+        if let Some(babble) = babble {
+            println!(
+                "  \x20       Evidence: babble scores {:.4} over the first {REGIME} tokens of a\n\
+                 \x20       program and {:.4} overall. Uniform is {:.4} / {:.4} — flat, as a\n\
+                 \x20       rung with no notion of position must be.",
+                babble.free_nll_before(REGIME),
+                babble.free_nll,
+                best.free_nll_before(REGIME),
+                best.free_nll,
+            );
+        }
     }
 }
 
@@ -176,7 +237,7 @@ struct Checkpoint {
 }
 
 impl Generator for Checkpoint {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "checkpoint"
     }
 

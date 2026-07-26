@@ -8,7 +8,7 @@
 
 /// A rung that can produce a program.
 pub trait Generator {
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 
     /// One program, reproducible from `seed`.
     fn sample(&self, seed: u64) -> String;
@@ -31,7 +31,7 @@ pub trait Generator {
 pub struct Babble;
 
 impl Generator for Babble {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "babble"
     }
 

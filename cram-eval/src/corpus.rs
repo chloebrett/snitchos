@@ -1,7 +1,7 @@
 //! The held-out side of the eval: real Stitch, as written by a human.
 //!
 //! Increment 2 owns corpus assembly proper — sources, augmentation, the
-//! deterministic split, MinHash dedup. What lives here is only what increment 3
+//! deterministic split, `MinHash` dedup. What lives here is only what increment 3
 //! needs to compute a floor row: read some `.st` files, keep the ones that
 //! parse, and report what was dropped.
 //!
@@ -70,6 +70,15 @@ pub fn load(paths: &[PathBuf]) -> Corpus {
     Corpus { programs, rejected }
 }
 
+/// Directories that hold Stitch which is not corpus.
+///
+/// `target/` is the one that bit: the first real eval run scored three of this
+/// crate's own test fixtures as human-written Stitch, because they live under
+/// `target/tmp/`. Walking it is also where the search spends nearly all of its
+/// time. Dot-directories are excluded for the same reason one rung up — `.git`
+/// holds every past version of every file.
+const NOT_CORPUS: &[&str] = &["target", "corpora", "checkpoints"];
+
 /// Every `.st` file under `root`, depth-first and in sorted order.
 ///
 /// Sorted so a corpus is a function of its directory rather than of the order
@@ -90,9 +99,17 @@ fn collect(dir: &Path, found: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect(&path, found);
+            if !is_excluded(&path) {
+                collect(&path, found);
+            }
         } else if path.extension().is_some_and(|extension| extension == "st") {
             found.push(path);
         }
     }
+}
+
+fn is_excluded(dir: &Path) -> bool {
+    dir.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name.starts_with('.') || NOT_CORPUS.contains(&name)
+    })
 }

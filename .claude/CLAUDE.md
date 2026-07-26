@@ -244,6 +244,15 @@ cram/         Host-side trainer, hand-written — no ML framework. Backward pass
               `AccelerateGemm` over Apple AMX). Every backward op is checked
               against finite differences rather than against another
               implementation; see plans/drivel.md.
+cram-eval/    Host-only. How every rung is scored: the `Predictor` trait (one
+              scoring path from babble upward, so rows cannot drift apart),
+              held-out masked NLL — **the gate metric** — the held-out loader,
+              and the `Generator` trait + unconstrained parse rate. Links
+              `kvetch-model`, never `cram`: evaluating compiles no backward
+              pass. Driven by `cargo xtask cram --eval`.
+              **The floor is uniform-over-legal, not babble** (measured:
+              2.758 vs 5.405 free-nll) — babble's termination pressure
+              saturates on long files, a regime it never generates in.
 cram-corpus/  Host-only. Tier-0 corpus assembly: babble generation (parallel,
               byte-identical to sequential), the on-disk cache + manifest,
               `Layout::{Flat, Printed}`, and `training_text`. **Train on the
@@ -277,6 +286,8 @@ cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note b
 cargo xtask diagram <target>  # generate a diagram (deps|itest-matrix|caps|trace|switches) into docs/generated/; --check gates the static ones
 cargo xtask diagram png       # render the hand-drawn mermaid docs to local PNGs (needs mmdc, Node >=18)
 cargo xtask cram --rung drivel    # train a ladder rung end to end: corpus (generated or cached) → vocab → model → checkpoint + loss curve
+cargo xtask cram --eval           # score the ladder: floor rows (babble, uniform) on held-out real Stitch, + parse rate with samples
+cargo xtask cram --eval --checkpoint c.kvetch --eval-vocab c.vocab   # ...including a trained rung's parse rate
 ```
 
 **Training (`cargo xtask cram`) reports on itself.** Loss, smoothed loss,

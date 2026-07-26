@@ -44,7 +44,12 @@ and constrains the honest ones:
   they are simply not the gate.
 
 **The win condition for this whole plan:** drivel's held-out masked NLL is lower
-than babble's, on real Stitch neither model was trained on. Nothing else.
+than **the best zero-weight baseline**, on real Stitch neither model was trained
+on. Nothing else.
+
+> Originally "lower than babble's". Increment 3 measured uniform-over-legal
+> *beating* babble by 2.6 nats, so "beat babble" would have been clearable
+> while losing to a model with no tables at all. The bar is **free-nll 2.758**.
 
 ### Why 2K lines is enough (and where it stops being enough)
 
@@ -250,6 +255,72 @@ within one. Worth remembering before any rung is compared to another on loss
 alone; the ladder's eval gates are right to be defined on held-out task metrics
 instead.
 
+## Increment 3 result: the floor is not babble (2026-07-26)
+
+**Status: COMPLETE.** The harness is `cram-eval/` (host-only, in-workspace,
+in the gate), and `cargo xtask cram --eval` prints the scoreboard. The
+standalone `parse-rate` bin is retired into it — a separate binary is how that
+metric drifted into measuring one rung with no floor to compare it to.
+
+Scored over every real `.st` file in the repo (8 programs, 58 KB, 8,318
+decisions, 681 of them forced):
+
+| rung | nll | free-nll | perplexity | free-nll over first 50 tokens |
+|---|---:|---:|---:|---:|
+| babble (tuned tables) | 4.962 | 5.405 | 222.4 | 2.599 |
+| uniform-over-legal | 2.533 | 2.758 | **15.8** | 2.117 |
+
+**Uniform-over-legal beats babble by 2.6 nats.** The plan assumed babble's
+tuned tables were the floor; they are not, and the assumption was never
+measured. Recorded consequences:
+
+1. **The floor row is uniform, not babble.** Increment 6's win condition
+   changes accordingly: drivel must beat **2.758**, not babble's 5.405.
+   Clearing "the floor" while losing to a model with no tables at all would
+   have been a hollow win, and the plan as written would have accepted it.
+2. **The cause is regime, not tables-are-bad.** babble scores 2.599 over the
+   first 50 tokens of a program and 5.405 overall; uniform is flat at
+   2.117/2.758, as a rung with no notion of position must be. babble's
+   finishing pressure saturates at `PRESSURE_CAP` on a long file, throwing
+   nearly all its mass onto closers and `Eof` — a regime it *never generates
+   in*, since its own walks stop by ~27 tokens. This is why the report carries
+   the `free<50tok` column: without it the finding is a bad number with no
+   explanation.
+3. **This does not make babble a worse sampler.** It is a fine generator of
+   short programs and a bad *model* of long files. Those are different jobs,
+   and the eval measures the second one.
+
+### The harness found a real oracle/parser disagreement on its first run
+
+`plans/lang/samples.st:79` writes `fold([:], …)` — the empty-map literal. The
+oracle does not admit `Colon` after `[`, so a grammar-masked decoder **cannot
+emit `[:]` at all**, and babble can never generate one. The parser accepts it;
+`valid_next` does not. Reported rather than asserted away: the run prints the
+warning, names the program, byte, line and admitted-class count, and exits
+nonzero *after* printing everything else. Not fixed here — `stitch` was being
+edited concurrently, and this is a `stitch` bug rather than a harness one.
+
+### Cost, measured rather than estimated
+
+**~138 s for 8,318 decisions — ~17 ms each**, and it is quadratic in program
+length: every decision is 59 oracle probes, each a parse of the whole prefix,
+and `stim.st` (41 KB of the 58 KB) dominates. Fine at 2K lines; **it will not
+scale to increment 2's corpus**, and the fix when it bites is incremental
+parsing or scoring per top-level item rather than per file.
+
+### What is deliberately not here
+
+- **No masked-NLL row for a checkpoint.** Scoring a *model* on the gate metric
+  needs the class → vocab-token mask, which is increment 6's work, and a real
+  train/held-out split, which is increment 2's. The `--eval` output says so
+  rather than printing a number that looks comparable and is not.
+- **FIM match**: an empty cell, not a deferred metric — see the ladder doc's
+  matrix section. FIM is a training-time objective and no rung has been trained
+  with it, so there is nothing to measure rather than something skipped.
+- **Shape distance**: not built. The harness prints parse rate with samples
+  beside it; shape statistics against the real corpus are worth having and are
+  not on the gate's path.
+
 ## Order of execution (not the increment numbering)
 
 Increments are units of work; this is the order they land in. **The
@@ -306,8 +377,12 @@ The name is the plan's thesis in four letters: at this rung we are stuffing a
 corpus far too small into a model far too large, on a deadline, and the expected
 outcome is memorization with a thin margin of real learning. It stays honest as
 the corpus grows — cramming *is* what training is — and it keeps the register of
-a project that names its model tiers after bad writing. (`kibitz` is held in
-reserve for an eval/judge layer if it ever wants its own name.)
+a project that names its model tiers after bad writing.
+
+(An earlier draft held `kibitz` in reserve for the eval layer. When that layer
+arrived it became **`cram-eval`** instead: the creative register belongs to
+things with character — a rung, a sampler, a trainer — and a scoring harness is
+infrastructure. `cram-corpus` assembles, `cram-eval` scores.)
 
 ### The crates
 
@@ -328,6 +403,10 @@ reserve for an eval/judge layer if it ever wants its own name.)
 - **`cram-corpus/`** — in-workspace, host-only. Corpus assembly, the
   deterministic split, augmentation, the validator funnel, the per-batch report.
   Depends on `stitch` (parse + type-check) and `babble` (Tier-0 generation).
+- **`cram-eval/`** — in-workspace, host-only. The scoring path: the `Predictor`
+  trait every rung is measured through, masked NLL, the held-out loader, the
+  `Generator` trait and parse rate. Links `kvetch-model` and **never `cram`**, so
+  evaluating a checkpoint compiles no backward pass and no Accelerate binding.
 - **Checkpoints are artifacts, not source.** Not committed, except one tiny drivel
   checkpoint enshrined as the deterministic eval fixture (the `panic-now` pattern
   the ladder doc names: feasibility artifact → permanent regression guard).
@@ -335,10 +414,16 @@ reserve for an eval/judge layer if it ever wants its own name.)
 ### The one abstraction the ladder actually needs
 
 ```
-trait Rung {
-    fn next_token_distribution(&self, prefix: &str, legal: &TokenSet) -> Distribution;
+trait Predictor {
+    fn weights(&self, at: Context<'_>, legal: TokenSet) -> Vec<(TokenClass, f64)>;
 }
 ```
+
+*(Built as `cram_eval::Predictor`, not `Rung` — `kvetch_model::Rung` is already
+the checkpoint-config enum, and two `Rung`s in one workspace is exactly the drift
+this trait exists to prevent. `Context` carries the prefix plus how far along and
+how deep the walk is: babble's tables need both, and recomputing them per
+position re-lexes the prefix every time, which is quadratic in program length.)*
 
 babble implements it from its bias tables; every trained rung implements it from
 masked-and-renormalized logits. That single trait buys three things at once:
@@ -504,6 +589,16 @@ A uniform-over-legal control (babble with flat tables) scores strictly worse tha
 babble with its tuned tables — the test that proves the harness can detect the
 signal it exists to measure, before any real model is on the line.
 
+> **Measured, and it went the other way** — uniform beats babble by 2.6 nats;
+> see the increment 3 result above. Two corrections to the paragraph as
+> written. First, the control cannot be "babble with flat tables": flat bases
+> still run through the pressure machinery (closers ×p, obligations ÷p³), so
+> that is not a uniform distribution. The control is a separate `1/|legal|`
+> predictor. Second, the calibration test cannot be "tuned beats uniform",
+> since that is false — it is **a clairvoyant predictor scores ~0**, which
+> checks the same thing (can the harness see signal) without assuming the
+> answer to a question the harness exists to ask.
+
 **GREEN**: the harness, plus the one new babble API it needs — **`p(class | prefix)`
 over the legal set, not just `pick`**. `pick` must be shown to be a draw from
 exactly that distribution (one test pinning the two together, the same
@@ -642,7 +737,7 @@ flagged. One rung today; the shape is what the ladder inherits.
 ## Gate
 
 `cargo xtask test && cargo xtask itest && cargo xtask itest --scramble`, plus
-`cargo xtask clippy`. `kvetch-vocab`, `kvetch-model`, and `cram-corpus` are
+`cargo xtask clippy`. `kvetch-vocab`, `kvetch-model`, `cram-corpus` and `cram-eval` are
 ordinary workspace crates and join the gate normally. **`cram` is excluded from
 the workspace and is not gated** — it is run by hand, its output is an artifact,
 and the pinned eval fixture is what protects the gate from it.

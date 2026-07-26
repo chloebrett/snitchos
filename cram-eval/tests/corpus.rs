@@ -48,6 +48,31 @@ fn a_file_that_does_not_parse_is_reported_rather_than_dropped() {
 }
 
 #[test]
+fn build_output_is_not_corpus() {
+    // `target/` holds generated Stitch, vendored copies and — as this very
+    // suite proves — test fixtures. The first run of the real eval silently
+    // scored three of this file's own fixtures as though they were human-written
+    // Stitch. Walking it is also where the walk spends most of its time.
+    let dir = fixture_dir();
+    let target = dir.join("target");
+    std::fs::create_dir_all(&target).expect("fixture target dir");
+    std::fs::write(target.join("generated.st"), "let generated = 1\n").expect("write");
+    let hidden = dir.join(".git");
+    std::fs::create_dir_all(&hidden).expect("fixture hidden dir");
+    std::fs::write(hidden.join("stashed.st"), "let stashed = 1\n").expect("write");
+
+    let found = corpus::find_stitch_files(&dir);
+    assert!(
+        found.iter().all(|path| !path.starts_with(&target)),
+        "build output was collected as corpus: {found:?}"
+    );
+    assert!(
+        found.iter().all(|path| !path.starts_with(&hidden)),
+        "a dot-directory was collected as corpus: {found:?}"
+    );
+}
+
+#[test]
 fn a_missing_file_is_reported_not_a_panic() {
     let loaded = corpus::load(&[PathBuf::from("/nonexistent/nope.st")]);
     assert!(loaded.programs.is_empty());

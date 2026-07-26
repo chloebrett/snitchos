@@ -131,7 +131,7 @@ fn a_rung_that_knows_the_answer_scores_near_zero() {
     // plan asks for, in its strongest form.
     struct Clairvoyant;
     impl Predictor for Clairvoyant {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "clairvoyant"
         }
         fn weights(

@@ -47,6 +47,7 @@ graph LR
     babble["babble"]
     cram["cram"]
     cram_corpus["cram-corpus"]
+    cram_eval["cram-eval"]
     glitch["glitch"]
     glitch_core["glitch-core"]
     glitch_proto["glitch-proto"]
@@ -69,6 +70,10 @@ graph LR
     cram_corpus --> babble
     cram_corpus --> kvetch_vocab
     cram_corpus --> stitch
+    cram_eval --> babble
+    cram_eval --> kvetch_model
+    cram_eval --> kvetch_vocab
+    cram_eval --> stitch
     diagram --> protocol
     diagram --> snitchos_abi
     fs --> fs_core
@@ -100,6 +105,7 @@ graph LR
     kernel --> kernel_boot
     kernel --> kernel_devices
     kernel --> kernel_mem
+    kernel --> kernel_net
     kernel --> kernel_obs
     kernel --> kernel_proc
     kernel --> protocol
@@ -136,6 +142,7 @@ graph LR
     xtask_cmds --> xtask_qemu
     xtask_cram --> cram
     xtask_cram --> cram_corpus
+    xtask_cram --> cram_eval
     xtask_cram --> kvetch_model
     xtask_cram --> kvetch_vocab
     xtask_cram --> stitch
