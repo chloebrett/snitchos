@@ -28,6 +28,8 @@ pub enum TokenClass {
     Prod,
     Sum,
     Contract,
+    Test,
+    Expect,
     On,
     Let,
     Mut,
@@ -82,7 +84,7 @@ pub enum TokenClass {
 
 /// Every class, in discriminant order. The bitset's index↔class mapping and
 /// the source of truth for [`TokenSet::to_vec`]'s ordering.
-const ALL: [TokenClass; 58] = [
+const ALL: [TokenClass; 60] = [
     TokenClass::Int,
     TokenClass::Float,
     TokenClass::Bool,
@@ -92,6 +94,8 @@ const ALL: [TokenClass; 58] = [
     TokenClass::Prod,
     TokenClass::Sum,
     TokenClass::Contract,
+    TokenClass::Test,
+    TokenClass::Expect,
     TokenClass::On,
     TokenClass::Let,
     TokenClass::Mut,
@@ -249,6 +253,8 @@ pub const fn class_of(kind: &TokenKind) -> TokenClass {
         TokenKind::Prod => TokenClass::Prod,
         TokenKind::Sum => TokenClass::Sum,
         TokenKind::Contract => TokenClass::Contract,
+        TokenKind::Test => TokenClass::Test,
+        TokenKind::Expect => TokenClass::Expect,
         TokenKind::On => TokenClass::On,
         TokenKind::Let => TokenClass::Let,
         TokenKind::Mut => TokenClass::Mut,
@@ -322,6 +328,8 @@ pub const fn representative(class: TokenClass) -> Option<&'static str> {
         TokenClass::Prod => "prod",
         TokenClass::Sum => "sum",
         TokenClass::Contract => "contract",
+        TokenClass::Test => "test",
+        TokenClass::Expect => "expect",
         TokenClass::On => "on",
         TokenClass::Let => "let",
         TokenClass::Mut => "mut",
@@ -600,6 +608,7 @@ mod tests {
             TokenClass::Let,
             TokenClass::Ident,
             TokenClass::Contract,
+            TokenClass::Test,
             TokenClass::On,
             TokenClass::Eof,
         ];

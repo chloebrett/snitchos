@@ -66,6 +66,17 @@ pub enum Item {
         body: Expr,
         public: bool,
     },
+    /// `test "name" (uses Cap, …)? { body }` — a test declaration.
+    ///
+    /// The name is a *string*, not an identifier: it is prose for a report, and
+    /// nothing refers to it by name. `uses` is the authority the runner grants —
+    /// empty (the default) means the test is pure, which the checker enforces
+    /// the same way it does for a function.
+    Test {
+        name: String,
+        uses: Vec<Effect>,
+        body: Expr,
+    },
     /// `contract Name<generics> { method-signatures }` — a behavior contract.
     Contract {
         name: String,
@@ -304,6 +315,11 @@ pub enum ExprKind {
         handler: Box<Expr>,
         body: Box<Expr>,
     },
+    /// `expect <expr>` — an assertion. A **form**, not a call: it holds the
+    /// unevaluated expression so a failure can render the operands that produced
+    /// it (a function taking a `Bool` has already lost them). The inner
+    /// expression must be `Bool`; the fault carries this node's span.
+    Expect { expr: Box<Expr> },
     /// `without <Cap> { body }` — attenuation: drop capability `Cap` from the
     /// authority in scope for the body's extent. A direct effect needing `Cap`
     /// then faults (spanned at the perform site). Lexical/direct only — it does
@@ -409,4 +425,39 @@ pub enum BinOp {
     CrossPipe, // ~> (cross-process pipe; same precedence as `|>`)
     Range,     // ..
     RangeIncl, // ..=
+}
+
+impl BinOp {
+    /// The operator's source spelling. Intrinsic to the operator, so it lives
+    /// here rather than in the printer — a failing `expect` needs it too, and
+    /// the two must never disagree.
+    #[must_use]
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Rem => "%",
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Pipe => "|>",
+            Self::CrossPipe => "~>",
+            Self::Range => "..",
+            Self::RangeIncl => "..=",
+        }
+    }
+
+    /// Whether this operator compares two values to a `Bool` — the operators an
+    /// `expect` can report operand-wise.
+    #[must_use]
+    pub fn is_comparison(self) -> bool {
+        matches!(self, Self::Eq | Self::Ne | Self::Lt | Self::Le | Self::Gt | Self::Ge)
+    }
 }

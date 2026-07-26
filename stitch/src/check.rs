@@ -724,6 +724,7 @@ fn child_exprs(expr: &CoreExpr) -> Vec<&CoreExpr> {
         | CoreExprKind::Without { .. } => Vec::new(),
         CoreExprKind::Spread(e)
         | CoreExprKind::Unary { operand: e, .. }
+        | CoreExprKind::Expect { expr: e }
         | CoreExprKind::Try(e)
         | CoreExprKind::Field { object: e, .. }
         | CoreExprKind::SafeField { object: e, .. } => vec![e],
@@ -924,6 +925,36 @@ mod tests {
             &crate::parser::parse_program(src).expect("parses"),
         );
         super::check_program(&items)
+    }
+
+    /// An assertion yields nothing to the surrounding block; only its effect
+    /// (fault or not) matters. Typing it as `Unit` is what makes a test body a
+    /// sequence of assertions rather than an expression whose value leaks out.
+    #[test]
+    fn expect_synthesizes_unit() {
+        assert_eq!(ty("expect 1 == 1"), Ty::Unit);
+    }
+
+    /// `expect 3` is nonsense the checker should catch before the test ever
+    /// runs — the gradual checker stays quiet about a `Dyn` operand, but a
+    /// *known* non-`Bool` is an error.
+    #[test]
+    fn expect_on_a_non_bool_is_a_type_error() {
+        let errors = errors(r#"test "bad" { expect 3 }"#);
+        assert_eq!(errors.len(), 1, "expected one type error, got {errors:?}");
+        assert!(
+            errors[0].message.contains("Bool"),
+            "the error should name the expected type: {}",
+            errors[0].message
+        );
+    }
+
+    /// A test body is checked like any other body — which is exactly what tests
+    /// living in Rust string literals were invisible to.
+    #[test]
+    fn a_test_body_is_type_checked() {
+        let errors = errors(r#"test "mismatched" { expect 1 == "one" }"#);
+        assert!(!errors.is_empty(), "a test body's type error should be reported");
     }
 
     #[test]

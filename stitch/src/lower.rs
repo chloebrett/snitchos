@@ -104,6 +104,9 @@ fn to_core(expr: &Expr) -> CoreExpr {
             cap: cap.clone(),
             body: Box::new(to_core(body)),
         },
+        ExprKind::Expect { expr: inner } => CoreExprKind::Expect {
+            expr: Box::new(to_core(inner)),
+        },
         ExprKind::Placeholder(_) | ExprKind::OperatorRef(_) | ExprKind::SubjectlessMatch { .. } => {
             unreachable!("surface-only node survived lowering: {:?}", expr.kind)
         }
@@ -179,6 +182,11 @@ pub fn lower_item_to_core(item: &Item) -> CoreItem {
             body: Rc::new(lower_expr_to_core(body)),
             public: *public,
         },
+        Item::Test { name, uses, body } => CoreItem::Test {
+            name: name.clone(),
+            uses: uses.iter().map(|effect| effect.name.clone()).collect(),
+            body: Rc::new(lower_expr_to_core(body)),
+        },
         Item::Contract { name, generics, methods } => CoreItem::Contract {
             name: name.clone(),
             generics: generics.clone(),
@@ -222,7 +230,7 @@ pub fn lower_program(items: &mut [Item]) {
 
 fn lower_item(item: &mut Item) {
     match item {
-        Item::Func { body, .. } => lower_expr(body),
+        Item::Func { body, .. } | Item::Test { body, .. } => lower_expr(body),
         Item::Const { value, .. } => lower_expr(value),
         Item::On { methods, .. } | Item::Contract { methods, .. } => {
             for m in methods.iter_mut() {
@@ -331,6 +339,9 @@ fn lower_expr(expr: &mut Expr) {
         ExprKind::Without { cap: _, body } => {
             lower_expr(body);
         }
+        ExprKind::Expect { expr } => {
+            lower_expr(expr);
+        }
         ExprKind::OperatorRef(op) => {
             *expr = operator_lambda(*op);
         }
@@ -412,6 +423,7 @@ fn collect_placeholders(expr: &mut Expr, params: &mut alloc::collections::BTreeS
             collect_placeholders(then, params);
             collect_placeholders(els, params);
         }
+        ExprKind::Expect { expr } => collect_placeholders(expr, params),
         ExprKind::Tuple(elems) | ExprKind::List(elems) => {
             for e in elems.iter_mut() {
                 collect_placeholders(e, params);
@@ -671,6 +683,7 @@ fn collect_free_vars_core(expr: &CoreExpr, bound: &BTreeSet<String>, free: &mut 
             collect_free_vars_core(then, bound, free);
             collect_free_vars_core(els, bound, free);
         }
+        CoreExprKind::Expect { expr } => collect_free_vars_core(expr, bound, free),
         CoreExprKind::Tuple(elems) | CoreExprKind::List(elems) => {
             for e in elems {
                 collect_free_vars_core(e, bound, free);

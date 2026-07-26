@@ -225,7 +225,8 @@ fn declared_names(items: &[Item]) -> Vec<(String, bool)> {
             Item::Sum { variants, public, .. } => {
                 names.extend(variants.iter().map(|variant| (variant.name.clone(), *public)));
             }
-            Item::On { .. } | Item::Contract { .. } | Item::Use { .. } => {}
+            // A test binds no name: nothing calls it, the runner finds it.
+            Item::On { .. } | Item::Contract { .. } | Item::Use { .. } | Item::Test { .. } => {}
         }
     }
     names

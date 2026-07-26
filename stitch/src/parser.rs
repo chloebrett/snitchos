@@ -818,6 +818,7 @@ impl Parser {
                 "`ext` applies to functions, types, and constants — not `contract`/`on`",
             )),
             TokenKind::Contract => self.parse_contract(),
+            TokenKind::Test => self.parse_test(),
             TokenKind::On => self.parse_on(),
             other => Err(self.err(format!(
                 "expected a declaration, found {other:?}"
@@ -958,6 +959,33 @@ impl Parser {
             body,
             public,
         })
+    }
+
+    /// `test "name" (uses Cap, …)? { body }`.
+    ///
+    /// The name must be a *plain* string literal. Interpolation is rejected
+    /// rather than evaluated: a test name is read by a human out of a report, so
+    /// it has to be knowable without running the test that carries it.
+    fn parse_test(&mut self) -> Result<Item, ParseError> {
+        self.bump(); // 'test'
+        let name = self.expect_plain_str("a quoted test name after `test`")?;
+        let uses = self.parse_uses()?;
+        let body = self.parse_body()?;
+        Ok(Item::Test { name, uses, body })
+    }
+
+    /// A string literal with no interpolation, as its text.
+    fn expect_plain_str(&mut self, what: &str) -> Result<String, ParseError> {
+        let TokenKind::Str(parts) = self.peek().clone() else {
+            return Err(self.err(format!("expected {what}")));
+        };
+        let text = match parts.as_slice() {
+            [] => String::new(),
+            [StrPart::Lit(text)] => text.clone(),
+            _ => return Err(self.err(format!("expected {what}, without `{{…}}` interpolation"))),
+        };
+        self.bump();
+        Ok(text)
     }
 
     /// An optional `uses Cap1, Cap2, …` effects clause, after the return type
@@ -1464,6 +1492,14 @@ impl Parser {
             TokenKind::LBracket => self.parse_collection(start)?,
             TokenKind::LBrace => self.parse_block(start)?,
             TokenKind::Match => self.parse_match(start)?,
+            // `expect` takes the whole following expression (binding power 0),
+            // so `expect a == b` asserts the comparison rather than comparing
+            // an assertion. Juxtaposition still ends it: the next statement
+            // cannot continue the operand.
+            TokenKind::Expect => {
+                let expr = self.parse_expr(0)?;
+                self.spanned(start, ExprKind::Expect { expr: Box::new(expr) })
+            }
             TokenKind::Handle => self.parse_handle(start)?,
             TokenKind::Without => self.parse_without(start)?,
             TokenKind::Semicolon => return Err(ParseError::at(NO_SEMICOLONS, leading)),
@@ -1911,6 +1947,48 @@ mod tests {
     #[test]
     fn parses_tuple_pattern() {
         insta::assert_debug_snapshot!(p("match pair { (a, b) => a + b }"));
+    }
+
+    /// A test declaration names itself with a *string*, not an identifier: the
+    /// name is prose for a report, and no other declaration has that property.
+    #[test]
+    fn parses_a_test_declaration_named_by_a_string() {
+        let items = prog(r#"test "adds two numbers" { 1 + 1 }"#);
+        match items.as_slice() {
+            [Item::Test { name, uses, .. }] => {
+                assert_eq!(name, "adds two numbers");
+                assert!(uses.is_empty(), "a test declares no authority by default");
+            }
+            other => panic!("expected one test item, got {other:?}"),
+        }
+    }
+
+    /// The whole point of the form: a test's authority is granted explicitly,
+    /// and it reads as a specification of what the code under test needs.
+    #[test]
+    fn parses_a_test_with_a_uses_clause() {
+        let items = prog(r#"test "emits a span" uses Telemetry { 1 }"#);
+        match items.as_slice() {
+            [Item::Test { uses, .. }] => {
+                assert_eq!(uses.len(), 1, "expected one declared capability: {uses:?}");
+            }
+            other => panic!("expected one test item, got {other:?}"),
+        }
+    }
+
+    /// `expect` is a *form*, not a call: it keeps the operand structure so a
+    /// failure can render both sides. A function taking a `Bool` has already
+    /// lost that by the time it runs.
+    #[test]
+    fn parses_expect_as_a_form_over_the_whole_comparison() {
+        let expr = p("expect 1 == 2");
+        match &expr.kind {
+            ExprKind::Expect { expr } => match &expr.kind {
+                ExprKind::Binary { op: BinOp::Eq, .. } => {}
+                other => panic!("expect should keep the comparison, got {other:?}"),
+            },
+            other => panic!("expected an Expect form, got {other:?}"),
+        }
     }
 
     #[test]

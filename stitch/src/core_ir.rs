@@ -123,6 +123,12 @@ pub enum CoreExprKind {
         cap: String,
         body: Box<CoreExpr>,
     },
+    /// `expect <expr>` — survives lowering as its own node so the operands stay
+    /// reachable when it fails. Lowering it to an `if … else fault` would throw
+    /// away exactly the structure the failure report is made of.
+    Expect {
+        expr: Box<CoreExpr>,
+    },
 }
 
 /// A call argument in the core IR.
@@ -186,6 +192,15 @@ pub enum CoreItem {
         uses: Vec<String>,
         body: Rc<CoreExpr>,
         public: bool,
+    },
+    /// A test declaration. Carries a lowered body like `Func` because it is
+    /// type-checked and run like one — what differs is that nothing calls it by
+    /// name, and its `uses` is the authority the runner grants rather than
+    /// authority a caller already holds.
+    Test {
+        name: String,
+        uses: Vec<String>,
+        body: Rc<CoreExpr>,
     },
     Contract {
         name: String,

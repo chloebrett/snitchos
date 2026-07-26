@@ -33,6 +33,27 @@ fn round_trips_a_constant() {
     assert_round_trips("let answer = 42");
 }
 
+/// A `test` declaration is a shipped item like any other, so it owes the same
+/// round-trip. It is also the one item whose name is a string literal, which is
+/// the part a printer is most likely to get wrong (quotes, escapes, and a name
+/// that must not be re-lexed as an identifier).
+#[test]
+fn round_trips_a_test_declaration() {
+    assert_round_trips(r#"test "adds two numbers" { 1 + 1 }"#);
+    assert_round_trips(r#"test "quotes \"inside\" the name" { 1 }"#);
+    assert_round_trips(r#"test "emits a span" uses Telemetry { 1 }"#);
+}
+
+/// `expect` takes its operand at the loosest binding power, so the printer must
+/// not parenthesize a comparison the parser swallowed whole — and must not lose
+/// the parens where they *are* load-bearing.
+#[test]
+fn round_trips_expect() {
+    assert_round_trips(r#"test "compares" { expect 1 + 1 == 2 }"#);
+    assert_round_trips(r#"test "asserts a bool" { expect true }"#);
+    assert_round_trips(r#"test "two in a row" { expect 1 == 1  expect 2 == 2 }"#);
+}
+
 #[test]
 fn round_trips_literals() {
     assert_round_trips("let i = 42  let f = 3.5  let t = true  let f2 = false  let neg = -7");

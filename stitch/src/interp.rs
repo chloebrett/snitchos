@@ -15,6 +15,7 @@ use crate::env::{AssignError, Env};
 use crate::lower::{free_vars_core, lower_expr_to_core};
 use crate::natives::NATIVES;
 use crate::ops::{as_bool, eval_binary, eval_unary};
+use crate::render::render;
 use crate::parser::parse_program;
 use crate::pattern::eval_match;
 use crate::platform::Platform;
@@ -469,6 +470,35 @@ fn locate(error: RuntimeError, span: Span, env: &Env) -> RuntimeError {
     }
 }
 
+/// `expect <asserted>` — the assertion form.
+///
+/// A comparison is evaluated **operand-wise** rather than as a whole, so a
+/// failure can name both sides: `expected 2 == 3` says what a bare "assertion
+/// failed" cannot. Each operand is evaluated exactly once and the comparison is
+/// then applied to the resulting values, so an effectful operand is not run
+/// twice to produce the message.
+fn eval_expect(asserted: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
+    if let CoreExprKind::Binary { op, left, right } = &asserted.kind
+        && op.is_comparison()
+    {
+        let left = eval(left, env)?;
+        let right = eval(right, env)?;
+        if as_bool(&eval_binary(*op, &left, &right)?, "`expect`")? {
+            return Ok(Value::Unit);
+        }
+        return Err(RuntimeError::new(format!(
+            "expect failed: {} {} {}",
+            render(&left),
+            op.spelling(),
+            render(&right)
+        )));
+    }
+    if as_bool(&eval(asserted, env)?, "`expect`")? {
+        return Ok(Value::Unit);
+    }
+    Err(RuntimeError::new("expect failed"))
+}
+
 fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     if !env.take_fuel() {
         return Err(RuntimeError::new("evaluation fuel exhausted"));
@@ -534,6 +564,7 @@ fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
         CoreExprKind::Without { cap, body } => {
             eval(body, &env.without_authority(cap, expr.span))
         }
+        CoreExprKind::Expect { expr: asserted } => eval_expect(asserted, env),
         // `()` is unit; `(a, b, …)` is a tuple.
         CoreExprKind::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
         CoreExprKind::Tuple(elements) => {
@@ -1506,6 +1537,36 @@ mod tests {
         // `4 + (1 / 0)` — the fault originates in the inner `1 / 0` (bytes 5..10),
         // so the innermost span wins, not the outer `+`.
         assert_eq!(fault("4 + (1 / 0)").span(), Some(Span { start: 5, end: 10 }));
+    }
+
+    /// A satisfied assertion is not a value anyone reads — it evaluates to unit,
+    /// so a block of them has the type of its last statement and nothing else.
+    #[test]
+    fn a_satisfied_expect_evaluates_to_unit() {
+        assert_eq!(run("expect 1 == 1"), Value::Unit);
+    }
+
+    /// The reason `expect` is a form: the failure names *both* operands. A
+    /// native taking a `Bool` could only ever say "expected true, got false".
+    #[test]
+    fn a_failed_expect_renders_both_sides_of_the_comparison() {
+        let message = run_err("expect 1 + 1 == 3");
+        assert!(message.contains('2'), "the left operand's value is missing: {message}");
+        assert!(message.contains('3'), "the right operand's value is missing: {message}");
+    }
+
+    /// A failure has to say *where*, and the span is the whole `expect` form —
+    /// that is the line a reader goes to.
+    #[test]
+    fn a_failed_expect_carries_the_span_of_the_whole_form() {
+        use crate::lexer::Span;
+        assert_eq!(fault("expect 1 == 2").span(), Some(Span { start: 0, end: 13 }));
+    }
+
+    /// Non-comparison assertions still work; there is simply one value to show.
+    #[test]
+    fn a_failed_expect_on_a_bare_bool_reports_without_operands() {
+        assert!(run_err("expect false").contains("expect"));
     }
 
     #[test]

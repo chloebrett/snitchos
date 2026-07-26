@@ -122,6 +122,17 @@ fn print_item(item: &Item, depth: usize) -> String {
             print_uses(uses),
             print_body(body, depth)
         ),
+        // `test "name" uses … = body`. The name goes through `escape` for the
+        // same reason any string literal does — a quote or newline in a test
+        // name must survive the round trip, and test names are prose, so they
+        // are the likeliest place for one.
+        Item::Test { name, uses, body } => format!(
+            "{}test \"{}\"{} = {}",
+            indent(depth),
+            escape(name),
+            print_uses(uses),
+            print_body(body, depth)
+        ),
         Item::Contract { name, generics, methods } => format!(
             "{}contract {name}{} {}",
             indent(depth),
@@ -301,7 +312,7 @@ fn right_open(kind: &ExprKind) -> bool {
 /// prefix range leads with `..`, which is likewise not an operand start.
 fn opens_an_operand(kind: &ExprKind) -> bool {
     match kind {
-        ExprKind::Handle { .. } | ExprKind::Without { .. } => false,
+        ExprKind::Handle { .. } | ExprKind::Without { .. } | ExprKind::Expect { .. } => false,
         ExprKind::Range { start, .. } => start.is_some(),
         ExprKind::Binary { left, .. } => opens_an_operand(&left.kind),
         ExprKind::Call { callee: inner, .. }
@@ -518,6 +529,10 @@ fn print_bare(kind: &ExprKind, depth: usize, min_bp: u8) -> String {
         ExprKind::Without { cap, body } => {
             format!("without {cap} {}", print_at(body, LOOSEST_BP, depth))
         }
+        // The operand prints at the loosest binding power because `expect` took
+        // it at binding power 0 — printing it any tighter would parenthesize a
+        // comparison the parser was happy to swallow whole.
+        ExprKind::Expect { expr } => format!("expect {}", print_at(expr, LOOSEST_BP, depth)),
         ExprKind::Match { subject, arms } => {
             let mut out = format!("match {} {{\n", print_at(subject, POSTFIX_BP, depth));
             for arm in arms {
@@ -831,23 +846,5 @@ fn escape(text: &str) -> String {
 }
 
 fn binop_text(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "+",
-        BinOp::Sub => "-",
-        BinOp::Mul => "*",
-        BinOp::Div => "/",
-        BinOp::Rem => "%",
-        BinOp::Eq => "==",
-        BinOp::Ne => "!=",
-        BinOp::Lt => "<",
-        BinOp::Le => "<=",
-        BinOp::Gt => ">",
-        BinOp::Ge => ">=",
-        BinOp::And => "and",
-        BinOp::Or => "or",
-        BinOp::Pipe => "|>",
-        BinOp::CrossPipe => "~>",
-        BinOp::Range => "..",
-        BinOp::RangeIncl => "..=",
-    }
+    op.spelling()
 }
