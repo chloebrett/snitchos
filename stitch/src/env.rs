@@ -430,7 +430,13 @@ impl Env {
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
             frames: Rc::clone(&self.frames),
-            self_closure: None,
+            // Preserve, don't reset: a `let` or a match-arm pattern binding is
+            // a lexically nested scope *within* the same call, not a new call
+            // boundary — resetting this here broke self-tail-call detection
+            // for any tail call preceded by a binding (a `let`, or a match arm
+            // that binds rather than uses `_`), which is most of them. See
+            // plans/stitch-examples-findings.md.
+            self_closure: self.self_closure.clone(),
             source: self.source,
             handlers: Rc::clone(&self.handlers),
             withheld: Rc::clone(&self.withheld),

@@ -2519,6 +2519,30 @@ mod tests {
     }
 
     #[test]
+    fn self_tail_recursive_function_survives_a_let_binding_before_the_call() {
+        // Regression: `Env::bind` (backing `extend`/`extend_mut`, so both a
+        // `let` and a match-arm pattern binding) used to hardcode
+        // `self_closure: None`, resetting the self-tail-call marker on every
+        // local binding — not just at real call boundaries. A tail call
+        // preceded by *any* binding (the overwhelmingly common shape: a
+        // named match arm rather than `_`, or a `let` that names an
+        // intermediate result) silently fell back to real Rust recursion and
+        // blew `MAX_CALL_DEPTH` on anything but a tiny input. Caught writing
+        // examples/stitch/vm.st's `step` function. See
+        // plans/stitch-examples-findings.md.
+        let items = crate::parser::parse_program(
+            "classify(n) = n - 1  \
+             step(n, acc) = { let m = classify(n)  match m { 0 => acc  m2 => step(m2, acc + 1) } }  \
+             main() = step(1000000, 0)",
+        )
+        .expect("program parses");
+        assert_eq!(
+            super::eval_program(&items).expect("no error"),
+            crate::value::Value::Int(999999)
+        );
+    }
+
+    #[test]
     fn supports_mutual_recursion() {
         // isOdd(3) = true distinguishes the trampoline from a "return true"
         // constant (and kills the is_self_closure→true mutant: odd calls get
