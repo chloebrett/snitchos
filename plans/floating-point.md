@@ -184,15 +184,44 @@ observable behaviour until the kernel enables FP:
    which is correct but will block real programs. Also, "reading an improperly boxed
    value yields canonical NaN" is an *arithmetic* rule — it lands with step 3, not
    here; step 2 only establishes the box on load.
-3. **OP-FP**: arithmetic, `fsqrt`, min/max, sign injection, compares, converts,
-   moves, `fclass`. Mostly systematic width-variants over Rust `f32`/`f64`; even
-   float→int saturation agrees (Rust's `as` has saturated since 1.45). Two
-   deliberate divergences from host hardware to get right: **canonical NaN** (RISC-V
-   generates one rather than propagating the operand payload) and the rounding-mode
-   rule — accept `rm = RNE` and `rm = DYN` while `fcsr.frm == 0` (all a Rust
-   compiler emits), and **host-panic on any other mode**, naming mode + PC +
-   instruction. A wrong rounding mode yields a plausible number that diverges far
-   downstream, so that gap must shout.
+3. **OP-FP** — **DONE.** Arithmetic (`fadd`/`fsub`/`fmul`/`fdiv`/`fsqrt`), sign
+   injection, min/max, compares, `fclass`, `fmv` both directions, `fcvt` int↔float
+   and between float widths — both precisions throughout. The semantics that differ
+   from the host live in the pure, directly-tested `snemu/src/fp.rs`; `cpu.rs` only
+   decodes and dispatches. Ordinary arithmetic is left to Rust's `f32`/`f64` — the
+   reference is IEEE-754 and so is the host, so there is nothing to model.
+
+   **The design doc's rounding-mode rule was wrong, and this is the correction.**
+   The doc claimed `RNE` + `DYN`-while-`frm==0` "covers everything a Rust compiler
+   emits". Measured with `rustc --target riscv64gc-unknown-none-elf --emit asm`:
+   every float→int cast emits `fcvt.w.d a0, fa0, rtz`, because Rust's cast semantics
+   are truncation. An RNE-only rule would have halted snemu at the first `as i32` in
+   real guest code. So the gate is split by *who does the rounding*:
+   `fp::arithmetic_rounding` (host FPU → nearest-even only, everything else refused
+   loudly) and `fp::conversion_rounding` (snemu rounds it itself → `RNE` **and**
+   `RTZ`). The refusal still names the *effective* mode, resolved through `frm`.
+
+   Other divergences from the host, each with its own test:
+   - **Canonical NaN** on any generated NaN — but *not* on `fsgnj`/`fmv`, which are
+     bit moves and must preserve a payload.
+   - **`funct3` is an op selector, not a rounding mode**, for sign injection,
+     min/max, compares and `fclass`. Checking rounding for all of OP-FP refuses
+     `fsgnjn` (selector 1 = `RTZ`) and so breaks `-x` — the failure mode is a halt on
+     working code.
+   - **`fmin`/`fmax`**: a lone NaN operand is *skipped* (not propagated), both NaN
+     gives canonical NaN, and `−0.0 < +0.0` even though they compare equal — so
+     `if a < b { a } else { b }` is wrong half the time on signed zero.
+   - **NaN → maximum positive integer** on float→int, where Rust's `as` gives 0.
+     LLVM emits an explicit `feq.d fa0, fa0` guard around every cast precisely to
+     paper over this, which is the strongest available evidence for the hardware's
+     behaviour.
+   - **RV64 sign-extends every 32-bit FP→int result, `.wu` included**, so
+     `fcvt.wu.d` of `u32::MAX` reads back as `-1`. `i64::from(u32)` zero-extends and
+     was the one bug the tests caught in this slice.
+
+   Small follow-up: `StepError::UnsupportedRoundingMode` reports the mode
+   numerically (it reaches the user via `Debug`). The doc asked for it to be *named*;
+   that needs a `Display` impl for `StepError`.
 4. **FMA** (`fmadd`/`fmsub`/`fnmsub`/`fnmadd`), which need a fused multiply-add —
    `f64::mul_add`, not `a * b + c`, or the intermediate rounds twice.
 5. **`sstatus.FS` Clean/Dirty transitions**, once the kernel has something that
