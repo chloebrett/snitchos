@@ -945,7 +945,7 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
 /// span appearing on the *server's* task id: the trace crossing the process
 /// boundary is what proves the round trip happened, rather than the REPL
 /// quietly falling back to its grammar-only menu.
-#[allow(dead_code, reason = "registered once the target-only wedge is root-caused")]
+#[allow(dead_code, reason = "blocked on userspace FP — see plans/repl-completion.md")]
 pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
     // The boot self-test confirms the REPL is up and polling the console, so
     // injected keystrokes aren't dropped.

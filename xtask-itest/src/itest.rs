@@ -203,10 +203,11 @@ catalog! {
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"cooperative"};
     cpu "glitch-beep-plays"               scenarios::glitch_beep_plays              [audio]         {"glitch-beep"};
     cpu "kvetch-babble-serves"            scenarios::kvetch_babble_serves           [kvetch]        {"kvetch-babble"};
-    // `stitch-kvetch-completes` is written but NOT registered: Tab at the REPL
-    // wedges the guest inside `stitch::complete` — target-only, host-green. See
-    // plans/repl-completion.md for the bisect. The workload and the scenario
-    // body are kept so the fix has a ready gate.
+    // `stitch-kvetch-completes` is written but NOT registered: it is blocked on
+    // userspace floating point, not on anything about completion. The oracle
+    // probes the `Float` class, and an `f64` on the metal is an illegal
+    // instruction because the kernel never enables `sstatus.FS`. See
+    // plans/repl-completion.md — register this once FP lands.
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};
