@@ -19,7 +19,21 @@ every program in that domain.
 `Maybe` · `|>` · `use <-` · placeholders · recursion · `List`/`Map` ops.
 `test` blocks are always required, so they are not a construct axis.
 
-**Sizes**: small (~40–70 lines) · medium (~80–150) · large (~150–250).
+**Sizes — counted in declarations, not lines.** A model cannot count lines and
+wrecks a working program trying to
+([corpus-mvp-spike.md](corpus-mvp-spike.md) Findings 004). Types and functions it
+*can* count, at trivial cost, and the ranges are wide and overlapping so they
+signal scale without becoming a target to trim toward:
+
+| Bucket | Types | Functions |
+|---|---|---|
+| small | 1–4 | 2–6 |
+| medium | 2–6 | 4–10 |
+| large | 3–10 | 8–20 |
+
+Always state that **tests are extra and do not count**, and that the range is a
+guide rather than a limit. Actual line counts are a harness metric, measured
+after the fact — never a constraint the model has to satisfy.
 
 **Shapes**: module (`ext` items, no `main`) · script (has `main`) · server loop
 (receive → dispatch) · library-with-heavy-tests.
@@ -43,9 +57,45 @@ per generation. Writing the remaining clauses for any domains added later is als
 a good English-only smoke test for the local model, exercising prompt, runner,
 cache and extraction before Stitch validity is in play.
 
-**Must-use words are domain jargon on purpose.** `krausen`, `seki`, `dunnage`
-force the model somewhere it would not otherwise go; `slot`, `share`, `sync` fit
-anywhere, differentiate nothing, and recur across domains.
+## ~~Must-use words~~ — axis REMOVED
+
+**The must-use-identifiers axis is dead.** It was borrowed from TinyStories §2.1,
+where three random words are injected per prompt to force lexical variety. Five
+candidates of evidence say the mechanism **does not port from prose to code**
+([corpus-mvp-spike.md](corpus-mvp-spike.md) Findings 002, 003, 005):
+
+| | Outcome |
+|---|---|
+| 002 | `loyly` deadlocked a 4B for 2.5 minutes — no program at all |
+| 003 | `cooldown` became a permanently-zero field; the others reached comments only |
+| 005 | the words displaced the meaningful function names — `overlaps` → `birch` |
+
+Every candidate also spent a large share of its reasoning budget deciding where to
+put them.
+
+**Why it cannot work.** Prose absorbs an arbitrary noun at no cost — a story can
+be about a *lantern* whether or not lanterns were the point. **Code identifiers
+carry semantics: a name that does not describe its referent is a defect, not a
+variation.** Forcing three unrelated words into a 50-line module produces dead
+bindings, meaningless field names, or — worst — good functions with names that
+lie about them. Training a corpus on that teaches the model to name things
+badly.
+
+**Lexical diversity has to come from the axes that change what the program
+does** — domain, constructs, shape. Those move the identifiers as a *consequence*
+of moving the program, which is the only way identifier variety is also
+identifier quality.
+
+Two findings worth keeping from the experiment, in case a future variant is
+attempted: rare words with a **high-frequency near-neighbour** (`loyly` →
+`loyalty`) are deadlock traps, because the token prior pulls to the neighbour and
+self-correction loops; and a **hard** constraint a small model cannot satisfy
+deadlocks where a soft one degrades — but neither phrasing rescued the axis.
+
+The word lists are retained in the 100 entries below as a record of the
+experiment. **They are not part of a recipe** and should not be rendered into a
+prompt; see [prompt v4](corpus-prompts/v4.md), which replaces
+that line with "Name things for what they do."
 
 ---
 
@@ -212,7 +262,7 @@ more per domain, these are a review artifact and a starting seed.
 68. **orienteering control points** — validate a punched course in order
     `{prod, recursion, Result+?}` · medium · library-with-heavy-tests · *punch, leg, bearing*
 69. **sauna booking** — exclusive occupancy, so overlapping intervals must be detected
-    `{prod, Maybe, |>}` · small · module · *cedar, loyly, cooldown*
+    `{prod, Maybe, |>}` · small · module · *cedar, birch, cooldown*
 70. **hiking trail register** — sign-in/sign-out pairing to find overdue parties
     `{prod, sum, Maybe}` · medium · module · *bothy, overdue, party*
 

@@ -46,8 +46,15 @@ another is not, the size comparison is confounded.
 
 Configuration, all easy to get wrong and expensive:
 
-- **Thinking mode off.** Thinking tokens are discarded here and can triple
-  time-per-candidate.
+- **Thinking mode off — and verify it actually is.** Thinking tokens are
+  discarded here and the cost is unbounded, not merely tripled (Findings 002 spent
+  2.5 minutes thinking and never emitted a program). If the UI has no switch, in
+  rough order of reliability: set `chat_template_kwargs: {"enable_thinking":
+  false}` if the runtime exposes it; append `/no_think` to the system message
+  (the Qwen3 convention); or **prefill the assistant turn with an empty
+  `<think></think>` block**, which forces it closed in any runtime that allows an
+  assistant prefix. Confirm by checking that the response contains no reasoning
+  preamble — do not assume a toggle worked.
 - **Sampling: temp ≈ 0.7, top_p ≈ 0.8, top_k ≈ 20** (Qwen3's non-thinking
   recommendations), plus **repetition penalty ≈ 1.05–1.1**. Near-greedy decoding
   is the classic route into a repetition collapse — see Findings 001.
@@ -100,730 +107,18 @@ Rendered for recipe **#69 sauna booking** — chosen as the first paste because
 possible first test. Swap the final section to run any other recipe; everything
 above it is invariant and belongs in the cached prefix.
 
-**System:**
-
-````
-You write Stitch, a small statically-typed functional language. You have not
-seen Stitch before — learn it from the reference and examples that follow.
-
-Rules that are easy to get wrong:
-- There are no loop keywords. Use recursion or List/Seq combinators.
-- There is no if/else. Conditionals are `cond => a | b`, or a `match { }` block.
-- Exported items are prefixed `ext`; everything else is module-private.
-- `->` always means "maps to", `=>` always "case/condition", `|` always
-  "alternation".
-- Comments explain *why*, never *what*.
-- Include `test "…" { expect … }` items covering the core logic.
-
-Reply with exactly one fenced ```stitch block and nothing else.
-````
-
-**User:**
-
-````
-# Stitch reference
-
-// Modules & visibility
-use List                                 // import a module
-use text.{pad, wrap}                     // import named items
-ext foo(...)                             // exported; without `ext`, module-private
-
-// Data — fields are immutable unless marked `mut`
-prod Point(x: Int, y: Int)
-prod Counter(mut n: Int)
-sum Shape = Circle(Int) | Square(Int)
-sum Maybe<T>     = Some(T) | None        // built in
-sum Result<T, E> = Ok(T)   | Err(E)      // built in
-
-// Construction uses named fields
-Point(x: 1, y: 2)
-
-// Functions — expression body or block body
-ext double(n: Int) -> Int = n * 2
-ext describe(n: Int) -> Str = {
-    let d = double(n)
-    d > 10 => "big" | "small"
-}
-
-// Conditionals
-cond => thenValue | elseValue
-match {
-    n == 0 => "zero"
-    n > 0  => "positive"
-    _      => "negative"
-}
-
-// Methods attach with `on`; `@` is the receiver, `@x` is field x
-on Counter {
-    bumped() -> Counter = Counter(n: @n + 1)
-}
-on Counter : Drawable {                  // `: Contract` declares conformance
-    draw() uses Canvas = renderBar(@n)
-}
-
-// Capabilities are declared on the signature
-report(xs: List<Int>) uses Telemetry = ...
-
-// Short-circuit family
-value?                                   // unwrap a Result/Maybe or return early
-user?.address                            // safe navigation
-
-// Pipes, lambdas, placeholders
-xs |> map(x -> x * 2) |> fold(0, (a, b) -> a + b)
-xs |> map($.name)                        // `$a`/`$b` are positional placeholders
-
-// Tests are ordinary items
-test "double doubles" { expect double(2) == 4 }
-
-# Example programs
-
-==== BANK.ST ====
-
-
-use Str
-
-// --- accounts ---
-
-contract Show {
-    show() -> Str
-}
-
-prod Account(id: Str, owner: Str, mut balance: Int)
-
-on Account {
-    // Returns the updated `Account` — not because callers usually need it
-    // (the write-back to `@` already updates whatever variable this was
-    // called on; see `Ledger.deposit` below, which never touches the return
-    // value), but because `Ledger`'s own methods *do* need it, to carry the
-    // update from a local `let mut acc = …` binding into `@accounts`.
-    mut deposit(amount: Int) -> Result<Account, Str> uses Telemetry {
-        amount <= 0
-            => Err("deposit amount must be positive")
-            | {
-                @balance = @balance + amount
-                emit("account.deposit", amount)
-                Ok(@)
-            }
-    }
-
-    mut withdraw(amount: Int) -> Result<Account, Str> uses Telemetry {
-        amount <= 0
-            => Err("withdrawal amount must be positive")
-            | (amount > @balance
-                => Err("insufficient funds")
-                | {
-                    @balance = @balance - amount
-                    emit("account.withdraw", amount)
-                    Ok(@)
-                })
-    }
-}
-
-on Account : Show {
-    show() -> Str = @owner + " (" + @id + "): $" + toStr(@balance)
-}
-
-// --- the ledger ---
-
-sum TxKind = Deposit | Withdraw | TransferOut(Str) | TransferIn(Str)
-
-prod Transaction(account: Str, kind: TxKind, amount: Int)
-
-prod Ledger(mut accounts: List<Account>, mut history: List<Transaction>)
-
-newLedger() -> Ledger = Ledger([], [])
-
-on Ledger {
-    mut openAccount(id: Str, owner: Str, opening: Int) -> Account = {
-        let acc = Account(id, owner, opening)
-        @accounts = concat(@accounts, [acc])
-        acc
-    }
-
-    findAccount(id: Str) -> Maybe<Account> = find(@accounts, a -> a.id == id)
-
-    mut record(tx: Transaction) { @history = concat(@history, [tx]) }
-
-    // Depositing/withdrawing at the ledger level: find the account (a fresh
-    // local binding, so `mut`-method write-back has somewhere to land),
-    // mutate *that* binding, then fold the change back into the list. The
-    // ledger-level `Result` never needs `acc.deposit(...)`'s own return
-    // value — the write-back already updated `acc` in place.
-    mut deposit(id: Str, amount: Int) -> Result<(), Str> uses Telemetry {
-        let mut acc = (@findAccount(id) |> okOr("no such account: " + id))?
-        acc.deposit(amount)?
-        @accounts = replaceAccount(@accounts, acc)
-        Ok(())
-    }
-
-    mut withdraw(id: Str, amount: Int) -> Result<(), Str> uses Telemetry {
-        let mut acc = (@findAccount(id) |> okOr("no such account: " + id))?
-        acc.withdraw(amount)?
-        @accounts = replaceAccount(@accounts, acc)
-        Ok(())
-    }
-
-    // Both accounts are checked to exist *before* anything moves — if the
-    // recipient doesn't exist, the sender is never debited. (An earlier
-    // draft withdrew first and deposited second; a missing recipient made
-    // the withdrawn amount vanish, since nothing here can roll a mutation
-    // back once it's landed. There is no transaction/rollback primitive in
-    // the language, so a multi-step mutation has to be made safe by
-    // ordering and up-front validation, by hand, every time.)
-    mut transfer(fromId: Str, toId: Str, amount: Int) -> Result<(), Str> uses Telemetry {
-        // `let _ = …` rather than two bare statements: a statement that
-        // starts with `(` right after a preceding expression-statement
-        // fuses with it into a call (`stmt1  (stmt2)` parses as
-        // `stmt1(stmt2)` — maximal munch, see the findings doc). `let`
-        // starting the line rules that out.
-        let _ = (@findAccount(fromId) |> okOr("no such account: " + fromId))?
-        let _ = (@findAccount(toId) |> okOr("no such account: " + toId))?
-        @withdraw(fromId, amount)?
-        @deposit(toId, amount)?
-        @record(Transaction(fromId, TransferOut(toId), amount))
-        @record(Transaction(toId, TransferIn(fromId), amount))
-        emit("ledger.transfer", amount)
-        Ok(())
-    }
-
-    // Note: no `uses Telemetry` here, only `FsWrite` — `@transfer` carries
-    // its *own* `uses Telemetry` clause and gets that authority independent
-    // of what this method declares (a named call's authority is exactly its
-    // own `uses` row, never inherited from or filtered by the caller — see
-    // `stitch/src/natives.rs`'s `shout()/main()` test for the same rule from
-    // the refusal side). `auditLine` below needs `FsWrite` the same way.
-    mut transferAudited(fromId: Str, toId: Str, amount: Int, auditHandle: Int) -> Result<(), Str> uses FsWrite {
-        @transfer(fromId, toId, amount)?
-        auditLine(auditHandle, fromId + "->" + toId + ":" + toStr(amount))
-        Ok(())
-    }
-}
-
-// The list-level half of "value semantics forces an explicit write-back":
-// replace the account sharing `updated`'s id, leave every other element
-// untouched.
-replaceAccount(accounts: List<Account>, updated: Account) -> List<Account> =
-    map(accounts, a -> a.id == updated.id => updated | a)
-
-// The `Maybe -> Result` lift `?` needs and the prelude doesn't provide
-// (only `Maybe`'s own `None`/`Some` short-circuit via the `Try` contract —
-// this is what turns "absent" into a *named* failure).
-okOr(m, err) = match m { Some(v) => Ok(v)  None => Err(err) }
-
-report(ledger: Ledger) -> Str =
-    ledger.accounts |> map(a -> a.show()) |> Str.join("\n")
-
-totalBalance(ledger: Ledger) -> Int =
-    ledger.accounts |> map(a -> a.balance) |> total
-
-// Explicit-capability audit logging: `Ledger`'s own methods never declare
-// `FsWrite` for their core bookkeeping (see `deposit`/`withdraw`/`transfer`
-// above), so only a caller that reaches for `transferAudited` — and holds a
-// file handle to hand it — pays for, and grants, that authority. The
-// parameter isn't named `handle` — that's a reserved word (`handle op with
-// f { … }`, the effect-handler form; see plans/stitch-examples-findings.md).
-// `fileHandle` is a capability the caller must already hold (see
-// `natives.rs::native_fs_write`); there is no "open this path for writing"
-// native, only writing through an already-delegated handle, so a caller
-// can't name an arbitrary file, only use one it was given.
-auditLine(fileHandle: Int, entry: Str) -> Bool uses FsWrite = fsWrite(fileHandle, entry)
-
-// --- tests ---
-
-test "openAccount adds a findable account with the opening balance" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 100))
-    expect ledger.findAccount("missing") == None
-}
-
-test "two accounts built the same way are structurally equal" {
-    expect Account("a1", "Alice", 100) == Account("a1", "Alice", 100)
-    expect Account("a1", "Alice", 100) != Account("a1", "Alice", 101)
-}
-
-test "deposit increases the balance and is visible through findAccount" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    ledger.deposit("a1", 50)
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 150))
-}
-
-test "deposit rejects a non-positive amount and leaves the balance alone" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    expect ledger.deposit("a1", 0) == Err("deposit amount must be positive")
-    expect ledger.deposit("a1", 0 - 5) == Err("deposit amount must be positive")
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 100))
-}
-
-test "deposit to a missing account is an error naming the id" {
-    let mut ledger = newLedger()
-    expect ledger.deposit("ghost", 10) == Err("no such account: ghost")
-}
-
-test "withdraw decreases the balance when funds are sufficient" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    ledger.withdraw("a1", 30)
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 70))
-}
-
-test "withdraw refuses insufficient funds and leaves the balance alone" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    expect ledger.withdraw("a1", 101) == Err("insufficient funds")
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 100))
-}
-
-test "withdraw rejects a non-positive amount" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    expect ledger.withdraw("a1", 0) == Err("withdrawal amount must be positive")
-}
-
-test "a mut method call writes back into its own local binding without needing the return value" {
-    // The point: `acc.deposit(50)` is called for its write-back effect on
-    // `acc`, and `Ledger.deposit` above never captures the `Ok(Account)` it
-    // returns — this test proves that write-back actually happened, using
-    // the same shape directly rather than through the ledger.
-    let mut acc = Account("a1", "Alice", 100)
-    acc.deposit(50)
-    expect acc == Account("a1", "Alice", 150)
-}
-
-test "transfer moves the balance and records both sides of the history" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    ledger.openAccount("a2", "Bob", 10)
-    ledger.transfer("a1", "a2", 40)
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 60))
-    expect ledger.findAccount("a2") == Some(Account("a2", "Bob", 50))
-    expect ledger.history == [
-        Transaction("a1", TransferOut("a2"), 40),
-        Transaction("a2", TransferIn("a1"), 40),
-    ]
-}
-
-test "transfer with insufficient funds changes neither account" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 10)
-    ledger.openAccount("a2", "Bob", 10)
-    expect ledger.transfer("a1", "a2", 999) == Err("insufficient funds")
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 10))
-    expect ledger.findAccount("a2") == Some(Account("a2", "Bob", 10))
-}
-
-test "transfer to a missing recipient never debits the sender" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    expect ledger.transfer("a1", "ghost", 40) == Err("no such account: ghost")
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 100))
-    expect ledger.history == []
-}
-
-test "show renders owner, id, and balance" {
-    expect Account("a1", "Alice", 150).show() == "Alice (a1): $150"
-}
-
-test "report joins every account's show line" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    ledger.openAccount("a2", "Bob", 10)
-    expect report(ledger) == "Alice (a1): $100\nBob (a2): $10"
-}
-
-test "totalBalance sums every account" {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    ledger.openAccount("a2", "Bob", 10)
-    ledger.openAccount("a3", "Cy", 0)
-    expect totalBalance(ledger) == 110
-}
-
-test "transferAudited moves the balance and attempts the audit write" uses FsWrite {
-    let mut ledger = newLedger()
-    ledger.openAccount("a1", "Alice", 100)
-    ledger.openAccount("a2", "Bob", 10)
-    // The default interpreter platform has no filesystem (`NullPlatform`,
-    // see `stitch/src/platform.rs`), so `fsWrite` — and so `auditLine` —
-    // returns `false` here: "no filesystem" is a normal outcome, not a
-    // fault, and this test is really about the capability wiring compiling
-    // and running at all, not about bytes landing anywhere.
-    expect ledger.transferAudited("a1", "a2", 40, 1) == Ok(())
-    expect ledger.findAccount("a1") == Some(Account("a1", "Alice", 60))
-    expect auditLine(1, "standalone entry") == false
-}
-
-==== JSON.ST ====
-
-use Str
-
-// --- the AST ---
-
-sum Json =
-    | JNull
-    | JBool(Bool)
-    | JNum(Int)
-    | JStr(Str)
-    | JArr(List<Json>)
-    | JObj(List<(Str, Json)>)
-
-// Look up a key in a parsed object. `None` for a missing key *or* for a
-// non-object — the caller asked "what's under this key", and a scalar has no
-// keys, so the two failure shapes are the same answer.
-jsonGet(j: Json, key: Str) -> Maybe<Json> =
-    match j {
-        JObj(fields) => find(fields, pair -> at(pair, 0) == key) |> mapMaybe(pair -> at(pair, 1))
-        _ => None
-    }
-
-// Tuple field access by position — there is no `.0`/`.1` on a tuple (the only
-// projection is pattern-matching one apart), so this is the reusable version
-// of `match t { (a, b) => a }`.
-at(pair: (Str, Json), i: Int) -> Json = match pair { (a, b) => i == 0 => a | b }
-
-// --- parsing ---
-//
-// Every step takes the source and a byte-index cursor and returns
-// `Result<(T, Int), Str>` — the parsed value plus the index just past it, or
-// an error message. Threading the cursor by hand (rather than through a
-// mutable position) is what "immutable by default" costs a hand-written
-// parser, and it is a fully ordinary cost: each step is still a pure
-// function of `(src, pos)`.
-
-// Parse a whole document: skip leading whitespace, parse one value, then
-// demand nothing but trailing whitespace after it. A JSON document is
-// exactly one value — `parse("1 2")` is an error, not "1".
-parse(src: Str) -> Result<Json, Str> = {
-    let start = skipWs(src, 0)
-    match parseValue(src, start) {
-        Err(e) => Err(e)
-        Ok(pair) => {
-            let value = at2(pair, 0)
-            let rest = skipWs(src, at2(pair, 1))
-            rest == Str.length(src) => Ok(value) | Err("trailing input after the document")
-        }
-    }
-}
-
-// Positional access into a `(Int, Int)`/`(Json, Int)`-shaped result pair.
-// Named distinctly from `at` above only because the element type differs and
-// Stitch has no generics-over-tuples to unify them.
-at2(pair, i: Int) = match pair { (a, b) => i == 0 => a | b }
-
-parseValue(src: Str, pos: Int) -> Result<(Json, Int), Str> =
-    pos >= Str.length(src) => Err("unexpected end of input")
-    | {
-        let c = Str.slice(src, pos, pos + 1)
-        match c {
-            "n" => parseLiteral(src, pos, "null", JNull)
-            "t" => parseLiteral(src, pos, "true", JBool(true))
-            "f" => parseLiteral(src, pos, "false", JBool(false))
-            "\"" => mapOkPair(parseStr(src, pos), s -> JStr(s))
-            "[" => parseArr(src, pos)
-            "{{" => parseObj(src, pos)
-            _ => (c == "-" or isDigit(c)) => parseNum(src, pos) | Err("unexpected character '" + c + "'")
-        }
-    }
-
-// `Result` has no `map` yet (only `Maybe` does, via the `Functor` contract) —
-// this is that missing half, written by hand where a parser step needs it. A
-// parse step always carries its cursor alongside the value, so this maps `f`
-// over just the value half of an `Ok((value, pos))`.
-mapOkPair(r, f) = match r { Ok(pair) => Ok((f(at2(pair, 0)), at2(pair, 1)))  Err(e) => Err(e) }
-
-// `word` (e.g. `"null"`) starting at `pos`; succeeds with `value` if the
-// source matches exactly, so `nulla` does not parse as `null` followed by an
-// identifier — there is no identifier concept here, but `truee` should still
-// be rejected as malformed rather than "true" plus garbage silently accepted
-// by the outer `parse` trailing check. (It still is: `parse` rejects any
-// trailing non-whitespace either way. This check only makes the local error
-// message point at the right place.)
-parseLiteral(src: Str, pos: Int, word: Str, value: Json) -> Result<(Json, Int), Str> = {
-    let end = pos + Str.length(word)
-    end <= Str.length(src) and Str.slice(src, pos, end) == word
-        => Ok((value, end))
-        | Err("expected '" + word + "'")
-}
-
-isDigit(c: Str) -> Bool =
-    c == "0" or c == "1" or c == "2" or c == "3" or c == "4"
-    or c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
-
-// Digit-scanning (`isDigit`/`scanDigits`) still has to be hand-rolled — it's
-// how a "where does the number end" boundary gets found in a string with no
-// tokenizer of its own — but turning the scanned slice into an `Int` doesn't:
-// `Str.parseInt` (see plans/stitch-examples-findings.md) takes the whole
-// slice, sign included, so there's no separate negative-number branch here
-// either.
-parseNum(src: Str, pos: Int) -> Result<(Json, Int), Str> = {
-    let negative = Str.slice(src, pos, pos + 1) == "-"
-    let digitsStart = negative => pos + 1 | pos
-    digitsStart >= Str.length(src) or not isDigit(Str.slice(src, digitsStart, digitsStart + 1))
-        => Err("expected a digit")
-        | {
-            let end = scanDigits(src, digitsStart)
-            end < Str.length(src) and Str.slice(src, end, end + 1) == "."
-                => Err("floating-point numbers are not supported (see the file header)")
-                | match Str.parseInt(Str.slice(src, pos, end)) {
-                    Some(n) => Ok((JNum(n), end))
-                    None => Err("malformed number")
-                }
-        }
-}
-
-// The index just past the last consecutive digit starting at `pos`.
-scanDigits(src: Str, pos: Int) -> Int =
-    pos >= Str.length(src) or not isDigit(Str.slice(src, pos, pos + 1))
-        => pos
-        | scanDigits(src, pos + 1)
-
-// A quoted string, `pos` pointing at the opening `"`. Supports the escapes
-// that show up in real JSON text: `\"`, `\\`, `\/`, `\n`, `\t`, `\r`. No
-// `\uXXXX` — that needs turning four hex digits into a character, and this
-// interpreter has no code-point-to-`Str` native either (only the reverse
-// direction is missing for `digitValue` above; this is its string-building
-// cousin).
-parseStr(src: Str, pos: Int) -> Result<(Str, Int), Str> =
-    Str.slice(src, pos, pos + 1) != "\""
-        => Err("expected '\"'")
-        | scanStr(src, pos + 1, "")
-
-scanStr(src: Str, i: Int, acc: Str) -> Result<(Str, Int), Str> =
-    i >= Str.length(src)
-        => Err("unterminated string")
-        | {
-            let c = Str.slice(src, i, i + 1)
-            match c {
-                "\"" => Ok((acc, i + 1))
-                "\\" => {
-                    i + 1 >= Str.length(src)
-                        => Err("unterminated escape")
-                        | {
-                            let escaped = Str.slice(src, i + 1, i + 2)
-                            match unescape(escaped) {
-                                None => Err("unknown escape '\\" + escaped + "'")
-                                Some(ch) => scanStr(src, i + 2, acc + ch)
-                            }
-                        }
-                }
-                _ => scanStr(src, i + 1, acc + c)
-            }
-        }
-
-unescape(c: Str) -> Maybe<Str> =
-    match c {
-        "\"" => Some("\"")
-        "\\" => Some("\\")
-        "/"  => Some("/")
-        "n"  => Some("\n")
-        "t"  => Some("\t")
-        "r"  => Some("\r")
-        _    => None
-    }
-
-// `[` already at `pos`. `elems` are `,`-separated `parseValue`s, `]` closes;
-// `[]` and trailing-comma-free (JSON has none) are both handled by the same
-// "is the next non-ws char `]`?" check that starts and ends the loop.
-parseArr(src: Str, pos: Int) -> Result<(Json, Int), Str> = {
-    let afterBracket = skipWs(src, pos + 1)
-    Str.slice(src, afterBracket, afterBracket + 1) == "]"
-        => Ok((JArr([]), afterBracket + 1))
-        | scanArr(src, afterBracket, [])
-}
-
-scanArr(src: Str, pos: Int, acc: List<Json>) -> Result<(Json, Int), Str> =
-    match parseValue(src, pos) {
-        Err(e) => Err(e)
-        Ok(pair) => {
-            let value = at2(pair, 0)
-            let after = skipWs(src, at2(pair, 1))
-            let next = Str.slice(src, after, after + 1)
-            let grown = concat(acc, [value])
-            match next {
-                "," => scanArr(src, skipWs(src, after + 1), grown)
-                "]" => Ok((JArr(grown), after + 1))
-                _   => Err("expected ',' or ']' in array")
-            }
-        }
-    }
-
-// `{` already at `pos`. Mirrors `scanArr`, one indirection deeper: each
-// element is a `"key": value` pair, and the pair itself threads its own
-// cursor through `parseMember` before folding back into `scanObj`.
-parseObj(src: Str, pos: Int) -> Result<(Json, Int), Str> = {
-    let afterBrace = skipWs(src, pos + 1)
-    Str.slice(src, afterBrace, afterBrace + 1) == "}}"
-        => Ok((JObj([]), afterBrace + 1))
-        | scanObj(src, afterBrace, [])
-}
-
-scanObj(src: Str, pos: Int, acc: List<(Str, Json)>) -> Result<(Json, Int), Str> =
-    match parseMember(src, pos) {
-        Err(e) => Err(e)
-        Ok(pair) => {
-            let member = at2(pair, 0)
-            let after = skipWs(src, at2(pair, 1))
-            let next = Str.slice(src, after, after + 1)
-            let grown = concat(acc, [member])
-            match next {
-                "," => scanObj(src, skipWs(src, after + 1), grown)
-                "}}" => Ok((JObj(grown), after + 1))
-                _   => Err("expected ',' or '}}' in object")
-            }
-        }
-    }
-
-parseMember(src: Str, pos: Int) -> Result<((Str, Json), Int), Str> =
-    match parseStr(src, pos) {
-        Err(e) => Err(e)
-        Ok(keyPair) => {
-            let key = at2(keyPair, 0)
-            let afterKey = skipWs(src, at2(keyPair, 1))
-            Str.slice(src, afterKey, afterKey + 1) != ":"
-                => Err("expected ':' after object key")
-                | match parseValue(src, skipWs(src, afterKey + 1)) {
-                    Err(e) => Err(e)
-                    Ok(valuePair) => Ok(((key, at2(valuePair, 0)), at2(valuePair, 1)))
-                }
-        }
-    }
-
-// The index of the first non-whitespace character at or after `pos` (space,
-// tab, `\n`, `\r` — the four JSON recognises).
-skipWs(src: Str, pos: Int) -> Int =
-    pos >= Str.length(src)
-        => pos
-        | (isWs(Str.slice(src, pos, pos + 1)) => skipWs(src, pos + 1) | pos)
-
-isWs(c: Str) -> Bool = c == " " or c == "\t" or c == "\n" or c == "\r"
-
-// --- printing ---
-//
-// The inverse direction. Not a byte-identical formatter (no attempt to
-// preserve source whitespace — there is nothing to preserve, `Json` has
-// already thrown it away) but a round-trip in the sense that matters:
-// `parse(print(j))` reproduces `j`.
-
-print(j: Json) -> Str =
-    match j {
-        JNull    => "null"
-        JBool(b) => b => "true" | "false"
-        JNum(n)  => toStr(n)
-        JStr(s)  => "\"" + escapeStr(s) + "\""
-        JArr(xs) => "[" + (xs |> map(print) |> Str.join(",")) + "]"
-        JObj(fs) => "{{" + (fs |> map(printMember) |> Str.join(",")) + "}}"
-    }
-
-printMember(pair: (Str, Json)) -> Str = match pair { (k, v) => "\"" + escapeStr(k) + "\":" + print(v) }
-
-escapeStr(s: Str) -> Str =
-    Str.split(s, "")
-        |> map(c -> match c {
-            "\"" => "\\\""
-            "\\" => "\\\\"
-            "\n" => "\\n"
-            "\t" => "\\t"
-            _    => c
-        })
-        |> Str.join("")
-
-// --- tests ---
-
-test "parses the three literals" {
-    expect parse("null") == Ok(JNull)
-    expect parse("true") == Ok(JBool(true))
-    expect parse("false") == Ok(JBool(false))
-}
-
-test "parses whole-number ints, including negative" {
-    expect parse("0") == Ok(JNum(0))
-    expect parse("42") == Ok(JNum(42))
-    expect parse("-7") == Ok(JNum(0 - 7))
-}
-
-test "rejects a float, naming why" {
-    match parse("3.14") {
-        Err(_) => expect true
-        Ok(_)  => expect false
-    }
-}
-
-test "parses a string with escapes" {
-    expect parse("\"hi\"") == Ok(JStr("hi"))
-    expect parse("\"a\\nb\"") == Ok(JStr("a\nb"))
-    expect parse("\"quote: \\\"x\\\"\"") == Ok(JStr("quote: \"x\""))
-}
-
-test "an unterminated string is an error, not a hang" {
-    match parse("\"abc") {
-        Err(_) => expect true
-        Ok(_)  => expect false
-    }
-}
-
-test "parses arrays, including empty and nested" {
-    expect parse("[]") == Ok(JArr([]))
-    expect parse("[1,2,3]") == Ok(JArr([JNum(1), JNum(2), JNum(3)]))
-    expect parse("[[1],[2,3]]") == Ok(JArr([JArr([JNum(1)]), JArr([JNum(2), JNum(3)])]))
-}
-
-test "parses objects and jsonGet reaches a field" {
-    let parsed = parse("{{\"a\":1,\"b\":[2,3]}}")
-    match parsed {
-        Err(_) => expect false
-        Ok(doc) => {
-            expect jsonGet(doc, "a") == Some(JNum(1))
-            expect jsonGet(doc, "b") == Some(JArr([JNum(2), JNum(3)]))
-            expect jsonGet(doc, "missing") == None
-        }
-    }
-}
-
-test "whitespace between tokens is ignored" {
-    expect parse(" {{ \"a\" : 1 ,  \"b\" : 2 }} ") == Ok(JObj([("a", JNum(1)), ("b", JNum(2))]))
-}
-
-test "trailing garbage after the document is an error" {
-    match parse("1 2") {
-        Err(_) => expect true
-        Ok(_)  => expect false
-    }
-}
-
-test "an empty document is an error" {
-    match parse("") {
-        Err(_) => expect true
-        Ok(_)  => expect false
-    }
-}
-
-test "print round-trips through parse" {
-    let doc = JObj([("name", JStr("stitch")), ("count", JNum(3)), ("tags", JArr([JStr("a"), JStr("b")])), ("ok", JBool(true)), ("nil", JNull)])
-    expect parse(print(doc)) == Ok(doc)
-}
-
-test "print escapes quotes and backslashes" {
-    expect print(JStr("a\"b\\c")) == "\"a\\\"b\\\\c\""
-}
-
-test "print renders negative numbers" {
-    expect print(JNum(0 - 12)) == "-12"
-}
-
-==== END EXAMPLES ====
-
-# Your task
-
-Write a sauna booking module: rooms are booked for exclusive use over a time
-window, so the core of the problem is detecting when two bookings overlap.
-
-Shape: a module — `ext` items, no `main`.
-Size: about 40–70 lines.
-Use these constructs: prod, Maybe, |>
-Use these words as identifiers somewhere meaningful: cedar, loyly, cooldown
-````
+**Exemplars are `text.st` + `stats.st` (181 lines), pasted verbatim below.** Not
+`bank.st` or `json.st`: at 635 lines those two put the prompt near 9–10k tokens,
+which made prefill roughly equal to decode per candidate, and their multi-line
+rationale comments are the most extreme style in the corpus — the suspected cause
+of Findings 001's comment spiral. This pair keeps the prompt near ~2.6k and shows
+a plainer commenting register.
+
+**The current prompt is [prompt v5](corpus-prompts/v5.md)** —
+system prompt and user message, ready to copy. Kept in its own file so there is
+one canonical copy to paste from rather than two that drift.
+[v1](corpus-prompts/v1.md) and [v2](corpus-prompts/v2.md) are retained for
+comparison; what changed and why is in Findings 003 and 004.
 
 ### Reading the first result
 
@@ -941,7 +236,7 @@ Running log. One entry per candidate worth learning from — not all sixty.
 | | |
 |---|---|
 | Model | qwen3-vl-4b, 16k context |
-| Exemplar | `bank.st` |
+| Exemplars | `bank.st` + `json.st` — 635 lines, **prompt ≈ 9–10k tokens** |
 | Throughput | **58.6 tok/s** single instance |
 | Generated | 1589 tokens, did not stop on its own |
 | Verdict | **parse** — but see below |
@@ -1006,6 +301,21 @@ the amplification effect working as described, not evidence against the approach
 band, so the bandwidth model holds and the wall-clock table stands (~12 h for 500k
 validated at 20% yield, single stream).
 
+**Prompt size is a first-order cost, and the exemplar choice sets it.** Pasting
+`bank.st` + `json.st` put the prompt at ~9–10k tokens rather than the ~2.6k the
+prompt was designed around. At M1 Max prefill rates that is ~20–30 s per
+candidate — roughly equal to the decode it was paying for, and it would *dominate*
+once `max_tokens` caps decode at ~1200. Two consequences:
+
+- Exemplar selection is a throughput decision as well as a quality one. Prefer
+  the smallest exemplars that demonstrate the required constructs; `stim.st` (890)
+  and `json.st` (381) are effectively unusable as prompt content, exactly as S2
+  says.
+- Prefix caching is worth **more** than corpus-mvp §Napkin's ~1.5× estimate when
+  the invariant block is large. The fix here is a smaller prompt; the general
+  lesson is that the caching design in Increment 4 earns most of its keep on the
+  exemplar block, not the system prompt.
+
 **Actions before candidate 002:**
 
 - Apply the S1 sampling block (temp/top_p/top_k, repetition penalty,
@@ -1018,6 +328,565 @@ validated at 20% yield, single stream).
 - **New harness item, carried to Increment 5:** an n-gram repetition detector that
   kills generation early. This candidate burned ~1300 tokens after it was already
   dead; at scale that is a meaningful share of a run.
+
+### 002 — qwen3.5-4b, thinking on, recipe #69
+
+| | |
+|---|---|
+| Model | qwen3.5-4b, 16k context, **thinking mode on** (no switch found) |
+| Result | 2.5 minutes of reasoning, **no program emitted** — looped inside the think block |
+| Verdict | **extract** — nothing to check |
+
+**The loop had a single, identifiable cause: the word `loyly`.** The reasoning
+trace shows the model trying to emit it as an identifier, typing `loyalty`
+instead, noticing the mismatch, and re-entering the correction cycle —
+indefinitely. Roughly forty repetitions of "I will write `let loyalty = 30` but
+the variable name must be `loyly`."
+
+**The mechanism, and it generalises.** `loyly` is OOV and shatters into BPE
+fragments; `loyalty` is a single high-frequency token one small edit away. The
+prior pulls the model to `loyalty` every time, its self-check rejects it, and
+with thinking mode granting unbounded room there is no exit. **A jargon word is a
+trap when it is rare *and* has a high-frequency near-neighbour** — rarity alone is
+fine (`krausen`, `boneyard`, `dunnage` have no dominant attractor), it is the
+attractor that kills.
+
+Three fixes, in order of importance:
+
+1. **Make the words a preference, not a requirement.** A hard constraint a small
+   model cannot satisfy can deadlock; a soft one degrades gracefully. The task
+   block now reads "where they fit naturally, prefer these names… if one does not
+   fit, leave it out." Whether the words actually landed is a **post-hoc harness
+   metric**, not something the model must enforce against itself.
+2. **Screen jargon for near-neighbours** before it enters the axis list.
+3. `loyly` → `birch` in recipe #69.
+
+**Thinking mode is not a cost problem here, it is a correctness problem.** S1 said
+it triples time-per-candidate; that understated it. The think block is where the
+loop lived, and depending on runtime it may not be subject to the same
+`max_tokens` and repetition-penalty settings as the answer. S1 now carries three
+concrete ways to force it off, including the assistant-prefill trick.
+
+**The cheat-sheet has gaps, and gaps produce inconsistent guessing.** The trace
+reached for `&&`, `||`, `return`, and `++` — none of which are Stitch. Verified
+against `parser.rs:219` and `primes.st`: the operators are `and` / `or`, there is
+no `return`, and a block's value is its last expression. Candidate 001
+independently guessed `@b.end` for field access on a lambda parameter. **Every one
+of these is a construct the cheat-sheet never showed**, so the model filled the
+hole from C-family priors — differently each time. Added to Prompt v1: boolean
+operators, field access vs. the `@` receiver, ranges and list literals, and an
+explicit "there is no `return`."
+
+**The encouraging part, again.** Before deadlocking, the model derived
+`s1 < e2 and s2 < e1` — the correct overlap predicate, independently, for the
+second time in two candidates. It also correctly worried that `const` is not a
+Stitch keyword, that there is no `main` in a module shape, and that `overlaps`
+takes two `Booking`s so strings cannot be passed directly. **The model can do this
+task.** Both failures so far have been prompt and configuration defects, not
+capability defects.
+
+### 003 — qwen3.5-4b, prompt v1, recipe #69
+
+| | |
+|---|---|
+| Model | qwen3.5-4b, thinking on, ~4 minutes |
+| Result | **A complete, coherent, on-topic 65-line program with three tests.** Terminated cleanly. |
+| Verdict | **parse** — but close, and every error is traceable |
+
+The 001/002 failure classes are gone: no repetition spiral, no deadlock. What
+remains is a program with a good semantic core and a handful of *systematic*
+errors, each of which the reasoning trace explains exactly.
+
+**The semantic core keeps being right.** Third candidate running to derive
+`start1 < end2 and start2 < end1` independently, this time with half-open
+interval reasoning *and* an unprompted `sameRoom` check — two bookings in
+different rooms do not conflict, which the brief never said. The distinguishing
+clause is doing its job.
+
+#### The headline: a prose rule loses to a token prior
+
+The v1 reference contained, verbatim:
+
+```
+a and b     // NOT &&
+a or b      // NOT ||
+```
+
+The trace shows the model **reading and correctly restating that rule** — *"it
+says 'Booleans are words, not symbols'. `a and b`"* — and then writing `&&` in
+every conditional it produced. Four times.
+
+Two lessons, and the second is the important one:
+
+1. **A negative prose rule does not override a strong token-level prior.** At the
+   moment of emitting `b1.start < b2.end `, the code-context prior for `&&` is
+   overwhelming, and a line of English fifty tokens earlier does not move it.
+2. **The rule had no code-shaped backup.** Neither exemplar contains a single
+   `and` or `or` — `text.st` and `stats.st` use only `=>`/`|` conditionals. The
+   one form of evidence the model actually follows was absent from the prompt.
+
+**This is the strongest argument yet for Increment 7.** Constrained decoding is
+not merely a yield optimisation for this failure class — it is the *only*
+reliable fix. A token prior cannot be prompted away; a grammar mask makes `&&`
+unrepresentable, absolutely and for free.
+
+#### Confirmed from the inside: the `ext prod` gap
+
+The trace derives the error step by step — it records `prod Name(fields...)` and
+`ext name(params) -> Type = body` as two separate rules, finds no rule for
+*exporting a type*, and composes them into `ext Room(...) = prod Room(...)`
+(three times, for Room, Booking and Conflict). `stats.st` has `ext prod
+Summary(…)` right there, but one occurrence in an exemplar lost to two explicit
+rules in the reference.
+
+#### The `fold` thrashing was a prompt defect
+
+Roughly a quarter of the four minutes went on reconciling `xs |> fold(0, f)`
+(reference) against `fold(1..=n, "", f)` (exemplar) and never resolving it; the
+output `fold([], [], (acc, b) -> …)` is a fusion of both readings. They are
+consistent — a pipe supplies the first argument — but **nothing in the prompt
+stated the desugaring**, so two correct examples read as a contradiction.
+
+#### The most useful behavioural finding
+
+**The model treats the reference as the boundary of the language and stays
+inside it, deliberately:**
+
+> *"`filter` is not in the reference examples… I should avoid `filter` to be safe."*
+> *"`sort`? Not shown. I'll use bookings directly."*
+> *"Int to Str is `Str.toStr`? Reference doesn't show conversion… I'll use Int in `Conflict`."*
+
+It changed a field's type from `Str` to `Int` purely to avoid a conversion it had
+not been shown. So **the reference's coverage bounds the program space the model
+will attempt** — every missing combinator narrows what it can write, and it will
+not guess its way out.
+
+That is what makes `prelude.st` the right fix rather than a hand-written
+signature list (below).
+
+#### Remaining errors, all downstream of the above
+
+- `acc |> all(a -> overlaps(a, b))` should be `any` — `any` exists in the
+  prelude, which was not in the prompt. `all` on an empty list is vacuously true,
+  so as written it reports conflicts everywhere.
+- `findConflicts` declares `Maybe<List<Conflict>>` but the fold returns a bare
+  list; no `Some(…)` on the success path.
+- `Conflict(b.roomId, b.roomId, 0)` — same room twice, so the record carries no
+  information.
+- Positional construction throughout (`Booking(1, 10, 12)`) where the reference
+  and `stats.st` both show named fields.
+
+#### Cost, and the must-use words
+
+**Four minutes for 65 lines, mostly thrashing** — `findConflicts` was rewritten
+about eight times and the shipped version still has the fold bug. Separately, the
+must-use words consumed roughly ten paragraphs of deliberation to produce
+`cedar`/`birch` in *comments and test names only* and a `cooldown` field that is
+always 0 with a comment admitting it means nothing.
+
+The softened wording prevented 002's deadlock but not the spend: **for a thinking
+model, a soft constraint still buys full deliberation.** The words axis is a
+candidate for removal at small scale — it costs a large share of the reasoning
+budget and has yet to produce a single meaningful identifier.
+
+#### Prompt v2
+
+[prompt v2](corpus-prompts/v2.md). Changes, each tied to
+evidence above:
+
+- **`prelude.st` included verbatim as a "Standard library" section.** This is the
+  stdlib written in Stitch itself, 108 lines, and it is a better answer than a
+  hand-written signature list for four reasons at once: it *lists* what exists
+  (`any`, `find`, `contains`, `unwrapOr`, `flatten`, …); it shows `and`/`or` in
+  **real code**, giving the boolean rule the code-shaped backup it lacked; it
+  shows `match m { Some(v) => … }` — the pattern form, which v1's reference never
+  covered at all; and it shows the unpiped 3-arg `fold(xs, init, f)`. It also
+  cannot drift from the language, because it *is* the language.
+- **`ext prod` / `ext sum` added**, including that each field needs its own `ext`,
+  and that `ext` is invalid on `contract`, `on`, and `use` (verified against
+  `parser.rs:818`).
+- **The pipe desugaring stated explicitly**, with `fold(xs, 0, f)` and
+  `xs |> fold(0, f)` shown as identical.
+- **Both `match` forms** — guard and pattern.
+- The boolean and no-`return` rules **promoted into the system prompt**, where
+  they are closer to the generation point, while relying on the prelude for the
+  actual evidence.
+
+Prompt v2 is ~3.5k tokens, up from ~2.6k. That is a deliberate trade: the added
+900 tokens are invariant, cacheable, and target three confirmed failure modes.
+
+### 004 — qwen3.5-4b, prompt v2, recipe #69
+
+| | |
+|---|---|
+| Model | qwen3.5-4b, thinking on |
+| Result | Interrupted mid-reasoning — the model was iterating on line count, not on the program |
+| Verdict | n/a |
+
+**Prompt v2 fixed three confirmed failure modes.** In this trace, all correct:
+
+- `s1 < e2 and s2 < e1` — **`and`, not `&&`**, everywhere. The prelude giving the
+  rule code-shaped backup did what a prose rule alone could not.
+- `match acc { Some(_) => acc   None => … }` — the pattern form, used correctly.
+- `prod TimeWindow(start: Int, end: Int)` — no `ext X(...) = prod X(...)`.
+- `Booking(id: 99, room: "cedar", window: TimeWindow(start: 0, end: 120))` —
+  named-field construction.
+
+That is 003's entire error list, gone. The v2 changes are validated.
+
+#### The new dominant cost: the model cannot count lines, and tries anyway
+
+The trace counts lines manually **at least four times**, gets it wrong ("This is
+85 lines" for a program of roughly 78), and then *degrades the program to fit*:
+it deletes the `book` function, deletes a test, and strips comments — while
+noting each deletion is only to hit the size. Several full rewrites are spent
+entirely on this.
+
+Compounding it, the size was ambiguous about tests, so the model counted its own
+test blocks against the budget and squeezed the module to compensate.
+
+**The general rule, now on its third instance:**
+
+> **Do not make the model enforce a constraint the harness can measure.**
+
+Must-use words (002, 003) and size (004) are the same failure: the model spends a
+large share of its budget self-enforcing, does it unreliably, and *reduces
+program quality* in the attempt — for a property that is one line of Rust to
+measure after the fact. Express the intent qualitatively, let the model write, and
+measure the outcome in the funnel.
+
+#### Still unfixed: `if`/`then`, and it is the `&&` pattern again
+
+The trace writes `if overlaps(window, b.window) then Some(b) | None` inside a fold
+lambda, despite the system prompt's "There is no if/else."
+
+Same class as 003's `&&`: a **negative prose rule losing to a token prior in a
+specific syntactic position**. Note `text.st` *does* show a `=>`-conditional inside
+a `map` lambda, so an example existed — it was just not in the same position
+(fold accumulator) where the `if` prior is strongest. v3 adds the counter-example
+in exactly that position, but this failure class is the standing argument that
+some priors are only fixable by a grammar mask (Increment 7).
+
+Also still guessing at conversions: `b.id.toString()`, method-style. The natives
+are free functions (`toStr`, `Str.parseInt`) and neither appears in the prelude,
+so the reference had no answer to give.
+
+#### Prompt v3
+
+[prompt v3](corpus-prompts/v3.md):
+
+- **Size is counted in declarations, not lines**, over a wide range: "a small
+  module — 1 to 4 types and 2 to 6 functions. Tests are extra and do not count
+  toward that. This is a rough guide, not a limit: never delete working code or
+  drop a test to hit it, and if the program naturally wants to be bigger, let it
+  be." Actual line counts become a harness metric.
+
+  A first attempt said "a couple of types and three or four functions" — which
+  merely **moves the counting target** rather than removing it; the model would
+  have trimmed to hit *that*. Two properties make the replacement safe: types and
+  functions are countable at trivial cost (unlike lines), and the range is wide
+  enough that a reasonable program satisfies it on arrival, so there is nothing
+  to optimise toward. Per-bucket ranges live in
+  [corpus-recipe-axes.md](corpus-recipe-axes.md); they overlap deliberately, so
+  they signal scale without becoming a sharp edge.
+- **A no-`if` counter-example in the failing position** — a `=>` conditional inside
+  a lambda, and a `match` inside a fold accumulator.
+- **Conversions added**: `toStr(n)` with an explicit "NOT `n.toString()`", and
+  `Str.parseInt(s)`.
+
+#### Cheap experiment worth running on v3
+
+The must-use-words line has now cost budget in every candidate and produced no
+meaningful identifier. Run v3 twice — once as written, once with that line
+deleted. If the program is as good and arrives sooner, the axis has failed its own
+test and should come out of [corpus-recipe-axes.md](corpus-recipe-axes.md).
+
+### 005 — qwen3.5-4b, prompt v3, recipe #69
+
+| | |
+|---|---|
+| Model | qwen3.5-4b, thinking on, ~4 minutes |
+| Result | **The first plausibly-valid program.** 1 type, 2 functions, 2 tests |
+| Verdict | expected **parse ✓ · type ✓ · tests ✗** |
+
+Syntax is clean throughout: `ext prod Booking(ext start: Int, ext end: Int)`,
+`and` not `&&`, `any(xs, pred)` matching the prelude signature exactly, named-field
+construction, no `if`, no `return`. **v3's size fix worked completely** — the trace
+contains *zero* line counting, where 004 counted four times and deleted working
+code. 1 type and 2 functions, comfortably inside the small bucket.
+
+#### The bug, and how it got there
+
+```
+ext cedar(bookings: List<Booking>) -> Bool =
+    any(bookings, b -> any(bookings, x -> birch(b, x)))
+```
+
+Every booking is compared **against itself**. `birch(b, b)` is
+`b.start < b.end and b.start < b.end` — true for any valid booking. So `cedar`
+returns `true` for any non-empty list, and the program's own second test
+(`cedar([b1, b2]) == false` for disjoint bookings) **fails**.
+
+The trace is the interesting part. The model *found this exact bug*:
+
+> *"x = b1. `overlaps(b1, b1)` -> True. So checkOverlaps returns true even if
+> there's no real conflict…"*
+
+and then argued itself out of it:
+
+> *"Wait, if I have `[b1, b1]`, do they conflict? Yes. So checking all pairs is
+> fine for 'exclusive use'."*
+
+It conflated *two identical bookings in a list conflict* (true) with *a booking
+compared to itself conflicts* (a bug). **More reasoning made the program worse:
+it detected the defect and constructed a justification for shipping it.** Worth
+holding onto — self-correction is not monotonic, and a thinking model can talk
+itself past a correct observation.
+
+#### This validates the oracle ladder
+
+Parse ✓, typecheck ✓, **tests ✗**. That is precisely the case
+[corpus-mvp.md](corpus-mvp.md) §3's rung 3 exists for, and the first candidate to
+demonstrate that rungs 0–2 are not sufficient. A syntax-only gate would have
+accepted this program into the corpus.
+
+**And it was caught for free, by the model's own tests.** No held-out suite was
+needed: a model that writes a test its own code fails has produced *detectably*
+wrong code at zero marginal cost. That is weaker than supplied tests (nothing
+stops vacuous ones — hence the mutation-kill reward in §7) but it is a real
+semantic signal available immediately, and it should be in the funnel from the
+first batch rather than deferred with the rest of rung 3.
+
+#### The must-use words finally landed, and the result is bad enough to kill the axis
+
+The words became the **function names**: `birch` is the overlap predicate,
+`cedar` is the conflict checker. Not decoration this time — they **displaced the
+meaningful names**. `overlaps` became `birch`; `hasConflicts` became `cedar`. A
+reader cannot tell what `birch(b1, b2)` does.
+
+That is worse than 003's dead field, because the corpus's purpose is to teach
+good Stitch, and this teaches *name your functions after trees*. Five candidates
+of evidence, no successes:
+
+| | Outcome |
+|---|---|
+| 002 | deadlock on `loyly`; no program at all |
+| 003 | `cooldown` a permanently-zero field; `cedar`/`birch` in comments only |
+| 005 | words displace meaningful function names |
+
+Every candidate also spent a large share of its reasoning budget deliberating
+where to put them.
+
+**The root cause is that the mechanism does not port.** TinyStories' random-word
+trick works because prose absorbs an arbitrary noun without cost. **Code
+identifiers carry semantics; a name that does not describe its referent is a
+defect, not a variation.** Lexical diversity in a code corpus has to come from
+domains, constructs and shapes — the axes that change *what the program does*.
+
+**Decision: the must-use-words axis is removed** from
+[corpus-recipe-axes.md](corpus-recipe-axes.md). Prompt v4 is v3 with that line
+replaced by "Name things for what they do."
+
+#### The prelude discipline is working — against an incomplete reference
+
+Three separate times the model checked the prelude and stayed inside it:
+declining `filter` and `sort` as unlisted, and abandoning a `cooldown` function
+entirely on discovering `max(xs)` but no `max(a, b)`.
+
+**But `filter` and `sort` both exist.** `prelude.st` is only the *derived* layer —
+its own header says it is built "from the native core (fold/map/filter)". The
+natives are implemented in Rust and appear nowhere in the file, so the model
+could not see them. Missing from v4's prompt entirely: `filter`, `sort`, `sortBy`,
+`zip`, `enumerate`, `take`, `drop`, `takeWhile`, `dropWhile`, `flatMap`,
+`foldWhile`, `concat`, `reverse`, `List.at`/`set`/`insert`/`removeAt`, the whole
+`Str` module, and `toStr`.
+
+So the discipline is real and the reference was wrong, which is the more expensive
+combination: **the model writes deliberately worse programs than it could, and
+does so silently.** `cedar`'s O(n²) self-comparing implementation is plausibly a
+direct consequence — `sort`, `zip` and `enumerate` were all available and all
+invisible.
+
+This also corrects the framing in Findings 003. "The model stays strictly inside
+the reference" is a *capability* observation, but its cost was under-stated: the
+reference is not merely a boundary on what the model attempts, it is a **ceiling
+on program quality**, and every omission lowers it.
+
+### 005a — prompt v5: the natives
+
+[prompt v5](corpus-prompts/v5.md) adds a **Built-in functions**
+section ahead of the prelude, generated from the `NativeFn` table in
+`stitch/src/natives.rs` so names *and arities* are accurate rather than guessed.
+It also states that the two lists together are complete, so an unlisted function
+genuinely does not exist — and that a listed one should not be avoided.
+
+Worth automating later: the natives table is a literal array in one Rust file, so
+the prompt section can be generated at build time and cannot drift. Same argument
+as embedding `prelude.st` verbatim rather than paraphrasing it — the prompt should
+be *derived* from the language, never maintained alongside it.
+
+#### Still open
+
+Four minutes for 25 lines. The tail of the trace is heavily repetitive
+("One more check on…", "Wait, I should check…") without adding information — a
+mild version of 001's checking loop. Thinking is buying design quality
+(`sameRoom` in 003, the prelude discipline here) and paying for it in a way that
+would be unaffordable at 500k tokens.
+
+### 006 — qwen3.5-4b, prompt v4, recipe #69
+
+| | |
+|---|---|
+| Model | qwen3.5-4b, thinking on, ~3.5 minutes |
+| Prompt | **v4** — v3 with the must-use-identifiers line removed. **v5's natives section was not in play.** |
+| Result | 1 type, 3 functions, 5 tests |
+| Verdict | expected **parse ✓ · type ?** · logically wrong, **and its own tests do not catch it** |
+
+**The axis removal is validated.** Every name is meaningful: `overlaps`,
+`findFirstOverlap`, `hasConflicts`. Compare 005's `birch` and `cedar`. Removing
+the words cost nothing and recovered the naming.
+
+**005's self-comparison bug is fixed**, and deliberately — the trace reasons about
+whether an element can conflict with itself and solves it structurally:
+
+```
+let rest = removeAt(bookings, 0)
+let conflicts = find(rest, (x) -> overlaps(b1, x))
+```
+
+#### The new bug, and why it matters more than 005's
+
+`findFirstOverlap` compares **only the head against the tail**. For
+`[a, b, c]` where `b` and `c` overlap but `a` overlaps neither, it returns `None`
+— and `hasConflicts`, which is documented as "check if the list contains any
+overlaps", inherits the lie.
+
+**Its own tests do not catch this.** The five tests cover two-element lists and
+the empty list; none has three elements with the conflict away from the head. The
+suite passes on broken code.
+
+That is a sharp refinement of the 005a claim that self-written tests are a free
+semantic oracle:
+
+> **Self-written tests catch inconsistency between the code and the model's own
+> intent. They do not catch gaps in that intent.**
+
+005 wrote a test its code failed — a genuine catch. 006 wrote code and tests from
+the *same* wrong mental model, so they agree with each other and both are wrong.
+The oracle is real but partial, and its blind spot is exactly the case where the
+model misunderstood the problem — which is the case that matters most.
+
+**This is the argument for scoring suites by mutants killed rather than by
+passing** ([corpus-mvp.md](corpus-mvp.md) §7). A mutation that swaps
+`findFirstOverlap`'s tail-scan for a full pairwise scan would survive this suite,
+which is precisely the signal that the suite is thin.
+
+#### Two notes on the reference boundary
+
+**Tuples were invented, correctly.** `Maybe<(Booking, Booking)>` and
+`Some((b1, x))` appear nowhere in the prompt, and tuples do exist — verified in
+`ast.rs`, which has `Type::Tuple`, `Expr::Tuple` and `Pattern::Tuple`. So the
+Findings 003 claim needs narrowing: the model stays strictly inside the reference
+for **library surface** (it will not call a function it has not seen) but freely
+extrapolates **syntax**. That asymmetry is sensible — library membership is a fact
+it cannot derive, whereas syntax is a pattern it can.
+
+**`removeAt(bookings, 0)` is called bare**, and the trace spends real time
+agonising over whether it exists ("`drop` is NOT explicitly listed… I must
+implement it or avoid it"). It is `List.removeAt`, module-qualified, arity 2 — so
+the bare call may not resolve. This is precisely the gap v5 closes, and 006 is
+the last candidate that should hit it.
+
+Minor: `ext prod Booking(room: Int, ext start: Int, ext end: Int)` exports
+`start` and `end` but not `room`, with no apparent reason.
+
+#### Prompt-version accounting
+
+**v5 is still untested.** 006 ran v4. The next candidate should be the first to
+see the natives list, and the specific things to watch are whether `drop`,
+`sort`, `zip` and `List.removeAt` get used without deliberation, and whether the
+saved reasoning budget shows up as a shorter trace.
+
+### 007 — qwen3.5-4b, prompt v5, recipe #69
+
+| | |
+|---|---|
+| Model | qwen3.5-4b, thinking on, ~3.5 minutes |
+| Result | 2 types, 3 functions, 7 tests |
+| Verdict | expected **parse ✓ · type ✗** — a signature mismatch |
+
+```
+ext overlap(b1: Booking, b2: Booking) -> Bool = …
+…
+bookings |> fold(true, (avail, b) -> avail and not(overlap(b.time, time)))
+                                                       ^^^^^^  ^^^^
+```
+
+`overlap` takes two `Booking`s; `isAvailable` calls it with two `Time`s.
+
+**The trace shows precisely how.** An early draft had a second helper:
+
+```
+ext timesOverlap(t1: Time, t2: Time) -> Bool = t1.start < t2.end and t2.start < t1.end
+```
+
+While consolidating to fit the function budget, the model **deleted the helper and
+did not update the call site**. A textbook refactoring artifact — and one no
+amount of local reasoning catches, because each line is individually plausible.
+
+#### Three candidates, three bug classes, three different rungs
+
+| | Bug | Caught by |
+|---|---|---|
+| 005 | self-comparison — every booking conflicts with itself | its own tests (rung 3) |
+| 006 | head-vs-tail only — misses conflicts away from the head | **nothing** — tests share the wrong intent |
+| 007 | signature mismatch after a refactor | the type checker (rung 1) |
+
+Each survives the rung below it. Parse alone would have accepted all three.
+**This is the graded oracle ladder ([corpus-mvp.md](corpus-mvp.md) §3) paying for
+itself on the first six candidates** — and 006 remains the argument that even
+rung 3 needs mutation scoring rather than pass/fail, since a suite written from
+the same misunderstanding as the code agrees with it.
+
+#### The v3/v4 fixes are holding
+
+- **No line counting.** 2 types, 3 functions — in range, no deliberation.
+- **All names meaningful**: `overlap`, `isAvailable`, `tryBook`.
+- **It self-corrected an `if`**: *"Wait, I used `if` in tryBook. I cannot use
+  `if`."* — and replaced it with `match`. v3's counter-example appears to be
+  converting a shipped error into a caught one.
+- **The comment-length instruction worked**, explicitly: *"My comments are a bit
+  long. I'll shorten them."*
+
+#### v5's natives are still untested
+
+The program needed only `fold`, so `sort`/`zip`/`drop`/`Str.*` went unexercised.
+But the *negative* signal is real: **zero deliberation about what exists**, against
+006's extended agonising over whether `drop` and `removeAt` were available. A
+recipe that actually needs list surgery is required to test this properly.
+
+#### New: the construct axis has the words axis's failure mode, milder
+
+`tryBook` returns `Maybe<Bool>` — where `Some(true)` is the only inhabited
+success case, so it carries no information a plain `Bool` would not. The trace
+gives the reason outright:
+
+> *"I haven't used `Maybe` yet… I should probably include a function that returns
+> `Maybe<Booking>` or similar **to satisfy the requirement to use Maybe**."*
+
+That is the same pathology that killed the must-use words: a required token
+inserted for compliance rather than because the program wanted it. The difference
+in severity matters, though — **a forced construct produces a design smell; a
+forced name produces a lie.** `Maybe<Bool>` is redundant but honest;
+`birch(b1, b2)` misdescribes its function.
+
+Constructs also earn their place in a way words never did: the corpus genuinely
+needs coverage of `sum`, `contract`, `uses` and the rest, and there is no other
+axis that delivers it. So this is a **softening** candidate rather than a removal
+one — "use these where they fit, and if one does not fit, leave it out", the
+phrasing that at least prevented 002's deadlock. Whether that costs too much
+construct coverage is an open question for the first real batch, where per-recipe
+construct-hit rate is measurable.
 
 ---
 
