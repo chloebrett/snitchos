@@ -20,6 +20,25 @@
 //!
 //! See `plans/glitch-v2-async-ring.md`.
 
+/// What one drain tick did. The drain feeds exactly one sample per audio deadline
+/// (the resolved multiplex-`mtimecmp` cadence): a non-empty ring yields the sample to
+/// write, an empty ring splits on whether a stream is *active* — an active stream
+/// gone dry is a missed deadline ([`Underrun`](DrainOutcome::Underrun), the `XRun`
+/// observable); an inactive one is just silence ([`Idle`](DrainOutcome::Idle)).
+///
+/// Emptiness alone can't tell "producer is done" from "producer is late" — that's why
+/// `active` is an explicit input to [`drain_tick`](SampleRing::drain_tick), signalled
+/// by the producer, never inferred here.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum DrainOutcome {
+    /// One sample was dequeued and should be written to the DAC.
+    Fed(i16),
+    /// The ring was empty while a stream was active — a missed feed deadline.
+    Underrun,
+    /// The ring was empty and no stream was active — nothing to play.
+    Idle,
+}
+
 /// A FIFO of at most `N` signed-PCM samples. `head` is the next sample to drain,
 /// `tail` the next slot to fill; `len` tracks occupancy so a full ring (`len == N`)
 /// is unambiguous from an empty one (`len == 0`) even when `head == tail`.
@@ -76,6 +95,18 @@ impl<const N: usize> SampleRing<N> {
         }
         self.len += accepted;
         accepted
+    }
+
+    /// Feed one sample to the DAC for this audio deadline: dequeue the oldest sample
+    /// ([`Fed`](DrainOutcome::Fed)), or — if the ring is empty — report an
+    /// [`Underrun`](DrainOutcome::Underrun) when a stream is `active` (a missed feed
+    /// deadline) or [`Idle`](DrainOutcome::Idle) when it is not.
+    pub fn drain_tick(&mut self, active: bool) -> DrainOutcome {
+        match self.pop() {
+            Some(sample) => DrainOutcome::Fed(sample),
+            None if active => DrainOutcome::Underrun,
+            None => DrainOutcome::Idle,
+        }
     }
 
     /// Remove and return the oldest sample, or `None` if the ring is empty.
@@ -168,5 +199,43 @@ mod tests {
     fn pop_from_empty_is_none() {
         let mut r = SampleRing::<4>::new();
         assert_eq!(r.pop(), None);
+    }
+
+    #[test]
+    fn a_tick_on_a_non_empty_ring_feeds_the_oldest_sample() {
+        let mut r = SampleRing::<4>::new();
+        r.push_slice(&[11, 22]);
+        assert_eq!(r.drain_tick(true), DrainOutcome::Fed(11));
+        assert_eq!(r.len(), 1); // the fed sample was consumed
+    }
+
+    #[test]
+    fn feeding_does_not_depend_on_the_active_flag() {
+        // A non-empty ring feeds regardless of whether a stream is marked active.
+        let mut r = SampleRing::<4>::new();
+        r.push_slice(&[7]);
+        assert_eq!(r.drain_tick(false), DrainOutcome::Fed(7));
+    }
+
+    #[test]
+    fn a_tick_on_an_empty_active_ring_is_an_underrun() {
+        let mut r = SampleRing::<4>::new();
+        assert_eq!(r.drain_tick(true), DrainOutcome::Underrun);
+    }
+
+    #[test]
+    fn a_tick_on_an_empty_inactive_ring_is_idle() {
+        let mut r = SampleRing::<4>::new();
+        assert_eq!(r.drain_tick(false), DrainOutcome::Idle);
+    }
+
+    #[test]
+    fn ticks_feed_in_fifo_order_then_underrun_when_drained() {
+        let mut r = SampleRing::<4>::new();
+        r.push_slice(&[1, 2]);
+        assert_eq!(r.drain_tick(true), DrainOutcome::Fed(1));
+        assert_eq!(r.drain_tick(true), DrainOutcome::Fed(2));
+        // active stream, now dry → the producer fell behind
+        assert_eq!(r.drain_tick(true), DrainOutcome::Underrun);
     }
 }
