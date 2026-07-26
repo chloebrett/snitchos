@@ -54,6 +54,32 @@ fn round_trips_expect() {
     assert_round_trips(r#"test "two in a row" { expect 1 == 1  expect 2 == 2 }"#);
 }
 
+/// The other half of "takes its operand at the loosest binding power": an
+/// `expect` sitting *inside* a tighter position has to be parenthesized, or on
+/// reprint its operand swallows whatever follows.
+///
+/// Found by babble's round-trip fuzzer at seed 27, not by hand — the shapes that
+/// break this are ones nobody writes on purpose. `(expect x)?.field` reprinted
+/// as `expect x?.field`, which parses to a different tree: the `expect` now owns
+/// the field access, and everything to its right besides.
+#[test]
+fn round_trips_expect_inside_a_tighter_position() {
+    assert_round_trips(r#"test "postfix" { expect (expect 1)?.field == 2 }"#);
+    assert_round_trips(r#"test "binary" { expect (expect 1) + 2 == 3 }"#);
+    assert_round_trips(r#"test "call" { expect (expect f)() == 1 }"#);
+    assert_round_trips(r#"test "index" { expect (expect xs)[0] == 1 }"#);
+}
+
+/// The converse of the case above: `handle`/`without` close with a delimited
+/// block, so a following postfix binds to them without help. Parenthesising them
+/// anyway is not merely noisy — the added leading `(` is read as a call by the
+/// *previous* statement. babble seed 2, via `without delta { }.items`.
+#[test]
+fn does_not_parenthesize_a_block_terminated_form_in_a_postfix_position() {
+    assert_round_trips("f() = { expect $a == { }  without delta { }.items }");
+    assert_round_trips("g() = { handle emit with h { }.items }");
+}
+
 #[test]
 fn round_trips_literals() {
     assert_round_trips("let i = 42  let f = 3.5  let t = true  let f2 = false  let neg = -7");

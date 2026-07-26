@@ -45,7 +45,7 @@ and the augmentation tier in sift depends on the printer being total.
   structure: when the inner expression is a comparison, the fault renders both
   sides via `render.rs`; otherwise it reports the expression's source span.
 
-### 4. Tests type-check — **blocked on a pre-existing checker gap**
+### 4. Tests type-check — **DONE**, including the checker gap it exposed
 
 The canon gate's definition of "a program" widens to include `test` items —
 which is precisely what tests-in-Rust were invisible to. `CoreItem::Test` now
@@ -65,13 +65,22 @@ holds for `= expr` bodies and the design's claim that test bodies are
 type-checked is half-true. It also means the *canon gate itself* has been weaker than it
 looks — `canon.rs` type-checks programs whose bodies are almost all blocks.
 
-- **RED (this increment)**: a mismatched body inside `{ … }` is reported;
-  the canon and stim still type-check clean afterward.
-- Fixing it means extending `synth` with a `Block` arm (walk statements, take
-  the result expression's type) and probably `If`/`Match` arm bodies too. The
-  blast radius is real: it may surface genuine errors in the canon *and* false
-  positives from the gradual checker's blind spots. That is a decision worth
-  making explicitly rather than as a side effect of adding a keyword.
+**Fixed.** `synth` gained a `Block` arm (statements synthesized for their own
+errors, block's type = its result expression's, `Unit` when there is none), an
+explicit `Without` arm (its body is absent from `child_exprs`, which the effect
+walker owns), and a fallback that *descends* through un-typed forms instead of
+shrugging at them — so an error nested inside a construct with no type rule yet
+is still reported.
+
+The feared blast radius did not materialise: the prelude, stim, and the whole
+canon still type-check clean, and all 813 stitch+babble tests pass. The gate is
+now real for block bodies, which retroactively strengthens `canon.rs` — it had
+been checking almost nothing, since canon bodies are nearly all blocks.
+
+Still gradual by omission: a `let` binding's type is not threaded into
+`ctx.locals`, and `If`/`Match` still synthesize to `Dyn` rather than joining
+their branches. Both are refinements, not gaps — they cost missed errors, never
+false ones.
 
 ### 5. Authority: a test with no `uses` has none
 

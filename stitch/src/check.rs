@@ -162,8 +162,47 @@ fn synth(expr: &CoreExpr, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
             check(asserted, &Ty::Bool, ctx, errors);
             Ty::Unit
         }
-        // Everything else is not yet understood: stay gradual (sound-by-omission).
-        _ => Ty::Dyn,
+        // A block's type is its result expression's — and its statements are
+        // synthesized for their own errors. Without this arm the checker stopped
+        // at every `{`, which is to say at every body anyone actually writes:
+        // `f() -> Int = "x"` was reported and `f() -> Int = { "x" }` was not.
+        CoreExprKind::Block { stmts, result } => {
+            for stmt in stmts {
+                synth_stmt(stmt, ctx, errors);
+            }
+            result.as_ref().map_or(Ty::Unit, |result| synth(result, ctx, errors))
+        }
+        // `without Cap { body }` is absent from `child_exprs` (the effect walker
+        // handles it under an attenuated scope), so descend explicitly or its
+        // body is the one place a type error could still hide.
+        CoreExprKind::Without { body, .. } => {
+            synth(body, ctx, errors);
+            Ty::Dyn
+        }
+        // Everything else has no *type* rule yet — stay gradual
+        // (sound-by-omission) — but still descend, so an error nested inside an
+        // un-typed form is reported rather than swallowed by the shrug.
+        other => {
+            for child in child_exprs_of(other) {
+                synth(child, ctx, errors);
+            }
+            Ty::Dyn
+        }
+    }
+}
+
+/// Synthesize a block statement for its nested errors. A `let` binding's type is
+/// not yet threaded into `ctx.locals` — that is a separate refinement — so this
+/// walks for errors and discards the types.
+fn synth_stmt(stmt: &CoreStmt, ctx: &Ctx, errors: &mut Vec<TypeError>) {
+    match stmt {
+        CoreStmt::Let { value, .. } | CoreStmt::Expr(value) => {
+            synth(value, ctx, errors);
+        }
+        CoreStmt::Assign { target, value } => {
+            synth(target, ctx, errors);
+            synth(value, ctx, errors);
+        }
     }
 }
 
@@ -728,7 +767,12 @@ fn walk_effects(
 /// The immediate sub-expressions of `expr` (for a uniform traversal). `Without`'s
 /// body is *excluded* — its caller handles it specially (attenuated scope).
 fn child_exprs(expr: &CoreExpr) -> Vec<&CoreExpr> {
-    match &expr.kind {
+    child_exprs_of(&expr.kind)
+}
+
+/// [`child_exprs`] over a bare kind, for callers that have already matched on it.
+fn child_exprs_of(kind: &CoreExprKind) -> Vec<&CoreExpr> {
+    match kind {
         // Leaves — and `Without`, whose body the caller walks under an attenuated
         // `dropped`, so it is *not* an ordinary child here.
         CoreExprKind::Int(_)
@@ -979,6 +1023,34 @@ mod tests {
         assert!(!errors.is_empty(), "a test body's type error should be reported");
     }
 
+
+    /// A block body is the *normal* way to write anything non-trivial, so a
+    /// checker that stops at `{` is only checking one-liners. This was silently
+    /// true until tests needed it: every real test body is a block.
+    #[test]
+    fn a_block_body_is_checked_against_the_declared_return_type() {
+        let bare = errors(r#"f() -> Int = "x""#);
+        let blocked = errors(r#"f() -> Int = { "x" }"#);
+        assert_eq!(bare.len(), 1, "control: a bare mismatched body: {bare:?}");
+        assert_eq!(blocked.len(), 1, "a mismatched body inside a block: {blocked:?}");
+    }
+
+    /// A block's type is its result expression's, so a *correct* block body must
+    /// stay silent — the fix must not turn every block into a false positive.
+    #[test]
+    fn a_correct_block_body_reports_nothing() {
+        assert_eq!(errors("f() -> Int = { 1 }"), Vec::new());
+        assert_eq!(errors("f() -> Int = { let a = 1  a }"), Vec::new());
+    }
+
+    /// Errors nested inside a block's *statements* are found too, not just its
+    /// result — that is where the assertions in a test body live.
+    #[test]
+    fn an_error_in_a_block_statement_is_reported() {
+        let errors = errors(r#"test "bad" { expect 3  expect true }"#);
+        assert_eq!(errors.len(), 1, "expected one type error, got {errors:?}");
+        assert!(errors[0].message.contains("Bool"), "{}", errors[0].message);
+    }
 
     #[test]
     fn a_function_body_is_checked_against_its_declared_return_type() {

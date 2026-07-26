@@ -365,7 +365,23 @@ fn print_at(expr: &Expr, min_bp: u8, depth: usize) -> String {
 /// already closed and needs no help.
 fn bp_of(kind: &ExprKind) -> u8 {
     match kind {
-        ExprKind::Lambda { .. } | ExprKind::If { .. } => LOOSEST_BP,
+        // Each of these swallows a trailing operand at the loosest binding
+        // power, so as a whole they bind as loosely as what they took — exactly
+        // like a lambda body or an `if`'s else branch. Scoring them `ATOM_BP`
+        // (the fallthrough) said "already delimited, needs no help", which is
+        // true of a list or a block and false of anything that ends in a
+        // subexpression: `(expect x)?.field` reprinted as `expect x?.field`,
+        // handing the field access — and everything right of it — to the
+        // `expect`. Found by babble's round-trip fuzzer at seed 27.
+        //
+        // `handle`/`without` are deliberately *not* here: they end in a
+        // delimited `{ … }`, so nothing to their right can be drawn in, and
+        // scoring them loose makes the printer add parentheses the source never
+        // needed — `without delta { }.items` became `(without delta { }).items`,
+        // whose leading `(` the *previous* statement then reads as a call.
+        // Seed 2 of the same fuzzer, which is the cheapest possible proof that
+        // over-parenthesising is not the safe direction.
+        ExprKind::Lambda { .. } | ExprKind::If { .. } | ExprKind::Expect { .. } => LOOSEST_BP,
         ExprKind::Binary { op, .. } => binding_power(*op).0,
         ExprKind::Range { .. } => binding_power(BinOp::Range).0,
         ExprKind::Unary { .. } | ExprKind::Spread(_) => PREFIX_BP,
