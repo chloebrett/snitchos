@@ -15,9 +15,16 @@ diversity axes), [babble.md](babble.md) (Tier-0, the null baseline),
 
 ## The goal
 
-Point a ~4B local open model at the existing ~20k-token real-Stitch corpus, feed
-it recipe tuples, and let it run until **~500k validated tokens** exist. Then
-train drivel on that and compare against the babble-trained drivel.
+Point a ~4B local open model at hand-written real Stitch, feed it recipe tuples,
+and let it run until **~500k validated tokens** exist. Then train drivel on that
+and compare against the babble-trained drivel.
+
+**The exemplar source is [stitch-examples-corpus.md](stitch-examples-corpus.md)'s
+30 programs** (~100+ lines each, native `test` blocks, hand-polished) — that plan
+already names this one as its consumer. 1 of 30 exists today (`json.st`), so
+exemplar quality and count both improve underneath this plan as it proceeds; the
+`fs-image/` and `stitch/src/prelude.st` files are usable meanwhile. **Exclude
+`plans/lang/samples.st`** — illustrative fragments, not valid programs.
 
 The output does not need to be good. It needs to be **semantic** — programs that
 mean something, rather than grammatically-valid noise. That is the one property
@@ -329,9 +336,166 @@ per [../docs/llm-design.md](../docs/llm-design.md).
   distribution, not babble's 571.
 - Keep it a plain data struct. The report keys on it.
 
+**Starting axis values — 100 domains**, grouped so gaps and over-representation
+are visible when expanding:
+
+- **Inventory & stock**: warehouse bin allocation · bakery inventory · seed
+  catalogue · spare-parts bin · tool crib checkout · lost-property office ·
+  pharmacy stock rotation · cold-chain shipment log · shipping container
+  stowage · museum exhibit rotation
+- **Queues, bookings & rotas**: library hold queue · kitchen order queue ·
+  barber shop appointments · court docket · classroom timetable · on-call
+  rotation · ice rink session booking · allotment plot waiting list · community
+  hall bookings · telescope observing queue
+- **Transit & movement**: subway turnstile · ferry schedule · flight manifest ·
+  parking garage occupancy · bus stop departure board · bike share dock · level
+  crossing barrier · taxi meter · toll booth · elevator dispatch
+- **Sensors, meters & logs**: weather station · tide table · seismograph log ·
+  water meter readings · air quality monitor · soil moisture probe · beehive
+  scale · river gauge · street light fault log · whale sighting log
+- **Money & ledgers**: household ledger · tip pooling · market stall takings ·
+  subscription billing · currency exchange board · petty cash box · invoice
+  aging · vending float reconciliation · locker rental · library fine amnesty
+- **Games & scoring**: chess clock · darts scoring · cribbage board · bowling
+  scorecard · sudoku grid · crossword grid · dominoes train · go territory
+  scoring · pinball high scores · tournament bracket
+- **Sport & outdoors**: swim lane assignment · marathon split times · rowing
+  crew seating · referee assignment · ski patrol incidents · climbing route
+  grading · campsite pitch allocation · orienteering control points · sauna
+  booking · hiking trail register
+- **Growing & livestock**: greenhouse watering · bird feeder log · orchard
+  harvest · sheep flock register · mushroom cultivation · compost turning ·
+  apiary inspection · fish hatchery tank · tree ring measurement · seed bank
+  vault
+- **Craft, food & making**: knitting pattern rows · pottery kiln firing · loom
+  warp threading · woodworking cut list · bookbinding signatures · dyeing lot
+  tracking · model railway layout · brewery fermentation · coffee roast
+  profiles · cheese ageing cave
+- **Media, records & home**: playlist shuffling · podcast feed · subtitle
+  timing · photo album tagging · radio station rotation · e-reader bookmarks ·
+  thermostat schedule · laundromat machine status · dog licence register · lost
+  pet register
+
+**Constructs** come from [../docs/language-design.md](../docs/language-design.md):
+`prod`, `sum`, `contract` + `on`, `uses` capabilities, `Result` with `?`,
+`Maybe`, `|>`, `use <-`, placeholders, recursion over `List`/`Map`.
+
+**Sizes**: small (~40–70 lines) · medium (~80–150) · large (~150–250).
+
+**Shapes**: module (`ext` items, no `main`) · script (has `main`) · server loop
+(receive → dispatch) · library-with-heavy-tests.
+
+**Only one crossing constraint is real: construct count must scale with size.**
+Small 1–2, medium 2–3, large 3–4. Four constructs in a 40-line program is
+overstuffed; one construct across 250 lines under-specifies. Same failure in
+both directions, and it is the only combination that reliably wastes a call.
+
+**Do not prune on "does this domain suit this shape".** A first review pass
+rejected `tide table × server loop` and `seed catalogue × uses FsWrite ×
+library-with-heavy-tests`; both rejections were wrong. Any domain can be framed
+as a service over its own data (a tides API), and a capability under heavy tests
+*forces the program to fake the filesystem in its tests* — which is exactly what
+effect handlers are for, making it one of the more valuable tuples rather than an
+incoherent one. The test to apply is "could a competent programmer write this",
+not "do these obviously go together", and the answer to the first is almost
+always yes. Over-pruning here silently removes the interesting programs.
+
+What the bad rejections actually revealed is a **rendering** problem, not a
+sampling one — see Increment 4's brief templating.
+
+**Domain is a weaker diversity axis than 100 entries suggests.** A second review
+pass over the expanded list found that surface-distinct domains collapse to a
+handful of *structural archetypes* — scarce-resource booking, event log with
+aggregation, inventory with movements, scoring/rules engine, timetable,
+parse/format, state machine, graph traversal. `library hold queue`, `ice rink
+session booking` and `sauna booking` are one program wearing three hats;
+`subscription billing` and `dog licence register` are both record-with-an-expiry.
+Expect ~100 domains to yield closer to ~8 structural shapes.
+
+Consequences, none of which is "shorten the list":
+
+- **The per-recipe dedup rate (Increment 9) is the instrument that catches this**,
+  and MinHash over the alpha-normalized stream will flag the collapse even though
+  the domains differ. It is already planned; expect it to fire on domain, not on
+  the other axes.
+- **Construct and shape are likely carrying more real diversity than domain is.**
+  If coverage plateaus, mine those axes before adding domain entries — the
+  hundred-and-first domain is worth less than the twelfth construct.
+- Domains that *always* collapse into an existing archetype are the ones to
+  prune, and that is a measurement, not a judgement call.
+
+**Prefer domain jargon to generic nouns for the must-use words.** `krausen`,
+`seki`, `boneyard`, `bisque` force the model somewhere it would not otherwise go;
+`slot`, `share`, `sync`, `renewal` fit anywhere and therefore differentiate
+nothing — and generic words recur across domains, adding to the structural
+collapse above rather than fighting it.
+
+**The must-use-words axis needs a different treatment than TinyStories'.** Prose
+absorbs an arbitrary noun; code does not, and a word with no natural role becomes
+dead filler that teaches the model to emit dead filler. Constrain them to be
+*identifier names* (a binding, parameter, field, or function may carry the word)
+rather than concepts the program must be about, and draw them from the corpus's
+own identifier distribution so they are plausible in context.
+
 ### 4. The prompt builder
 
 Exemplars + tuple → prompt.
+
+**The MVP prompt.** This is the highest-leverage artifact in the plan — yield
+depends on it more than on model choice, and yield dominates wall-clock. Note it
+is laid out to obey its own caching rule: invariant content first, recipe last.
+
+```
+[system]
+You write Stitch, a small statically-typed functional language. You have not
+seen Stitch before — learn it from the examples that follow.
+
+Rules that are easy to get wrong:
+- There are no loop keywords. Use recursion or List operations.
+- Exported items are prefixed `ext`; everything else has no prefix.
+- Conditionals are `cond => then | else`. There is no if/else.
+- Comments explain *why*, never *what*.
+- Include `test "…" { expect … }` blocks covering the core logic.
+
+Reply with exactly one fenced ```stitch block and nothing else.
+
+[user — invariant, cacheable prefix]
+Here are complete Stitch programs.
+
+<exemplar 1, verbatim>
+<exemplar 2, verbatim>
+
+[user — varies per recipe, kept last]
+Write a new Stitch program.
+
+Domain: a lending library's hold queue
+Shape: module — `ext` items, no `main`
+Size: about 80–120 lines
+Use these constructs: prod, Result with `?`, |>
+Use these words as identifiers somewhere meaningful: shelf, patron, expiry
+```
+
+**Render the recipe as a brief, not as a list of axes.** This is the difference
+between the model reconciling constraints and the model writing a program, and a
+4B model is exactly where reconciliation fails:
+
+```
+✗  Domain: tide table
+   Shape: server loop
+
+✓  Write a tides API: a server loop that answers queries against a tide table.
+```
+
+Same tuple; the reconciliation is done for it. Give each shape a one-line
+template — *a service over X* / *a script that does X* / *a module providing X* /
+*a well-tested library for X* — and interpolate the domain. Cheap, and likely a
+larger yield lever than any sampling constraint.
+
+Deliberate choices worth revisiting once there are numbers: the syntax rules are
+prose because exemplars teach syntax better than description does and prose costs
+prefill; `test` blocks are requested because the exemplars carry them anyway and
+they are checkable semantic content — but they roughly double output length, so
+they are a knob if throughput bites.
 
 - **RED**: the prompt names every required construct verbatim; the selected
   exemplars each use at least one of the tuple's required constructs.
