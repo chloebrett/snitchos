@@ -193,6 +193,7 @@ catalog! {
     wfi "frame-allocator-metrics"         scenarios::frame_allocator_metrics        [frame]         {"init"};
     wfi "frame-allocator-oom"             scenarios::frame_allocator_oom            [frame, oom]    {"frame-oom"};
     wfi "kernel-heap-metrics"             scenarios::kernel_heap_metrics            [heap]          {"init"};
+    wfi "net-telemetry-over-udp"          scenarios::net_telemetry_over_udp         [boot, net]     {"net-telemetry"};
     wfi "sched-context-switch-smoke"      scenarios::sched_context_switch_smoke     [sched]         {"init"};
     wfi "sched-spawn-registers-thread"    scenarios::sched_spawn_registers_thread   [sched]         {"demo"};
     cpu "sched-yield-round-trips"         scenarios::sched_yield_round_trips        [sched]         {"demo"};

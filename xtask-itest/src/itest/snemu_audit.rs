@@ -25,7 +25,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use super::harness::View;
+use super::harness::{TelemetrySource, View};
 use super::schedule;
 use super::snapshot_tree::{self, BranchKeyTable};
 use super::{SCENARIOS, scenario_view_fn};
@@ -44,8 +44,19 @@ const SHARED_STEP_BATCH: u64 = 4096;
 /// per workload; each observe-only scenario then replays a budget-truncated prefix
 /// of it instead of re-executing the identical deterministic guest. Stops early if
 /// the guest faults (draining any last decodable frames first).
+/// The telemetry device a workload's frames come off — `Net` for the
+/// net-telemetry (`net=`) workload, the virtio-console otherwise.
+fn telemetry_source_for(workload: Option<&str>) -> TelemetrySource {
+    if workload == Some(snemu_diff::NET_TELEMETRY_WORKLOAD) {
+        TelemetrySource::Net
+    } else {
+        TelemetrySource::Console
+    }
+}
+
 fn record_shared_stream(
     mut machine: snemu::machine::Machine,
+    source: TelemetrySource,
     depth: u64,
 ) -> Vec<(u64, protocol::stream::OwnedFrame)> {
     use protocol::stream::try_decode_frame;
@@ -56,7 +67,7 @@ fn record_shared_stream(
         // instret (the batch boundary at which it was decoded — see SHARED_STEP_BATCH).
         loop {
             let decoded = {
-                let tx = machine.virtio_tx_output();
+                let tx = source.tx_output(&machine);
                 try_decode_frame(&tx[consumed..]).ok().flatten()
             };
             match decoded {
@@ -77,7 +88,7 @@ fn record_shared_stream(
                 // then stop — no further frames will come.
                 loop {
                     let decoded = {
-                        let tx = machine.virtio_tx_output();
+                        let tx = source.tx_output(&machine);
                         try_decode_frame(&tx[consumed..]).ok().flatten()
                     };
                     match decoded {
@@ -718,7 +729,7 @@ pub fn run(
             }
             PipelineTask::Shared(workload, depth) => {
                 let stream = match read_snapshot(&snap_store, *workload) {
-                    Some(m) => record_shared_stream(m, *depth),
+                    Some(m) => record_shared_stream(m, telemetry_source_for(*workload), *depth),
                     None => Vec::new(),
                 };
                 let pass_instret = stream.last().map_or(0, |(i, _)| *i);
@@ -1215,7 +1226,10 @@ const CHECKPOINT_BUDGET: u64 = 60_000_000;
 fn run_to_checkpoint(machine: &mut snemu::machine::Machine, budget: u64) -> Result<(), String> {
     let contains = |hay: &[u8]| hay.windows(CHECKPOINT.len()).any(|w| w == CHECKPOINT);
     let mut steps = 0u64;
-    let (mut uart_seen, mut tx_seen) = (0usize, 0usize);
+    // The checkpoint marker rides whichever telemetry stream the boot uses — the
+    // virtio-console, or virtio-net for a `net=` boot — so scan both (the unused
+    // one stays empty).
+    let (mut uart_seen, mut tx_seen, mut net_seen) = (0usize, 0usize, 0usize);
     while steps < budget {
         {
             let uart = machine.uart_output();
@@ -1231,6 +1245,15 @@ fn run_to_checkpoint(machine: &mut snemu::machine::Machine, budget: u64) -> Resu
             if tx.len() != tx_seen {
                 tx_seen = tx.len();
                 if contains(tx) {
+                    return Ok(());
+                }
+            }
+        }
+        {
+            let net = machine.net_tx_output();
+            if net.len() != net_seen {
+                net_seen = net.len();
+                if contains(net) {
                     return Ok(());
                 }
             }
@@ -1277,7 +1300,8 @@ fn run_scenario(
     scenario: &itest_harness::Scenario,
     max_steps: u64,
 ) -> (Outcome, u64, u64, snapshot_tree::BranchKey) {
-    let mut view = View::live(machine, budget_for(scenario.name, max_steps));
+    let telemetry = telemetry_source_for(scenario.workload);
+    let mut view = View::live(machine, telemetry, budget_for(scenario.name, max_steps));
     let outcome = match scenario_view_fn(scenario.name)(&mut view) {
         Ok(()) => Outcome::Pass,
         Err(why) => Outcome::Fail {

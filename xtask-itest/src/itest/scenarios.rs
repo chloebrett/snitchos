@@ -699,6 +699,25 @@ pub fn boot_reaches_heartbeat(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Telemetry over UDP (M2.5): booting `init` with a `net=` bootarg routes the
+/// frame stream through virtio-net instead of the virtio-console. The harness
+/// reads the net device's extracted payload (its workload selects
+/// [`TelemetrySource::Net`](super::harness::TelemetrySource)), so reaching the
+/// same boot sequence — Hello → kernel.boot → kernel.heartbeat — proves the whole
+/// UDP path end to end: kernel `UdpBatcher` → virtio-net TX → snemu's net model
+/// strips the Ethernet/IP/UDP + virtio-net headers → the decoder reads the COBS
+/// payload.
+pub fn net_telemetry_over_udp(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 3, is_hello())
+        .ok_or("no Hello frame over UDP within 3s — net telemetry path broken")?;
+    h.wait_for(SEC * 3, is_span_start_named("kernel.boot"))
+        .ok_or("no kernel.boot SpanStart over UDP within 3s")?;
+    h.wait_for(SEC * 30, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no kernel.heartbeat SpanStart over UDP within 30s")?;
+
+    Ok(())
+}
+
 /// Two consecutive heartbeat `SpanStarts` arrive with **monotonic, advancing**
 /// timestamps — proof the timer IRQ fires *repeatedly* (not just once) and the
 /// clock progresses between fires. A timer that fired once and died would pass

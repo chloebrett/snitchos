@@ -41,9 +41,30 @@ const LIVE_STEP_BATCH: u64 = 4096;
 /// `send_input` injects console bytes the guest then reads. That reactive
 /// input→output loop is exactly what a batch capture can't reproduce (the result
 /// frames depend on input fed mid-run). Bounded by a total `max_steps`.
+/// Which device stream a boot's telemetry comes off: the virtio-console (the
+/// default) or virtio-net (a `net=` boot, M2.5). The frame bytes are identical
+/// (COBS); only the source device differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelemetrySource {
+    Console,
+    Net,
+}
+
+impl TelemetrySource {
+    /// The device's decoded-so-far TX byte stream on `machine`.
+    pub(crate) fn tx_output(self, machine: &snemu::machine::Machine) -> &[u8] {
+        match self {
+            TelemetrySource::Console => machine.virtio_tx_output(),
+            TelemetrySource::Net => machine.net_tx_output(),
+        }
+    }
+}
+
 struct LiveSnemu {
     machine: snemu::machine::Machine,
-    /// Bytes of the virtio-console TX stream already decoded into frames.
+    /// Which device the telemetry stream comes off.
+    source: TelemetrySource,
+    /// Bytes of the telemetry TX stream already decoded into frames.
     tx_consumed: usize,
     /// The run budget, denominated in **guest instret** (`Machine::instret`), not
     /// host `step()` calls — with the block JIT one call retires a whole block, so a
@@ -57,8 +78,8 @@ struct LiveSnemu {
 }
 
 impl LiveSnemu {
-    fn new(machine: snemu::machine::Machine, max_instret: u64) -> Self {
-        Self { machine, tx_consumed: 0, max_instret, halted: false }
+    fn new(machine: snemu::machine::Machine, source: TelemetrySource, max_instret: u64) -> Self {
+        Self { machine, source, tx_consumed: 0, max_instret, halted: false }
     }
 
     /// The next telemetry frame, stepping the machine as needed. `None` once the
@@ -69,7 +90,7 @@ impl LiveSnemu {
             // Decode from the already-produced TX bytes first (the borrow of the
             // machine ends before we step, so the two never overlap).
             let decoded = {
-                let tx = self.machine.virtio_tx_output();
+                let tx = self.source.tx_output(&self.machine);
                 try_decode_frame(&tx[self.tx_consumed..]).ok().flatten()
             };
             if let Some((frame, n)) = decoded {
@@ -520,9 +541,13 @@ impl View {
     /// steps until the next frame — so interactive scenarios (console echo, the
     /// Stitch REPL) run for real. Also `batch` (a spent step budget is a clean
     /// end, like a closed capture).
-    pub(crate) fn live(machine: snemu::machine::Machine, max_steps: u64) -> Self {
+    pub(crate) fn live(
+        machine: snemu::machine::Machine,
+        telemetry: TelemetrySource,
+        max_steps: u64,
+    ) -> Self {
         View {
-            source: FrameSource::Live(LiveSnemu::new(machine, max_steps)),
+            source: FrameSource::Live(LiveSnemu::new(machine, telemetry, max_steps)),
             strings: HashMap::new(),
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),

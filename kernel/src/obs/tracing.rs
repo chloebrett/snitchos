@@ -75,6 +75,21 @@ pub fn timestamp() -> u64 {
 /// Encode a `Frame::Hello` with the given CPU timebase and ship it out
 /// the virtio-console. The very first frame on the wire — tells the host
 /// what `timebase_hz` to use when interpreting subsequent timestamps.
+/// Route already-encoded frame `bytes` to the active telemetry transport: the
+/// UDP sink if `net=` selected one, otherwise the virtio-console. The single
+/// wire-choosing site — the live emit path, `send_hello`, and the pre-init flush
+/// all go through it, so none of them can hardcode the wrong device.
+fn transmit_bytes(bytes: &[u8]) {
+    if let Some(udp) = UDP_TX.get() {
+        // One datagram per frame for now (see `KernelSink::emit`).
+        let mut batcher = udp.lock();
+        batcher.push_bytes(bytes);
+        batcher.flush();
+    } else {
+        virtio_console::send(bytes);
+    }
+}
+
 pub fn send_hello(timebase_hz: u32) {
     let frame = Frame::Hello {
         timebase_hz: u64::from(timebase_hz),
@@ -82,7 +97,7 @@ pub fn send_hello(timebase_hz: u32) {
     };
     let mut buf = [0u8; 40];
     if let Ok(encoded) = protocol::wire_encode(&frame, &mut buf) {
-        virtio_console::send(encoded);
+        transmit_bytes(encoded);
     }
 }
 
@@ -121,16 +136,12 @@ impl FrameSink for KernelSink {
         let Ok(bytes) = protocol::wire_encode(frame, &mut buf) else {
             return;
         };
-        if let Some(udp) = UDP_TX.get() {
-            // One datagram per frame for now: telemetry trickles out below the
-            // MTU, so relying on batch-overflow would never flush. A
-            // heartbeat-driven flush that packs many frames per datagram is the
-            // efficiency follow-up (design open-question #2).
-            let mut batcher = udp.lock();
-            batcher.push_bytes(bytes);
-            batcher.flush();
-        } else if virtio_console::CONSOLE.get().is_some() {
-            virtio_console::send(bytes);
+        // One datagram per frame for now: telemetry trickles out below the MTU,
+        // so relying on batch-overflow would never flush. A heartbeat-driven
+        // flush that packs many frames per datagram is the efficiency follow-up
+        // (design open-question #2).
+        if UDP_TX.get().is_some() || virtio_console::CONSOLE.get().is_some() {
+            transmit_bytes(bytes);
         } else {
             PRE_INIT_BUFFER.lock().append(bytes);
         }
@@ -682,9 +693,7 @@ static PRE_INIT_BUFFER: crate::sync::Mutex<PreInitBuffer> = crate::sync::Mutex::
 /// this as a positive "buffer flushed, here's the loss count"
 /// checkpoint. `count == 0` means no frames were lost.
 pub fn flush_pre_init() {
-    let dropped = PRE_INIT_BUFFER
-        .lock()
-        .drain(virtio_console::send);
+    let dropped = PRE_INIT_BUFFER.lock().drain(transmit_bytes);
     emit_frame(&Frame::Dropped { count: dropped });
 }
 
