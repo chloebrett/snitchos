@@ -1,15 +1,16 @@
 //! The held-out side of the eval: real Stitch, as written by a human.
 //!
-//! Increment 2 owns corpus assembly proper — sources, augmentation, the
-//! deterministic split, `MinHash` dedup. What lives here is only what increment 3
-//! needs to compute a floor row: read some `.st` files, keep the ones that
-//! parse, and report what was dropped.
+//! This is the loader, not a placeholder for one. Increment 2 adds *sources*
+//! (the `examples/` corpus), and the layers that sit on top of loading —
+//! augmentation, the deterministic split, `MinHash` dedup, per-source token
+//! counts. It does not need a second walker: reading `.st` files, keeping the
+//! ones that parse, and reporting what was dropped is the same job whoever
+//! asks.
 //!
-//! **Nothing here is a train/held-out split.** babble's floor row needs no
-//! split, because babble was never trained on anything. The moment a *model* is
-//! scored, the split from increment 2 is mandatory and this loader is not
-//! enough — which is stated here so the shortcut cannot be mistaken for the
-//! real thing later.
+//! **What is missing here is the split, not the loading.** babble's floor row
+//! needs no split, because babble was never trained on anything. The moment a
+//! *model* is scored on masked NLL, a train/held-out split is mandatory and
+//! this module does not provide one — [`load`] returns everything it was given.
 
 use std::path::{Path, PathBuf};
 

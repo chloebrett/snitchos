@@ -81,9 +81,12 @@ Increment 6, not a prerequisite.
 
 ## Increment 0 — the spike, before any harness
 
+**Full plan: [corpus-mvp-spike.md](corpus-mvp-spike.md)** — setup, the eight
+recipes, the record sheet, and pre-registered decision rules. Summary below.
+
 **Twenty prompts per model, run by hand, across two or three sizes (4B / 8B /
 14B).** This is not a formality; it decides the shape of everything below, and
-it is about an hour of work.
+it is about two hours of work.
 
 Measure four things:
 
@@ -336,45 +339,17 @@ per [../docs/llm-design.md](../docs/llm-design.md).
   distribution, not babble's 571.
 - Keep it a plain data struct. The report keys on it.
 
-**Starting axis values — 100 domains**, grouped so gaps and over-representation
-are visible when expanding:
+**Axis values live in [corpus-recipe-axes.md](corpus-recipe-axes.md)** — 100
+domains, each with a distinguishing clause and one sampled crossing, plus the
+construct / size / shape value lists. Split out to keep this plan readable; the
+crossing *rules* stay here, the *values* live there.
 
-- **Inventory & stock**: warehouse bin allocation · bakery inventory · seed
-  catalogue · spare-parts bin · tool crib checkout · lost-property office ·
-  pharmacy stock rotation · cold-chain shipment log · shipping container
-  stowage · museum exhibit rotation
-- **Queues, bookings & rotas**: library hold queue · kitchen order queue ·
-  barber shop appointments · court docket · classroom timetable · on-call
-  rotation · ice rink session booking · allotment plot waiting list · community
-  hall bookings · telescope observing queue
-- **Transit & movement**: subway turnstile · ferry schedule · flight manifest ·
-  parking garage occupancy · bus stop departure board · bike share dock · level
-  crossing barrier · taxi meter · toll booth · elevator dispatch
-- **Sensors, meters & logs**: weather station · tide table · seismograph log ·
-  water meter readings · air quality monitor · soil moisture probe · beehive
-  scale · river gauge · street light fault log · whale sighting log
-- **Money & ledgers**: household ledger · tip pooling · market stall takings ·
-  subscription billing · currency exchange board · petty cash box · invoice
-  aging · vending float reconciliation · locker rental · library fine amnesty
-- **Games & scoring**: chess clock · darts scoring · cribbage board · bowling
-  scorecard · sudoku grid · crossword grid · dominoes train · go territory
-  scoring · pinball high scores · tournament bracket
-- **Sport & outdoors**: swim lane assignment · marathon split times · rowing
-  crew seating · referee assignment · ski patrol incidents · climbing route
-  grading · campsite pitch allocation · orienteering control points · sauna
-  booking · hiking trail register
-- **Growing & livestock**: greenhouse watering · bird feeder log · orchard
-  harvest · sheep flock register · mushroom cultivation · compost turning ·
-  apiary inspection · fish hatchery tank · tree ring measurement · seed bank
-  vault
-- **Craft, food & making**: knitting pattern rows · pottery kiln firing · loom
-  warp threading · woodworking cut list · bookbinding signatures · dyeing lot
-  tracking · model railway layout · brewery fermentation · coffee roast
-  profiles · cheese ageing cave
-- **Media, records & home**: playlist shuffling · podcast feed · subtitle
-  timing · photo album tagging · radio station rotation · e-reader bookmarks ·
-  thermostat schedule · laundromat machine status · dog licence register · lost
-  pet register
+**Each domain entry is a `(name, distinguishing clause)` pair, not a string.**
+The clause names the actual computation — "exclusive occupancy, so overlapping
+intervals must be detected" rather than bare "sauna booking" — and it is what
+stops a weak model defaulting to the same records-plus-filter program for every
+domain. Clause-writing is one-off and amortised over the whole run, not paid per
+generation.
 
 **Constructs** come from [../docs/language-design.md](../docs/language-design.md):
 `prod`, `sum`, `contract` + `on`, `uses` capabilities, `Result` with `?`,
@@ -584,6 +559,13 @@ guard against high-effort babble.
 - **RED**: a constrained run produces only parsing programs over a fixture
   batch; the intervention log is non-empty and its clustering is asserted on a
   synthetic case.
+- **The mask does not stop repetition loops.** Comments are grammatically legal
+  everywhere, so a candidate can spiral into repeated commentary while remaining
+  perfectly valid — observed on the very first hand-run candidate
+  ([corpus-mvp-spike.md](corpus-mvp-spike.md) Findings 001). A repetition penalty,
+  a `max_tokens` cap and the Increment 5 loop detector are needed *regardless* of
+  this increment; do not let the mask's parse guarantee imply a termination
+  guarantee.
 - **Reserve a deliberate unconstrained fraction** with a logged ratio. A model
   prevented from being confused produces no confusion to harvest, and Increment
   1's error corpus is the RL branch's scarcest input. Decide the ratio; do not

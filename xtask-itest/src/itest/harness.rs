@@ -977,6 +977,8 @@ impl View {
                 format!("NotifySignal {{ notification={notification} mask={mask:#b} from={from_task} t={t} hart={hart_id} }}"),
             OwnedFrame::NotifyWait { notification, bits, to_task, t, hart_id } =>
                 format!("NotifyWait {{ notification={notification} bits={bits:#b} to={to_task} t={t} hart={hart_id} }}"),
+            OwnedFrame::AudioXRun { count, t, hart_id } =>
+                format!("AudioXRun {{ count={count} t={t} hart={hart_id} }}"),
         }
     }
 }
@@ -1087,6 +1089,7 @@ fn variant_name(frame: &OwnedFrame) -> &'static str {
         OwnedFrame::Message { .. } => "Message",
         OwnedFrame::NotifySignal { .. } => "NotifySignal",
         OwnedFrame::NotifyWait { .. } => "NotifyWait",
+        OwnedFrame::AudioXRun { .. } => "AudioXRun",
     }
 }
 
