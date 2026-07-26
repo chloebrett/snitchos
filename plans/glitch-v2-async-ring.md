@@ -105,10 +105,21 @@ telemetry the OS lacks — a hard deadline with a wall-clock (audible) consequen
    kernel-mint grant from v1 (`kernel/src/trap/user.rs`, glitch.md Increment 7). This
    also positions init to delegate `AudioSink` to a future modem directly.
 
-7. **snemu PCM-out stays outside the gate.** `--audio-out` must capture the
-   *async-drained* path to WAV; a live native window is optional (the snemu
-   native-window direction). The **gate asserts on `samples_emitted_total` and
-   `xruns_total`**, never on sound qualitatively — hearing is for humans.
+7. **The gate asserts on the waveform, under snemu.** The drained PCM buffer is
+   deterministic bytes (the ring is FIFO → the drained sequence == the enqueued
+   sequence), so the gate asserts on it directly — strictly stronger than the counters,
+   which pass even at the wrong sample *rate*, on a clipped mix, or on a DC constant
+   (the exact `DAC_RATE_HZ`/`FS_HZ` mismatch class the counters miss). Assertions:
+   byte-exact expected waveform where the stream is fixed (async-plays), a
+   Goertzel/DFT-at-target-bins presence check where phase detail is irrelevant (mix), a
+   detectable discontinuity at the underrun (xrun). Counters (`samples_emitted_total`,
+   `xruns_total`) stay as a cheap floor and as the **QEMU-path** check (the fidelity
+   escape hatch isn't deterministic enough for byte-exact). What is *not* gate-able is
+   human-qualitative listening — hearing is for ears. **Mechanism:** PCM isn't on the
+   virtio-console wire, so snemu must surface the captured samples to the itest harness
+   — this makes `--audio-out`/capture a **gate input** (a prerequisite of Increment 9),
+   not a dev-only affordance. A live native window stays optional (the snemu
+   native-window direction).
 
 Each increment is one RED→GREEN→MUTATE→KILL→REFACTOR cycle (failing test first, in its
 own edit). Pure logic leads and is host-tested; MMIO/IPC/timer glue is verified by the
@@ -220,25 +231,35 @@ kernel mint.
 **Done when:** the async-plays itest passes with glitch under init; the AudioSink's
 `parent_cap_id` chains to init, not 0.
 
-## Increment 8 — snemu PCM-out for the async path (dev affordance, outside the gate)
+## Increment 8 — snemu PCM capture (gate input; prerequisite of Increment 9)
 
-**Acceptance:** `snemu … --audio-out foo.wav` on an async workload renders the
-*drain-fed* samples to a playable WAV; (optional) a live window plays them.
-**RED/GREEN:** verify/extend snemu's PWMDAC model to capture the timer-drained `WDATA`
-writes (not the retired syscall spin). No gate assertion — this is for ears.
-**Done when:** a WAV of `glitch-async` contains the expected tone; documented as
-outside the deterministic gate.
+**Acceptance:** snemu captures the *timer-drained* `WDATA` writes and surfaces them to
+(a) the itest harness as a readable sample buffer and (b) `--audio-out foo.wav` for
+ears; the capture is deterministic across runs of a given scenario.
+**RED/GREEN:** extend snemu's PWMDAC model to record the drained samples (not the
+retired syscall spin), plus a harness-side accessor the scenarios read (WAV file the
+scenario re-reads, or a snemu capture API). A tiny host-tested waveform-analysis helper
+(`goertzel(samples, freq, rate) -> magnitude` and a square-wave generator to compare
+against) lives in a pure crate — RED: known tone reads high magnitude at its bin, low
+elsewhere.
+**Done when:** `glitch-async` capture is byte-stable run-to-run; the analysis helper's
+host tests + mutation green. (A live native window remains optional, for ears only.)
 
 ## Increment 9 — acceptance itests
 
-**Acceptance:** three deterministic snemu scenarios:
-- **`glitch-async-plays`** — `samples_emitted_total ≥ 1` from the drain **and** glitch
-  services a second IPC request while a play is in flight (proves non-blocking).
-- **`glitch-xrun`** — an under-feeding workload forces `xruns_total ≥ 1` and a
-  `Frame::AudioXRun`; the kernel keeps heartbeating after (the deadline observable, and
-  that a missed deadline is survivable).
-- **`glitch-mix`** — two overlapping plays; assert both frequencies' contribution is
-  present (e.g. both clients' `plays_total` and a mixed `samples_emitted` climb).
+**Acceptance:** three deterministic snemu scenarios, each asserting on the **captured
+waveform** (Increment 8) plus the counter floor:
+- **`glitch-async-plays`** — the drained stream is byte-exact the expected 440 Hz
+  square wave (catches wrong-rate/DC bugs the counter can't), **and** glitch services a
+  second IPC request while a play is in flight (proves non-blocking). Counter floor:
+  `samples_emitted_total ≥ 1` from the drain.
+- **`glitch-xrun`** — an under-feeding workload forces a detectable discontinuity
+  (silence/hold gap) in the drained stream at the underrun, `xruns_total ≥ 1`, and a
+  `Frame::AudioXRun`; the kernel keeps heartbeating after (the deadline is observable
+  *in the waveform*, and survivable).
+- **`glitch-mix`** — two overlapping plays; Goertzel at both target bins shows both
+  frequencies present in the drained stream (neither starves the other). Counter floor:
+  both clients' `plays_total` climb.
 **RED→GREEN:** one `Result<(), String>` fn each in `scenarios.rs` + registration in
 `SCENARIOS`; new `workload=` arms (`audio-async`, `audio-xrun`, `audio-mix`) in
 `kernel-boot` (host-tested parse) + `kmain`/heartbeat dispatch.
@@ -249,8 +270,10 @@ outside the deterministic gate.
 
 ## Acceptance (milestone)
 
-- **Automated (gate):** Increment 9 — async-plays (non-blocking), xrun
-  (`xruns_total ≥ 1` + `AudioXRun` frame + survives), mix (two streams) under snemu.
+- **Automated (gate):** Increment 9 under snemu — async-plays (byte-exact waveform +
+  non-blocking), xrun (waveform discontinuity + `xruns_total ≥ 1` + `AudioXRun` frame +
+  survives), mix (both bins present via Goertzel). Counters are the floor and the
+  QEMU-path check; the waveform is the real assertion.
 - **By ear / hardware:** `workload=audio-async` on the VF2 → gapless tone from the
   ring; `audio-mix` → a chord; `audio-xrun` → an audible glitch where the deadline slips.
 - **Discipline preserved:** a non-holder calling `AudioEnqueue` snitches
