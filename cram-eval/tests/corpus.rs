@@ -73,6 +73,24 @@ fn build_output_is_not_corpus() {
 }
 
 #[test]
+fn unaccepted_candidates_are_not_corpus() {
+    // `plans/corpus-candidates/` holds LLM output from the corpus spike that
+    // has not been accepted yet. Four of them parse, so without an exclusion
+    // they are scored as human-written held-out Stitch — which is exactly the
+    // contamination `target/` taught us to look for, one directory over.
+    let dir = fixture_dir();
+    let candidates = dir.join("corpus-candidates");
+    std::fs::create_dir_all(&candidates).expect("fixture candidates dir");
+    std::fs::write(candidates.join("005.st"), "let candidate = 1\n").expect("write");
+
+    let found = corpus::find_stitch_files(&dir);
+    assert!(
+        found.iter().all(|path| !path.starts_with(&candidates)),
+        "an unaccepted candidate was collected as corpus: {found:?}"
+    );
+}
+
+#[test]
 fn a_missing_file_is_reported_not_a_panic() {
     let loaded = corpus::load(&[PathBuf::from("/nonexistent/nope.st")]);
     assert!(loaded.programs.is_empty());

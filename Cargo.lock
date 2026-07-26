@@ -2537,6 +2537,7 @@ dependencies = [
  "cram",
  "cram-corpus",
  "cram-eval",
+ "cram-gen",
  "kvetch-model",
  "kvetch-vocab",
  "stitch",

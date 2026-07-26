@@ -376,9 +376,13 @@ parsing or scoring per top-level item rather than per file.
 ### What is deliberately not here
 
 - **No masked-NLL row for a checkpoint.** Scoring a *model* on the gate metric
-  needs the class → vocab-token mask, which is increment 6's work, and a real
-  train/held-out split, which is increment 2's. The `--eval` output says so
-  rather than printing a number that looks comparable and is not.
+  needs the class → vocab-token mask, and a real train/held-out split, which is
+  increment 2's. The `--eval` output says so rather than printing a number that
+  looks comparable and is not. The mask has its own design —
+  [../docs/grammar-mask-design.md](../docs/grammar-mask-design.md) — because the
+  conversion from a token distribution to a class distribution is where a
+  plausible-but-meaningless number would hide, and because constrained decoding
+  wants the same table.
 - **FIM match**: an empty cell, not a deferred metric — see the ladder doc's
   matrix section. FIM is a training-time objective and no rung has been trained
   with it, so there is nothing to measure rather than something skipped.

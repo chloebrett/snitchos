@@ -78,7 +78,13 @@ pub fn load(paths: &[PathBuf]) -> Corpus {
 /// `target/tmp/`. Walking it is also where the search spends nearly all of its
 /// time. Dot-directories are excluded for the same reason one rung up — `.git`
 /// holds every past version of every file.
-const NOT_CORPUS: &[&str] = &["target", "corpora", "checkpoints"];
+///
+/// `corpus-candidates/` is the same mistake wearing better clothes: it holds
+/// LLM output from the corpus spike that has not been accepted yet, and four of
+/// those files *parse*. Parsing is not the bar — held-out means human-written,
+/// and machine-written Stitch scored as held-out flatters every rung above the
+/// model that wrote it.
+const NOT_CORPUS: &[&str] = &["target", "corpora", "checkpoints", "corpus-candidates"];
 
 /// Every `.st` file under `root`, depth-first and in sorted order.
 ///

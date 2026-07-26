@@ -9,7 +9,8 @@
 //! Consumed from `xtask-cram`, never lean `xtask`: an edit here must not
 //! recompile the tool that runs `cargo xtask test`.
 
-use serde::Deserialize;
+use std::io::{BufRead, BufReader};
+
 use stitch::gate::{self, Outcome};
 
 pub mod prompt;
@@ -17,9 +18,40 @@ pub mod prompt;
 /// A model that can answer a system+user pair. The trait exists so every stage
 /// below it is testable with no model present.
 pub trait Model {
+    /// `on_chunk` is called with each fragment as it arrives, so a long
+    /// generation narrates itself instead of appearing all at once. The return
+    /// value is still the whole response — callers that do not care about
+    /// progress pass `&mut |_| {}`.
+    ///
     /// Errors are transport/protocol failures, not bad programs — a bad program
     /// is an `Ok` whose gate `Outcome` is unhappy.
-    fn complete(&self, system: &str, user: &str) -> Result<String, String>;
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> Result<String, String>;
+}
+
+/// Pull the incremental text out of one server-sent-events frame.
+///
+/// Returns `None` for the `[DONE]` sentinel, for blank keep-alive lines, and for
+/// the opening frame (which carries a role and no content) — all of which are
+/// structure rather than output.
+#[must_use]
+pub fn sse_delta(line: &str) -> Option<String> {
+    let payload = line.strip_prefix("data:")?.trim();
+    if payload == "[DONE]" {
+        return None;
+    }
+    let frame: serde_json::Value = serde_json::from_str(payload).ok()?;
+    frame
+        .get("choices")?
+        .get(0)?
+        .get("delta")?
+        .get("content")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// What the extractor pulled out of a raw response.
@@ -38,12 +70,31 @@ pub struct Extracted {
 /// reply, not a precondition for the program being real.
 #[must_use]
 pub fn extract(raw: &str) -> Extracted {
-    let blocks: Vec<String> = fenced_blocks(raw);
+    let body = strip_reasoning(raw);
+    let blocks: Vec<String> = fenced_blocks(body);
     match blocks.split_first() {
         Some((first, rest)) => {
             Extracted { program: first.clone(), extra_blocks: rest.len() }
         }
-        None => Extracted { program: raw.trim().to_string(), extra_blocks: 0 },
+        None => Extracted { program: body.trim().to_string(), extra_blocks: 0 },
+    }
+}
+
+/// Drop a reasoning model's `<think>` block.
+///
+/// It must go *before* fences are looked for, because the block routinely quotes
+/// the prompt — including the instruction to reply in a fenced block — and a
+/// quoted fence is not a program.
+///
+/// An **unterminated** block means the token cap landed mid-thought, so there is
+/// no program at all. Returning the thinking text would hand the gate a wall of
+/// English and report a parse error, which blames the wrong thing; returning
+/// nothing lets the caller name it an extraction failure.
+fn strip_reasoning(raw: &str) -> &str {
+    let Some(open) = raw.find("<think>") else { return raw };
+    match raw[open..].find("</think>") {
+        Some(close) => &raw[open + close + "</think>".len()..],
+        None => "",
     }
 }
 
@@ -89,11 +140,69 @@ pub struct Run {
 ///
 /// # Errors
 /// Only if the model call itself fails. A rejected program is an `Ok`.
-pub fn run_once<M: Model + ?Sized>(model: &M, task: &str) -> Result<Run, String> {
-    let raw = model.complete(&prompt::system(), &prompt::user(task))?;
+pub fn run_once<M: Model + ?Sized>(
+    model: &M,
+    task: &str,
+    on_chunk: &mut dyn FnMut(&str),
+) -> Result<Run, String> {
+    let raw = model.complete(&prompt::system(), &prompt::user(task), on_chunk)?;
     let Extracted { program, extra_blocks } = extract(&raw);
     let outcome = gate::run(&program);
     Ok(Run { raw, program, extra_blocks, outcome })
+}
+
+/// Per-stage counts for a batch.
+///
+/// **The funnel is the product, never one number.** The stage a candidate dies
+/// at is the diagnosis: parse deaths mean the generator does not know the
+/// grammar (an exemplar problem), type deaths mean it has the shape and not the
+/// semantics, test deaths mean it had the semantics and got them wrong. A single
+/// yield percentage collapses four different actions into one shrug.
+#[derive(Debug, Default, Clone)]
+pub struct Tally {
+    pub parse: usize,
+    pub type_errors: usize,
+    pub tests: usize,
+    pub ok: usize,
+    pub errors: usize,
+    pub extra_blocks: usize,
+}
+
+impl Tally {
+    pub fn record(&mut self, outcome: &Outcome) {
+        match outcome {
+            Outcome::Parse(_) => self.parse += 1,
+            Outcome::Type(_) => self.type_errors += 1,
+            Outcome::Tests { .. } => self.tests += 1,
+            Outcome::Ok { .. } => self.ok += 1,
+        }
+    }
+
+    /// A transport failure, which is not a verdict about a program.
+    pub fn record_error(&mut self) {
+        self.errors += 1;
+    }
+
+    #[must_use]
+    pub fn funnel(&self, attempted: usize) -> String {
+        format!(
+            "{attempted} attempted → model errors {} → parse {} → type {} → tests {} → ok {}",
+            self.errors, self.parse, self.type_errors, self.tests, self.ok
+        )
+    }
+}
+
+/// Render a verdict for a progress line.
+#[must_use]
+pub fn describe(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Parse(error) => format!("parse — {error}"),
+        Outcome::Type(errors) => format!("type — {}", errors.join("; ")),
+        Outcome::Tests { failed, passed } => {
+            format!("tests — {passed} passed, failed: {}", failed.join(", "))
+        }
+        Outcome::Ok { tests } => format!("ok — {tests} tests passed"),
+    }
 }
 
 /// Sampling settings, pinned so a later bulk run stays comparable.
@@ -128,23 +237,13 @@ impl LmStudio {
     }
 }
 
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: Message,
-}
-
-#[derive(Deserialize)]
-struct Message {
-    content: String,
-}
-
 impl Model for LmStudio {
-    fn complete(&self, system: &str, user: &str) -> Result<String, String> {
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> Result<String, String> {
         let body = serde_json::json!({
             "model": self.model,
             "messages": [
@@ -154,20 +253,35 @@ impl Model for LmStudio {
             "temperature": self.sampling.temperature,
             "top_p": self.sampling.top_p,
             "max_tokens": self.sampling.max_tokens,
-            "stream": false,
+            "stream": true,
         });
 
         let response = ureq::post(&format!("{}/chat/completions", self.base_url))
             .send_json(body)
             .map_err(|error| format!("request failed: {error}"))?;
-        let parsed: ChatResponse = response
-            .into_json()
-            .map_err(|error| format!("malformed response: {error}"))?;
-        parsed
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message.content)
-            .ok_or_else(|| "response had no choices".to_string())
+
+        // Server-sent events: one `data:` frame per fragment, terminated by a
+        // `[DONE]` sentinel. Read it line by line so the caller sees output as
+        // the model produces it rather than after it finishes.
+        let mut reader = BufReader::new(response.into_reader());
+        let mut whole = String::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if let Some(delta) = sse_delta(line.trim_end()) {
+                        on_chunk(&delta);
+                        whole.push_str(&delta);
+                    }
+                }
+                Err(error) => return Err(format!("stream broke: {error}")),
+            }
+        }
+        if whole.is_empty() {
+            return Err(String::from("stream produced no content"));
+        }
+        Ok(whole)
     }
 }

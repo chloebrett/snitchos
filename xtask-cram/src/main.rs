@@ -34,6 +34,7 @@ const DEFAULT_PROGRAMS: usize = 1_000_000;
 const DEFAULT_VOCAB: usize = 1024;
 
 mod eval;
+mod generate;
 
 struct Options {
     rung: Rung,
@@ -46,6 +47,10 @@ struct Options {
     /// separate binary is how `parse-rate` drifted into measuring one rung on
     /// one metric with no floor to compare it to.
     eval: Option<eval::EvalOptions>,
+    /// Generate corpus candidates instead of training. Same verb for the same
+    /// reason `--eval` is: it shares the rung/corpus vocabulary, and a separate
+    /// binary is how `parse-rate` drifted out of sight.
+    generate: Option<generate::GenOptions>,
 }
 
 fn main() -> std::io::Result<()> {
@@ -59,6 +64,9 @@ fn main() -> std::io::Result<()> {
 
     if let Some(eval) = &options.eval {
         return eval::run(eval);
+    }
+    if let Some(generate) = &options.generate {
+        return generate::run(generate);
     }
 
     let corpus = load_corpus(options.programs, options.layout)?;
@@ -131,7 +139,18 @@ evaluation (replaces the old `parse-rate` bin):
   --corpus-root <d>   where to find real .st files             (default .)
   --samples <n>       programs sampled per generative metric   (default 200)
   --checkpoint <p>    a trained rung to include in the report
-  --eval-vocab <p>    the vocab that checkpoint was trained against";
+  --eval-vocab <p>    the vocab that checkpoint was trained against
+
+corpus generation (talks to a local OpenAI-compatible server, e.g. LM Studio):
+
+  --gen               generate candidates instead of training
+  --model <name>      model id as the server knows it            (required)
+  --count <n>         candidates to generate                     (default 10)
+  --out <dir>         save each candidate's raw + extracted form
+  --temp <f>          sampling temperature                       (default 0.7)
+  --top-p <f>         nucleus sampling                           (default 0.8)
+  --max-tokens <n>    hard cap per candidate                     (default 1200)
+  --endpoint <url>    server base URL              (default http://localhost:1234/v1)";
 
 fn parse(args: &[String]) -> Result<Options, String> {
     // `Printed` by default: it re-prints each program from its AST, so the
@@ -146,6 +165,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
         layout: Layout::Printed,
         config: TrainingConfig::default(),
         eval: None,
+        generate: None,
+    };
+    let mut generating = false;
+    let mut gen_options = generate::GenOptions {
+        model: String::new(),
+        count: 10,
+        out: None,
+        endpoint: None,
+        sampling: cram_gen::Sampling::default(),
     };
     let mut evaluating = false;
     let mut eval = eval::EvalOptions {
@@ -189,6 +217,23 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .parse()
                     .map_err(|_| format!("--lr: {text:?} is not a number"))?;
             }
+            "--gen" => generating = true,
+            "--model" => gen_options.model = value()?,
+            "--count" => gen_options.count = number(&value()?)?,
+            "--out" => gen_options.out = Some(PathBuf::from(value()?)),
+            "--endpoint" => gen_options.endpoint = Some(value()?),
+            "--max-tokens" => gen_options.sampling.max_tokens = number(&value()?)? as u32,
+            "--temp" | "--top-p" => {
+                let text = value()?;
+                let parsed: f64 = text
+                    .parse()
+                    .map_err(|_| format!("{name}: {text:?} is not a number"))?;
+                if name == "--temp" {
+                    gen_options.sampling.temperature = parsed;
+                } else {
+                    gen_options.sampling.top_p = parsed;
+                }
+            }
             "--eval" => evaluating = true,
             "--corpus-root" => eval.corpus_root = PathBuf::from(value()?),
             "--samples" => eval.samples = number(&value()?)?,
@@ -200,6 +245,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             other => return Err(format!("unknown option {other:?}")),
         }
+    }
+
+    if generating {
+        // A model id the server does not know fails per-request rather than up
+        // front, which turns one mistake into `count` identical errors.
+        if gen_options.model.is_empty() {
+            return Err(String::from("--gen needs --model"));
+        }
+        options.generate = Some(gen_options);
+        return Ok(options);
     }
 
     if evaluating {

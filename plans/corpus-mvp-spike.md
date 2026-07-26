@@ -888,6 +888,339 @@ phrasing that at least prevented 002's deadlock. Whether that costs too much
 construct coverage is an open question for the first real batch, where per-recipe
 construct-hit rate is measurable.
 
+### 008 — qwen 9b, **thinking OFF**, prompt v5, recipe #69
+
+| | |
+|---|---|
+| Model | qwen 9b — first non-4B, first with thinking successfully disabled |
+| Result | 2 types, 6 functions, 14 tests — far more ambitious than any 4B output |
+| Verdict | expected **parse ✗** (`if`/`else`) |
+| Companion | qwen 9b with thinking **on** did not finish in 4 minutes and was stopped |
+
+#### The headline: thinking-off ships the errors thinking catches
+
+```
+ext reportConflicts(bookings: List<Booking>) -> Str = {
+    let conflicts = findConflicts(bookings)
+    if count(conflicts) == 0 {
+        "No conflicts found."
+    } else { … }
+}
+```
+
+`if`/`else`, with braces, despite the system prompt and v3's two counter-examples.
+
+**Candidate 007 made the identical mistake and caught it** — *"Wait, I used `if`
+in tryBook. I cannot use `if`."* — because thinking gave it a self-correction
+pass. 008 has no such pass, so the error ships.
+
+That makes the trade concrete for the first time:
+
+| | Thinking on (007, 4B) | Thinking off (008, 9B) |
+|---|---|---|
+| Cost | ~3.5–4 min/candidate | seconds |
+| Ambition | 1 type, 3 functions | 2 types, 6 functions, 14 tests |
+| Rule-violation errors | **caught and fixed** | **shipped** |
+| Semantic errors | present anyway | present anyway |
+
+**And the resolution is Increment 7.** The errors thinking catches here are
+*syntactic* — `if`, `&&`, the things the model can recite the rule for and violate
+anyway. Those are exactly what a grammar mask makes **unrepresentable**. So
+constrained decoding substitutes for thinking on the precise class where thinking
+earns its keep, at none of the cost.
+
+> **Turn thinking off, add the mask, and you get the speed of 008 with better
+> syntactic correctness than 007.** This reframes Increment 7 from a yield
+> optimisation into the thing that makes thinking-off affordable — which is in turn
+> what makes 500k tokens reachable at all. At ~4 min/candidate, thinking-on is
+> arithmetically out of reach regardless of quality.
+
+#### v5's natives are validated
+
+`filter`, `concat`, `Str.join`, `any`, `count` all used **without deliberation** —
+against 006's extended agonising over whether `drop` and `removeAt` existed. The
+built-ins list is doing its job and the program's reach is visibly wider for it.
+
+Not a complete fix: `head` was invented (the prelude has `first`), so the list
+raises the ceiling without eliminating hallucination.
+
+#### The semantic errors are worse, and none is mask-fixable
+
+- **`findConflicts` builds a nested list.** `bookings |> map(b1 -> bookings |>
+  map(b2 -> (b1, b2)))` is `List<List<(B, B)>>`; the following `filter` then
+  destructures each element as a tuple. Needed `flatMap` — which *is* in v5's
+  list and was not reached for.
+- **`"Conflict: " + b1.id`** concatenates `Str` with `Int`. Per
+  [../docs/language-design.md](../docs/language-design.md), `1 + "x"` is a type
+  error rather than coercion. `toStr` is in v5's reference, explicitly with
+  "NOT `x.toString()`", and went unused.
+- **`.contains(…)` and `.unwrapOr(…)` method-style** on `Str`/`Maybe`; both are
+  free functions.
+- **A test asserts a substring the format string cannot produce**: the code emits
+  `"Conflict: 1 (Alpha) overlaps with 2 (Beta)"`, the test expects
+  `"Alpha overlaps with Beta"`. Rung 3 territory, and another instance of 006's
+  pattern — code and tests written from one mental model, agreeing with each
+  other and both wrong.
+- `prod Bookings(List<Booking>)` — an unnamed field, and the type is never used.
+- `use Maybe` — built-in; the import is at best a no-op.
+
+So the division of labour is now visible in one candidate: **the mask handles the
+syntactic class, the type checker (rung 1) handles the arity/coercion class, and
+tests-plus-mutation (rung 3) handle the intent class.** Three rungs, three
+distinct error populations, none subsuming another.
+
+#### Size
+
+6 functions — the ceiling of the small bucket's 2–6, plus 14 tests. It obeyed the
+range and spent all of it, with no counting deliberation. Worth watching whether
+thinking-off consistently runs to the top of the range; if so the buckets are
+doing more work than they look.
+
+### 009 — self-repair without a diagnostic
+
+| | |
+|---|---|
+| Setup | 008's own broken program handed back with "correct the errors and output a new program that is otherwise the same" |
+| Prompt | v5 reference + built-ins + prelude + exemplars, unchanged |
+| Result | **2 errors fixed of ~9. Both syntactic. Nothing else touched.** |
+
+**Fixed:**
+
+- `prod Booking(…)` → `ext prod Booking(…)` — the missing export.
+- `if count(conflicts) == 0 { … } else { … }` →
+  `count(conflicts) == 0 => "No conflicts found." | { … }`.
+
+**Missed, all of it:**
+
+- `findConflicts` still builds `List<List<(B, B)>>` via nested `map` and then
+  `filter`s it as if the elements were tuples — the program's central bug.
+- `head` still hallucinated (the prelude has `first`).
+- `unwrapOr(None)` still type-confused.
+- `"Conflict: " + b1.id` still concatenates `Str` with `Int`.
+- `.contains(…)` still method-style on `Str`.
+- The test still asserts `"Alpha overlaps with Beta"`, which the format string
+  cannot produce.
+- `use Maybe` (built-in) and the unused, unnamed-field `prod Bookings(List<Booking>)`
+  both untouched.
+
+#### What this says
+
+**Self-repair without a diagnostic fixes the syntactic class and nothing else** —
+which is precisely the class Increment 7's grammar mask makes *unrepresentable in
+the first place*. So on top of mask-plus-oracles, naive self-repair adds
+approximately zero: it corrects what the mask already prevents and misses
+everything the type checker and tests would catch.
+
+That is the whole taxonomy again, from a third angle:
+
+| Error class | Mask | Type checker | Tests+mutation | **Self-repair, no diagnostic** |
+|---|---|---|---|---|
+| syntactic (`if`, `&&`, missing `ext`) | ✓ | ✓ | — | **✓** |
+| arity / coercion / hallucinated name | — | ✓ | — | **✗** |
+| wrong intent | — | — | ✓ | **✗** |
+
+**But the experiment omitted the load-bearing input.** The model was told
+"there are errors" and asked to find them — i.e. asked to *be* the type checker,
+which it is not. [kvetch-rl-design.md](../docs/kvetch-rl-design.md) §5 specifies
+repair traces as *broken state → **the checker's complaint** → fix*, and this run
+had no complaint in it.
+
+So the correct reading is **not** "repair doesn't work". It is:
+
+> **The diagnostic is the load-bearing part of a repair trace, not the model's
+> introspection.**
+
+That is a real and useful validation of the §5 design — it centred the checker's
+complaint for exactly this reason — and it makes a sharp prediction: the same
+setup *with* the error message attached should fix a large share of the seven
+misses, because each one is something the checker can name precisely.
+
+**The follow-up is two minutes once S4 exists**: run 008 through the checker,
+paste the actual error text alongside the program, ask for the same repair, and
+compare against this run. If diagnostics move it from 2/9 to most-of-9, the
+repair-trace branch of the RL design is validated cheaply and early. If they do
+not, that branch is in trouble and it is better to know now.
+
+**One thing that went right and is worth recording:** the model introduced **no
+new errors**. The output is otherwise byte-identical to the input. Repair is
+conservative here, which is the necessary precondition for it being useful at
+all — a repair pass that damages working code is worse than none.
+
+### 010 — the checker lands, and overturns two findings
+
+S4 is built: `stitch::gate::run(src) -> Outcome` (`stitch/src/gate.rs`, five RED
+tests in `stitch/tests/gate.rs` first) plus `stitch/src/bin/check.rs`. The chain
+matches `tests/canon.rs` exactly, so a candidate faces the gate the shipped
+corpus already passes. `Outcome` keeps the death *stage* rather than collapsing
+to a bool.
+
+```
+$ cargo run -p stitch --bin check -- plans/corpus-candidates/*.st
+
+003.st: parse — unexpected character `&`
+005.st: tests — 1 passed, failed: cedar allows disjoint
+006.st: tests — 3 passed, failed: findFirstOverlap finds overlap, hasConflicts returns true
+007.st: tests — 4 passed, failed: availability finds conflict, …
+008.st: parse — expected binding name
+
+0/5 accepted
+```
+
+**Predicted vs actual — I was wrong twice, and wrong about a third reason:**
+
+| # | Predicted | Actual | |
+|---|---|---|---|
+| 003 | parse ✗ | parse ✗ (`&`) | ✓ |
+| 005 | tests ✗ on "cedar allows disjoint" | exactly that | ✓ |
+| 006 | tests **pass** on broken code | tests ✗ | ✗ — but see below |
+| 007 | **type ✗** | type ✓, tests ✗ | ✗ |
+| 008 | parse ✗ (`if`/`else`) | parse ✗ (`let (b1, b2) =`) | right verdict, wrong cause |
+
+#### The big correction: the type rung caught nothing
+
+**007 type-checks clean.** `overlap` takes two `Booking`s and `isAvailable` calls
+it with two `Time`s — and the checker does not object. Stitch's typing is
+*gradual*; the diagnostics are advisory, and this class slips through.
+
+So Findings 007's "three bug classes, three different rungs" is **wrong**. The
+actual distribution over five candidates:
+
+| Rung | Caught |
+|---|---|
+| parse | 003, 008 |
+| **type** | **none** |
+| tests | 005, 006, 007 |
+
+**Tests are doing all of the semantic work.** That makes requiring a test block in
+every program load-bearing rather than decorative — without them, three of these
+five would have passed the gate — and it means the funnel's `type` stage may be
+close to empty in practice. Worth measuring rather than assuming, but the
+provisional read is that rung 1 is much weaker than
+[corpus-mvp.md](corpus-mvp.md) §3 implies.
+
+#### 006 is the mutation-scoring argument, now verified
+
+006's raw failure was a **bare `removeAt`** — it is `List.removeAt`, and the bare
+name does not resolve (checked directly). That is a different bug from the one I
+attributed the failure to.
+
+Patching only that one name:
+
+```
+$ cargo run -p stitch --bin check -- 006-patched.st
+006-patched.st: ok — 5 tests passed
+```
+
+**It passes the entire gate — parse, type, and all five of its own tests — while
+still comparing only the head against the tail.** A three-element list with the
+conflict away from the head is silently reported as conflict-free, and
+`hasConflicts` says so.
+
+The Findings 006 claim is therefore **confirmed rather than refuted**, and now on
+evidence: a suite written from the same misunderstanding as the code agrees with
+it, and the whole ladder waves it through. This is the concrete case for scoring
+suites by **mutants killed** ([corpus-mvp.md](corpus-mvp.md) §7) — pass/fail
+cannot see it, by construction.
+
+#### Two language facts the candidates found
+
+- **`let (b1, b2) = pair` does not parse.** `Pattern::Tuple` exists and works in
+  `match`, but not in a `let` binding. 008 died here at line 63 — the `if`/`else`
+  I blamed is at line ~140 and was never reached. The model reached for
+  destructuring naturally; whether Stitch should support it is a language
+  question, not a prompt one.
+- **Bare `removeAt` does not resolve** — module-qualified only. v5's built-ins
+  list shows `List.removeAt(xs, i)` correctly, and 006 predates it.
+
+#### What this changes
+
+The checker paid for itself immediately: **two findings overturned, one promoted
+from assertion to evidence, and two language facts established** — all from five
+programs that already existed. Every verdict before this entry was an eyeball
+estimate, and the error rate on those was 40%.
+
+Nothing further should be tuned against my reading of a program when
+`cargo run -p stitch --bin check` is one command.
+
+### 011 — qwen3.5-27b, thinking on, prompt v5 — **the first accepted candidate**
+
+| | |
+|---|---|
+| Model | qwen3.5-27b (GGUF), thinking on — **no off-switch on this build** |
+| Result | 2 types, 2 functions, 4 tests |
+| Verdict | **`ok — 4 tests passed`** — checked, not estimated |
+| Cost | **~9 minutes of reasoning** |
+
+```
+$ cargo run -p stitch --bin check -- plans/corpus-candidates/011.st
+plans/corpus-candidates/011.st: ok — 4 tests passed
+```
+
+**And it is not merely gate-passing, it is correct.** The other candidates all
+modelled the problem as *find conflicts within a list*, which is what produced
+005's self-comparison bug and 006's head-vs-tail bug. This one models it as
+*does a candidate conflict with an existing schedule*:
+
+```
+ext findConflict(schedule: List<Booking>, candidate: Booking) -> Maybe<Booking> =
+    schedule |> find(b -> overlaps(candidate, b))
+```
+
+The candidate is not a member of the schedule, so self-comparison cannot arise;
+`find` scans the whole list, so nothing is missed. **A better problem model
+dissolved both bug classes rather than avoiding them.**
+
+Three things from the trace worth keeping:
+
+- **The prelude was used as an authority to settle a rule.** It worried that
+  "booleans are the words `and`/`or`/`not`" might forbid the literals `true` and
+  `false`, checked, found `fold(xs, false, …)` in the prelude, and concluded the
+  rule was about operators. Exactly what including `prelude.st` verbatim was for.
+- **It considered `use Maybe` and rejected it** as built-in. 008 (9B) got that
+  wrong and imported it.
+- **Comments were revised toward "why" deliberately** — it rejected
+  `// Check if two bookings collide.` as "what" and replaced it with
+  *"Exclusive use requires non-overlapping intervals; this checks the
+  intersection condition."*
+
+#### The model comparison, finally with data
+
+| Model | Quant | Thinking | Verdict | Cost |
+|---|---|---|---|---|
+| qwen3.5-4b | GGUF | on | tests ✗ (007) | ~3.5 min |
+| qwen3.5-9b | MLX | **off** | parse ✗ (008) | seconds |
+| qwen3.5-27b | GGUF | on | **ok ✓** (011) | **~9 min** |
+
+Read it carefully, because the confounds are severe: **n = 1 per cell**, thinking
+is **confounded with size** (only the 9B build had a working off-switch), and the
+9B was MLX where the others were GGUF — different quantiser and runtime, which is
+also the likely explanation for why only it exposed the toggle.
+
+What survives the confounds: **27B clears the gate and 4B does not**, and that is
+the first evidence on the question the spike exists to answer.
+
+#### But 9 minutes is unusable, and that is now the blocking question
+
+At ~9 min/candidate, 500k validated tokens is roughly **100+ hours** even at a
+generous yield. 27B-with-thinking is not a pipeline, it is a demonstration.
+
+So the decisive experiment is **27B with thinking off** — and the GGUF build has
+no toggle. The 9B/MLX observation is the lead worth following: **try an MLX build
+of the 27B**, since that is the one stack that exposed the switch. Failing that,
+the template edit from S1.
+
+The three outcomes and what each means:
+
+- **27B-off clears the gate too** → that is the pipeline. Build the harness around
+  it and the spike is answered.
+- **27B-off drops to 008-like syntactic failures** → those are precisely the class
+  Increment 7's mask makes unrepresentable, so build the mask and re-test before
+  concluding anything.
+- **27B-off degrades semantically** → thinking is buying real reasoning at this
+  scale, and the corpus needs a slower, smaller run or a different approach.
+
+Only the third is bad news, and none of the three can be guessed at.
+
 ---
 
 ## Not doing
