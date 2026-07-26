@@ -432,6 +432,44 @@ now.
   and every expected sequence in the tests matched the interpreter's actual
   output on the first run once the `drop`/`use List` fixes landed.
 
+### 6. sched.st
+
+- Lines: 161. Tests: 8 (8 pass). Passed the gate on the first try.
+- What it exercises: `contract`-only polymorphism as the actual mechanism
+  (two zero-field marker `prod`s, `RoundRobin()`/`Priority()`, dispatched
+  dynamically through an untyped `strategy` parameter — "the only
+  polymorphism," demonstrated rather than just described), a
+  self-tail-recursive simulation loop in the vm.st/graph.st worklist shape,
+  and a saturated three-task scenario chosen specifically per
+  `project_priority_scheduling_demo_lessons` (existing project memory):
+  measure *completion order over a real run*, not just "who goes first,"
+  and use enough contention that round-robin and priority actually produce
+  different outputs — a two-task or unsaturated scenario would have let
+  both strategies look identical.
+- No `Map` needed this time (`removeByName`/`highestPriority` are linear
+  scans over the pool `List<Task>` directly — there's no natural key to
+  look up by, just "the whole pool," so the association-list pattern from
+  json.st/graph.st/markov.st didn't even come up).
+- No new language friction. Every trace (round-robin interleaving, priority
+  drain order, per-task CPU-time totals) was hand-derived before writing the
+  test assertions and matched the interpreter's actual output exactly on
+  the first run — the second program in a row (after graph.st) to do so,
+  now that "prefer a named `prod`", "watch `?`/`|>` precedence", and "don't
+  start a statement with `(`" are habits rather than lessons still being
+  learned.
+
+- **Unrelated to Stitch, worth one honest note:** while finalizing this
+  entry, `git status`/`git log` showed other work landing concurrently on
+  `main` from outside this session (`fs-image/lib/text.st`, `snemu/*`,
+  several `plans/corpus-prompts/v*.md` files, `docs/grammar-mask-design.md`)
+  and `stitch/tests/canon.rs`'s native-suite-count assertion moving from
+  `>= 6` to `>= 12` between two of this session's own gate runs — which is
+  why the full `cargo nextest run -p stitch --features testing` total
+  fluctuated (811 → 802) between the markov.st and sched.st entries above,
+  with no failures either time. Not this batch's concern to fix or explain
+  further, but worth naming so a fluctuating total isn't mistaken for a
+  regression this work introduced.
+
 - **Not tested in-language, and worth recording why**: wanted a `bank.st`
   test proving a function *without* `uses FsWrite` is refused when it
   tries `fsWrite` (the negative case for the capability-boundary finding

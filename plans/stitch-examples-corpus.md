@@ -42,7 +42,7 @@ checks the whole workspace shares), and its `test` blocks pass.
       `Map` — see findings doc, entry 1.)
 - [x] 5. `markov.st` — Markov-chain text generator, seeded LCG, `uses
       Telemetry` span.
-- [ ] 6. `sched.st` — priority vs round-robin task scheduler simulation via
+- [x] 6. `sched.st` — priority vs round-robin task scheduler simulation via
       `contract Schedulable`.
 - [ ] 7. `calc.st` — infix expression parser/evaluator with variables,
       `Result`-typed errors (div-by-zero, unbound var).
