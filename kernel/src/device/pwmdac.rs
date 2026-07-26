@@ -18,6 +18,7 @@ use kernel_devices::pwmdac::{
     WDATA_OFFSET,
 };
 use kernel_devices::iomux::{self, FieldWrite};
+use kernel_devices::samplering::SampleRing;
 use kernel_devices::syscrg::{self, Op};
 
 use crate::obs::counter::DeferredCounter;
@@ -26,6 +27,27 @@ use crate::obs::counter::DeferredCounter;
 /// asserts this climbs; it also ships to Grafana on hardware.
 pub static SAMPLES_EMITTED: DeferredCounter =
     DeferredCounter::new("snitchos.audio.samples_emitted_total");
+
+/// Capacity of the async DAC ring — samples buffered between the `AudioEnqueue`
+/// producer (the `glitch` server) and the timer-driven drain. At 8 kHz, 4096 samples
+/// is ~0.5 s of slack, comfortably covering the gap between glitch's refills. A full
+/// ring back-pressures (`push_slice` accepts fewer); an empty one *while a stream is
+/// active* is the XRun the drain reports (v2 Increment 4). See `kernel_devices::samplering`.
+const AUDIO_RING_CAP: usize = 4096;
+
+/// The async DAC ring. Producer: [`enqueue`] (the `AudioEnqueue` syscall). Consumer:
+/// the timer drain (Increment 4). Its `Mutex` is safe to take in the timer handler for
+/// the same reason as `CONSOLE_RX` — held only by those two paths, both running with
+/// `sstatus.SIE == 0`, neither allocating nor emitting telemetry.
+static AUDIO_RING: crate::sync::Mutex<SampleRing<AUDIO_RING_CAP>> =
+    crate::sync::Mutex::new(SampleRing::new());
+
+/// Enqueue samples into the async DAC ring, returning how many were accepted (fewer
+/// than offered when the ring is near full — back-pressure). Non-blocking: it never
+/// paces or touches MMIO, unlike [`play_samples`]. The timer drain feeds the DAC.
+pub fn enqueue(samples: &[i16]) -> usize {
+    AUDIO_RING.lock().push_slice(samples)
+}
 
 /// PWMDAC block base (in the UART's mapped megapage). MMIO is reached through the
 /// higher-half mapping (`pa + KERNEL_OFFSET`) — the identity map is torn down by

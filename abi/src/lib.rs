@@ -263,6 +263,14 @@ pub enum Syscall {
     /// server — the DAC is one scarce resource mediated by one holder. Refuses
     /// (`SyscallRefused`) a non-holder.
     AudioWrite = 32,
+    /// Enqueue audio samples into the kernel's async DAC ring through an
+    /// `Object::AudioSink` capability (`a0` = `Handle`, `a1` = ptr to `[i16]` samples,
+    /// `a2` = sample count). Gated on the AUDIO right. Unlike [`AudioWrite`], this
+    /// **does not block** for playback: it copies as many leading samples as the ring
+    /// has room for and returns the accepted count in `a0`, so the caller re-submits
+    /// the tail (back-pressure). A timer-driven drain feeds the DAC from the ring. This
+    /// is the async path the mixing / sonifier / modem work builds on.
+    AudioEnqueue = 33,
 }
 
 impl Syscall {
@@ -305,6 +313,7 @@ impl Syscall {
             30 => Some(Self::Kill),
             31 => Some(Self::SpawnOn),
             32 => Some(Self::AudioWrite),
+            33 => Some(Self::AudioEnqueue),
             _ => None,
         }
     }
@@ -632,7 +641,9 @@ mod tests {
         assert_eq!(Syscall::from_usize(30), Some(Syscall::Kill));
         assert_eq!(Syscall::from_usize(31), Some(Syscall::SpawnOn));
         assert_eq!(Syscall::from_usize(32), Some(Syscall::AudioWrite));
-        assert_eq!(Syscall::from_usize(33), None);
+        assert_eq!(Syscall::AudioEnqueue as usize, 33);
+        assert_eq!(Syscall::from_usize(33), Some(Syscall::AudioEnqueue));
+        assert_eq!(Syscall::from_usize(34), None);
     }
 
     #[test]
