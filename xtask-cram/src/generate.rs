@@ -16,7 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use cram_gen::{CandidateRecord, LmStudio, Sampling, Tally, describe, run_once};
+use cram_gen::{CandidateRecord, LmStudio, Sampling, Tally, describe, run_once, run_once_guarded};
 
 /// The task, until the recipe axes in `plans/corpus-recipe-axes.md` are wired
 /// in. One recipe is enough to measure a yield; the axes earn their way in once
@@ -38,6 +38,10 @@ pub struct GenOptions {
     pub count: usize,
     pub out: Option<PathBuf>,
     pub endpoint: Option<String>,
+    /// Stop a candidate the instant the continuation oracle says no token can
+    /// rescue it. Saves the doomed tail — in `corpora/batch1` every failure was
+    /// one fatal token followed by hundreds of wasted ones.
+    pub guard: bool,
     pub sampling: Sampling,
 }
 
@@ -77,7 +81,11 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
             let _ = std::io::stdout().flush();
         };
         let started = Instant::now();
-        let outcome = run_once(&model, TASK, &mut on_chunk);
+        let outcome = if options.guard {
+            run_once_guarded(&model, TASK, &mut on_chunk)
+        } else {
+            run_once(&model, TASK, &mut on_chunk)
+        };
         let seconds = started.elapsed().as_secs_f64();
 
         // Say it once, plainly. The difference between "the prompt is wrong" and
@@ -107,7 +115,12 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
                 };
                 tally.extra_blocks += run.extra_blocks;
 
-                println!("\n{index:03}: {detail}{} — {}", extra_note(run.extra_blocks), rate(run.tokens, seconds));
+                let guarded = if run.abandoned { " [abandoned early]" } else { "" };
+                println!(
+                    "\n{index:03}: {detail}{}{guarded} — {}",
+                    extra_note(run.extra_blocks),
+                    rate(run.tokens, seconds)
+                );
                 if empty {
                     println!("     raise --max-tokens, or disable thinking");
                 }

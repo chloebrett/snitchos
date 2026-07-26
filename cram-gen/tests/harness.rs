@@ -3,7 +3,7 @@
 //! Every stage below the model call must be testable without one — that is what
 //! the `Model` trait exists for, and a fake responder is what proves it.
 
-use cram_gen::{Model, extract, prompt, run_once};
+use cram_gen::{Model, extract, prompt, run_once, run_once_guarded};
 
 /// A model that returns whatever it was handed, one chunk at a time so the
 /// streaming path is exercised without a server.
@@ -14,10 +14,16 @@ impl Model for Fake {
         &self,
         _system: &str,
         _user: &str,
-        on_chunk: &mut dyn FnMut(&str),
+        on_chunk: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, String> {
+        let mut sent = String::new();
         for chunk in self.0.split_inclusive('\n') {
-            on_chunk(chunk);
+            sent.push_str(chunk);
+            if !on_chunk(chunk) {
+                // A real server stops generating here, so the fake must too —
+                // otherwise the guard looks like it works and does not.
+                return Ok(sent);
+            }
         }
         Ok(self.0.clone())
     }
@@ -64,6 +70,56 @@ fn a_reasoning_block_is_stripped_before_fences_are_looked_for() {
 fn an_unterminated_reasoning_block_yields_no_program() {
     let got = extract("<think>\nStill planning when the cap hit. `prod` `ext`");
     assert!(got.program.trim().is_empty(), "got {:?}", got.program);
+}
+
+/// The continuation oracle answers "can any token rescue this prefix?" — which
+/// is what lets generation stop the instant a candidate is doomed instead of
+/// paying for the rest of it.
+#[test]
+fn a_doomed_prefix_is_detected_and_a_partial_one_is_not() {
+    // Each of these killed a real candidate in corpora/batch1.
+    for doomed in [
+        "ext Time = Int",                 // no type aliases
+        "cond overlap(b1: Booking",       // `cond` read as a keyword
+        "xs |> filter((c: TimeWindow",    // type-annotated lambda parameter
+    ] {
+        assert!(cram_gen::is_doomed(doomed), "should be doomed: {doomed:?}");
+    }
+
+    // Nothing mid-token or merely incomplete may be rejected, or generation
+    // would abort constantly on its own healthy output.
+    for alive in [
+        "ext f() -> Int = 1",
+        "ext f() -> Int = { ex",                          // partial lexeme
+        "ext overlaps(a: Booking) -> Bool = { a.start <", // incomplete expression
+        "",
+    ] {
+        assert!(!cram_gen::is_doomed(alive), "should be alive: {alive:?}");
+    }
+}
+
+/// Guarding stops the stream at the first fatal token. Candidate 004 spent 1162
+/// tokens after `cond` had already killed it.
+#[test]
+fn guarding_abandons_a_candidate_at_the_token_that_killed_it() {
+    let raw = "```stitch\next Time = Int\nand then a great deal more text\n";
+    let run = run_once_guarded(&Fake(raw.into()), "anything", &mut |_| {})
+        .expect("fake succeeds");
+    assert!(run.abandoned, "should have been abandoned");
+    assert!(
+        !run.program.contains("a great deal more"),
+        "generation should have stopped: {:?}",
+        run.program
+    );
+}
+
+/// A healthy candidate must be untouched by the guard.
+#[test]
+fn guarding_leaves_a_good_program_alone() {
+    let run = run_once_guarded(&Fake(format!("```stitch\n{GOOD}```")), "anything", &mut |_| {})
+        .expect("fake succeeds");
+    assert!(!run.abandoned);
+    assert_eq!(run.outcome.stage(), "ok");
 }
 
 /// Throughput is the number that decides whether a 500k-token corpus is hours

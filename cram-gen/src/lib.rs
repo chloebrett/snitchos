@@ -25,12 +25,26 @@ pub trait Model {
     ///
     /// Errors are transport/protocol failures, not bad programs — a bad program
     /// is an `Ok` whose gate `Outcome` is unhappy.
+    /// `on_chunk` returns `false` to stop generation early — which is how the
+    /// guard abandons a candidate the instant it becomes unrecoverable instead
+    /// of paying for the rest of it.
     fn complete(
         &self,
         system: &str,
         user: &str,
-        on_chunk: &mut dyn FnMut(&str),
+        on_chunk: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, String>;
+}
+
+/// Can *any* token rescue this program, or is it already unrecoverable?
+///
+/// Wraps the continuation oracle, which answers the question from the prefix
+/// alone. Crucially it does **not** fire mid-lexeme (`{ ex` on its way to `ext`)
+/// or on a merely incomplete expression (`a.start <`) — only on a prefix no
+/// continuation can save, like `ext Time =` (Stitch has no type aliases).
+#[must_use]
+pub fn is_doomed(program: &str) -> bool {
+    !program.is_empty() && stitch::oracle::valid_next(program, program.len()).is_empty()
 }
 
 /// Pull the incremental text out of one server-sent-events frame.
@@ -76,8 +90,17 @@ pub fn extract(raw: &str) -> Extracted {
         Some((first, rest)) => {
             Extracted { program: first.clone(), extra_blocks: rest.len() }
         }
+        // Once a fence has been opened the blocks are authoritative, even when
+        // empty. Falling back to the raw text here would hand back the fence
+        // marker itself — which is not Stitch, and which reads as a doomed
+        // program the instant a stream opens its fence.
+        None if opens_a_fence(body) => Extracted { program: String::new(), extra_blocks: 0 },
         None => Extracted { program: body.trim().to_string(), extra_blocks: 0 },
     }
+}
+
+fn opens_a_fence(body: &str) -> bool {
+    body.lines().any(|line| line.trim_start().starts_with("```"))
 }
 
 /// Drop a reasoning model's `<think>` block.
@@ -141,6 +164,9 @@ pub struct Run {
     /// Streamed fragments, which is one per token — the basis for tok/s, and so
     /// for whether a 500k-token corpus is an afternoon or a week.
     pub tokens: usize,
+    /// Generation was stopped early because the program became unrecoverable.
+    /// Only ever set by [`run_once_guarded`].
+    pub abandoned: bool,
     pub outcome: Outcome,
 }
 
@@ -175,11 +201,59 @@ pub fn run_once<M: Model + ?Sized>(
     let raw = model.complete(&prompt::system(), &prompt::user(task), &mut |chunk| {
         tokens += 1;
         on_chunk(chunk);
+        true
     })?;
+    Ok(assemble(raw, tokens, false))
+}
+
+/// [`run_once`], but stop the moment the program becomes unrecoverable.
+///
+/// Every failure in `corpora/batch1` was a single fatal token followed by
+/// hundreds of tokens of doomed continuation — candidate 004 spent 1162 tokens
+/// after `cond` had already killed it. The oracle knows at the token, so there
+/// is no reason to pay for the rest.
+///
+/// This is not yet a decoder mask — it cannot stop the model *choosing* the
+/// fatal token, only stop paying once it has, because an OpenAI-compatible HTTP
+/// API hands back sampled tokens rather than the distribution they came from.
+///
+/// It is, however, what makes a cheap mask possible. Masking every position
+/// would cost one round-trip per token; the oracle says >99% of positions need
+/// no intervention, and this pinpoints the handful that do. Upgrading it means:
+/// on abandonment, re-request that one position with `top_logprobs`, drop the
+/// candidates [`is_doomed`] rejects, splice the best survivor, and continue —
+/// a few round-trips per program instead of a few thousand.
+///
+/// That upgrade also yields the interesting artifact: at each intervention you
+/// have *what the model wanted to say* beside *what the language allowed*.
+///
+/// # Errors
+/// Only if the model call itself fails.
+pub fn run_once_guarded<M: Model + ?Sized>(
+    model: &M,
+    task: &str,
+    on_chunk: &mut dyn FnMut(&str),
+) -> Result<Run, String> {
+    let mut tokens = 0usize;
+    let mut seen = String::new();
+    let mut abandoned = false;
+    let raw = model.complete(&prompt::system(), &prompt::user(task), &mut |chunk| {
+        tokens += 1;
+        on_chunk(chunk);
+        seen.push_str(chunk);
+        // Judge the *extracted* program, not the raw response: prose and fences
+        // around it are not Stitch and would read as doomed immediately.
+        abandoned = is_doomed(extract(&seen).program.trim_end());
+        !abandoned
+    })?;
+    Ok(assemble(raw, tokens, abandoned))
+}
+
+fn assemble(raw: String, tokens: usize, abandoned: bool) -> Run {
     let Extracted { program, extra_blocks } = extract(&raw);
     let reasoned = raw.contains("<think>");
     let outcome = gate::run(&program);
-    Ok(Run { raw, program, extra_blocks, reasoned, tokens, outcome })
+    Run { raw, program, extra_blocks, reasoned, tokens, abandoned, outcome }
 }
 
 /// Per-stage counts for a batch.
@@ -296,7 +370,7 @@ impl Model for LmStudio {
         &self,
         system: &str,
         user: &str,
-        on_chunk: &mut dyn FnMut(&str),
+        on_chunk: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, String> {
         let body = serde_json::json!({
             "model": self.model,
@@ -334,8 +408,12 @@ impl Model for LmStudio {
                 Ok(0) => break,
                 Ok(_) => {
                     if let Some(delta) = sse_delta(line.trim_end()) {
-                        on_chunk(&delta);
                         whole.push_str(&delta);
+                        // Dropping the reader closes the connection, which is
+                        // what stops the server generating the rest.
+                        if !on_chunk(&delta) {
+                            break;
+                        }
                     }
                 }
                 Err(error) => return Err(format!("stream broke: {error}")),

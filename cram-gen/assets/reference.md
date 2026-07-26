@@ -22,15 +22,31 @@ Point(x: 1, y: 2)
 
 // Functions — expression body or block body
 ext double(n: Int) -> Int = n * 2
-ext describe(n: Int) -> Str = {
+
+// `let` is only legal inside a block, so a body that binds anything needs
+// braces. Layout is not significant; the braces are what make it a block.
+ext describe(n: Int) -> Str = {          // right
     let d = double(n)
     d > 10 => "big" | "small"
 }
+// ext describe(n: Int) -> Str =         // does NOT parse
+//     let d = double(n)
+//     d > 10 => "big" | "small"
 
-// Conditionals. `match` has two forms: guards, and patterns over a value.
-cond => thenValue | elseValue
+// `ext prod` declares a *type*. A function that returns one is still a plain
+// function:
+ext prod Summary(ext total: Int)                       // a type
+ext summarise(xs: List<Int>) -> Summary = Summary(total: total(xs))
+// ext prod summarise(xs: List<Int>) -> Summary = …    // does NOT parse
+
+// Conditionals. The condition is an ordinary expression — there is no `cond`
+// keyword, and `=>` always needs its `|` alternative.
+n > 10 => "big" | "small"
+// `match` has two forms: guards, and patterns over a value. Both need braces.
 match { n == 0 => "zero"   n > 0 => "positive"   _ => "negative" }
 match m { Some(v) => v   None => 0 }
+// There is no `in` operator; ask a list directly.
+contains(xs, x)                          // NOT `x in xs`
 
 // There is no `if`/`then`/`else` anywhere, including inside a lambda:
 xs |> map(x -> x > 0 => "pos" | "neg")            // right
@@ -39,6 +55,10 @@ fold(xs, None, (acc, x) -> match acc { Some(_) => acc   None => Some(x) })
 // Tuple patterns work in `match`, NOT in a `let` binding:
 match pair { (a, b) => a + b }                    // right
 // let (a, b) = pair                              // does NOT parse
+
+// There are no type aliases. Write the type out in the signature:
+ext schedule(bookings: List<Booking>) -> Int = count(bookings)   // right
+// prod Schedule = List<Booking>                  // does NOT parse
 
 // Booleans are words, not symbols
 a and b                                  // NOT &&
@@ -79,6 +99,9 @@ fold(xs, 0, (acc, x) -> acc + x)
 xs |> fold(0, (acc, x) -> acc + x)
 xs |> map(x -> x * 2) |> filter(x -> x > 3)
 xs |> map($.name)                        // `$a`/`$b` are positional placeholders
+// Lambda parameters are never type-annotated — the types are inferred:
+xs |> filter(b -> b.start < 10)          // right
+// xs |> filter((b: Booking) -> …)       // does NOT parse
 
 // Tests are ordinary items
 test "double doubles" { expect double(2) == 4 }
