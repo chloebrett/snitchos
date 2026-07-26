@@ -204,11 +204,16 @@ catalog! {
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"cooperative"};
     cpu "glitch-beep-plays"               scenarios::glitch_beep_plays              [audio]         {"glitch-beep"};
     cpu "kvetch-babble-serves"            scenarios::kvetch_babble_serves           [kvetch]        {"kvetch-babble"};
-    // `stitch-kvetch-completes` is written but NOT registered: it is blocked on
-    // userspace floating point, not on anything about completion. The oracle
-    // probes the `Float` class, and an `f64` on the metal is an illegal
-    // instruction because the kernel never enables `sstatus.FS`. See
-    // plans/repl-completion.md — register this once FP lands.
+    // `stitch-kvetch-completes` is written but still NOT registered — though **the FP
+    // blocker is gone** (plans/floating-point.md increment 4: userspace FP works, and
+    // typing a float at the REPL now evaluates). Tried registering it 2026-07-26: the
+    // guest no longer wedges or faults, and the run reaches the scenario's own
+    // diagnostic, which reports "the REPL never reached the call" —
+    // `snitchos.stitch.completions_asked` is never emitted and the console shows the
+    // grammar-only menu. So there is a *second*, independent gap in the completion
+    // path, and the body still carries its bisect scaffolding (an unconditional
+    // `return Err("DIAGNOSTIC: …")`) so it cannot pass as written. FP was necessary,
+    // not sufficient. See plans/repl-completion.md.
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};
@@ -271,7 +276,7 @@ catalog! {
     wfi "manifest-satisfy-attenuates"     scenarios::manifest_satisfy_attenuates     [userspace, fs] {"manifest-satisfy"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
-    wfi "stitch-float-does-not-kill-the-kernel" scenarios::stitch_float_does_not_kill_the_kernel [userspace, stitch] {"stitch-repl"};
+    wfi "stitch-float-evaluates-on-target" scenarios::stitch_float_evaluates_on_target [userspace, stitch, fp] {"stitch-repl"};
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};
     wfi "stitch-view-reads-a-file"        scenarios::stitch_view_reads_a_file       [userspace, stitch, fs] {"stitch-fs"};
     wfi "stitch-cross-pipe-runs-a-stage"  scenarios::stitch_cross_pipe_runs_a_stage [userspace, stitch, fs] {"stitch-fs"};

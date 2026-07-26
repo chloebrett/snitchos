@@ -45,11 +45,65 @@ pub struct LoadSegment {
 }
 
 /// Everything the kernel needs to load a program: where execution
-/// starts (`entry`) and the segments to place in memory.
+/// starts (`entry`), the segments to place in memory, and the float ABI it was
+/// built for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadPlan {
     pub entry: usize,
     pub segments: Vec<LoadSegment>,
+    /// Read from `e_flags` — the program's own claim to needing hardware FP, and the
+    /// basis for granting it. See [`FloatAbi`].
+    pub float_abi: FloatAbi,
+}
+
+/// The floating-point ABI a RISC-V binary was compiled for, from `e_flags[2:1]`.
+///
+/// This is the FP authority claim, and it is unusual among authority claims here in
+/// being **mechanically checkable**: the loader reads it off the binary rather than
+/// taking a program's word for it, and nothing can assert it without having actually
+/// been compiled that way. No new syscall, no new capability.
+///
+/// **Caveat, measured rather than assumed:** it records the *calling convention* the
+/// program was built for, not whether the program contains a float.
+/// `riscv64gc-unknown-none-elf` is `lp64d`, so every binary in this tree declares
+/// [`Double`](Self::Double) — `init` and `hello` included, neither of which touches a
+/// float. So as a *gate* this currently refuses nothing. What actually keeps
+/// integer-only programs from paying for FP is the **lazy** enable: a program that
+/// never executes an FP instruction never traps, so never gets `FS` turned on and
+/// never gets FP registers saved. This flag becomes a real gate only if some program
+/// is deliberately built soft-float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatAbi {
+    /// No FP registers in the calling convention — floats go through integer
+    /// libcalls. The only value that declines hardware FP.
+    Soft,
+    /// Single-precision hard float (`lp64f`).
+    Single,
+    /// Double-precision hard float (`lp64d`) — what `riscv64gc` targets emit.
+    Double,
+    /// Quad-precision hard float (`lp64q`). Not something we expect to see.
+    Quad,
+}
+
+impl FloatAbi {
+    /// Does this ABI pass floats in FP registers — i.e. may the program be granted
+    /// hardware FP? Everything but [`Soft`](Self::Soft).
+    #[must_use]
+    pub fn uses_hardware_fp(self) -> bool {
+        self != Self::Soft
+    }
+
+    /// Decode `e_flags`. Masks to bits 2:1 — the neighbouring RVC bit (0x1) shares the
+    /// byte, and a mask-free read would classify every compressed soft-float binary as
+    /// `Single`.
+    fn from_e_flags(e_flags: u32) -> Self {
+        match e_flags & EF_RISCV_FLOAT_ABI {
+            EF_RISCV_FLOAT_ABI_SINGLE => Self::Single,
+            EF_RISCV_FLOAT_ABI_DOUBLE => Self::Double,
+            EF_RISCV_FLOAT_ABI_QUAD => Self::Quad,
+            _ => Self::Soft,
+        }
+    }
 }
 
 /// Why an image could not be parsed into a [`LoadPlan`].
@@ -109,6 +163,11 @@ const ELFCLASS64: u8 = 2;
 const ET_EXEC: u16 = 2;
 const EM_RISCV: u16 = 243;
 const PT_LOAD: u32 = 1;
+/// `e_flags` mask for the float ABI, bits 2:1.
+const EF_RISCV_FLOAT_ABI: u32 = 0x6;
+const EF_RISCV_FLOAT_ABI_SINGLE: u32 = 0x2;
+const EF_RISCV_FLOAT_ABI_DOUBLE: u32 = 0x4;
+const EF_RISCV_FLOAT_ABI_QUAD: u32 = 0x6;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
@@ -143,6 +202,7 @@ pub fn parse(image: &[u8]) -> Result<LoadPlan, ElfError> {
     }
 
     let entry = read_u64(image, 24)? as usize;
+    let float_abi = FloatAbi::from_e_flags(read_u32(image, 48)?);
     let phoff = read_u64(image, 32)? as usize;
     let phentsize = read_u16(image, 54)? as usize;
     let phnum = read_u16(image, 56)? as usize;
@@ -193,7 +253,7 @@ pub fn parse(image: &[u8]) -> Result<LoadPlan, ElfError> {
         });
     }
 
-    Ok(LoadPlan { entry, segments })
+    Ok(LoadPlan { entry, segments, float_abi })
 }
 
 /// Why a [`LoadPlan`] cannot be turned into a page map.
@@ -357,6 +417,75 @@ mod tests {
         build_elf(2, 243, 2, entry, phs, tail_len)
     }
 
+    /// A [`LoadPlan`] for the [`page_perms`] tests, which read only `segments` —
+    /// W^X planning is indifferent to the entry point and the float ABI. Having them
+    /// go through here means a new `LoadPlan` field doesn't churn six unrelated tests.
+    fn plan_of(segments: Vec<LoadSegment>) -> LoadPlan {
+        LoadPlan { entry: 0x1000, segments, float_abi: FloatAbi::Soft }
+    }
+
+    /// Set `e_flags` (offset 48) on a fixture — the field carrying the float ABI.
+    fn with_e_flags(mut img: Vec<u8>, flags: u32) -> Vec<u8> {
+        img[48..52].copy_from_slice(&flags.to_le_bytes());
+        img
+    }
+
+    /// The float ABI a program was built for, read out of `e_flags`. This is the
+    /// authority claim for hardware FP, and unusually for an authority claim it is
+    /// **mechanically checkable** rather than taken on faith: the loader reads it off
+    /// the binary, and no program can assert it without having actually been compiled
+    /// that way.
+    #[test]
+    fn float_abi_is_read_from_e_flags() {
+        let plan = |flags| parse(&with_e_flags(valid_elf(0x1000, &[], 0), flags)).unwrap();
+        // Bits 2:1 hold the ABI; bit 0 (RVC) and everything above must be ignored.
+        assert_eq!(plan(0x0).float_abi, FloatAbi::Soft);
+        assert_eq!(plan(0x2).float_abi, FloatAbi::Single);
+        assert_eq!(plan(0x4).float_abi, FloatAbi::Double);
+        assert_eq!(plan(0x6).float_abi, FloatAbi::Quad);
+    }
+
+    /// The RVC bit shares the byte and must not be mistaken for part of the ABI — a
+    /// mask-free read of `e_flags` would classify every compressed soft-float binary
+    /// as `Single`.
+    #[test]
+    fn float_abi_ignores_the_unrelated_e_flags_bits() {
+        let plan = |flags| parse(&with_e_flags(valid_elf(0x1000, &[], 0), flags)).unwrap();
+        assert_eq!(plan(0x1).float_abi, FloatAbi::Soft, "RVC only — still soft-float");
+        assert_eq!(plan(0x5).float_abi, FloatAbi::Double, "RVC | double");
+        assert_eq!(plan(0xffff_fff9).float_abi, FloatAbi::Soft, "high bits are not ours");
+    }
+
+    /// Whether a program may be granted hardware FP: any ABI other than soft.
+    #[test]
+    fn only_a_soft_float_abi_declines_floating_point() {
+        assert!(!FloatAbi::Soft.uses_hardware_fp());
+        assert!(FloatAbi::Single.uses_hardware_fp());
+        assert!(FloatAbi::Double.uses_hardware_fp());
+        assert!(FloatAbi::Quad.uses_hardware_fp());
+    }
+
+    /// **What the real toolchain actually emits**, pinned against the frozen fixture:
+    /// `riscv64gc-unknown-none-elf` is a hard-float (`lp64d`) target, so every program
+    /// built for it declares `FLOAT_ABI_DOUBLE` — whether or not it contains a single
+    /// float. Measured, not assumed (`xxd -s 48 -l 4` on a built binary gives 0x5).
+    ///
+    /// This is what makes ELF-derived FP authority **currently vacuous as a gate**: all
+    /// userspace shares one target, so the check authorises everything. The cost
+    /// attribution the design leans on comes from *lazy* enable — an integer-only
+    /// program never traps, so never pays — not from this flag. The flag only starts
+    /// refusing anything if some program is deliberately built soft-float.
+    #[test]
+    fn the_toolchain_declares_the_double_float_abi() {
+        let img = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/sample-user.elf"));
+        let plan = parse(img).expect("the sample user ELF should parse");
+        assert_eq!(
+            plan.float_abi,
+            FloatAbi::Double,
+            "riscv64gc is lp64d — every program built for it claims hard float",
+        );
+    }
+
     #[test]
     fn parses_real_toolchain_elf_output() {
         // A *frozen* real toolchain ELF (a checked-in `user/hello` build),
@@ -475,10 +604,7 @@ mod tests {
         // (the linker does NOT page-align new PT_LOADs here — today's `init`
         // has an R-- rodata segment starting mid-page at 0x100006B0).
         // Nothing else in the tree asserts this; refuse rather than map RWX.
-        let plan = LoadPlan {
-            entry: 0x1000,
-            segments: vec![seg(0x1000, 0x100, 0x100, RX), seg(0x1100, 0x80, 0x80, RW)],
-        };
+        let plan = plan_of(vec![seg(0x1000, 0x100, 0x100, RX), seg(0x1100, 0x80, 0x80, RW)]);
         assert_eq!(page_perms(&plan, PAGE), Err(PlanError::WxViolation { page_va: 0x1000 }));
     }
 
@@ -488,10 +614,7 @@ mod tests {
         // R-X code at 0x10000000 and R-- rodata starting mid-page at
         // 0x100006B0. R-X ∪ R-- = R-X, no W, so it maps fine. If this ever
         // fails, the kernel refuses to boot its own root process.
-        let plan = LoadPlan {
-            entry: 0x1000,
-            segments: vec![seg(0x1000, 0x6B0, 0x6B0, RX), seg(0x16B0, 0x258, 0x258, R)],
-        };
+        let plan = plan_of(vec![seg(0x1000, 0x6B0, 0x6B0, RX), seg(0x16B0, 0x258, 0x258, R)]);
         let pages = page_perms(&plan, PAGE).expect("R-X ∪ R-- is not a W^X violation");
         assert_eq!(pages, BTreeMap::from([(0x1000, RX)]));
     }
@@ -512,10 +635,7 @@ mod tests {
     fn detects_a_wx_violation_that_only_exists_after_the_union() {
         // Neither segment is itself W+X — the violation is created *by* sharing
         // the page. Pins that the check runs on the union, not per-segment.
-        let plan = LoadPlan {
-            entry: 0x2000,
-            segments: vec![seg(0x2000, 0x10, 0x10, RX), seg(0x2010, 0x10, 0x10, RW)],
-        };
+        let plan = plan_of(vec![seg(0x2000, 0x10, 0x10, RX), seg(0x2010, 0x10, 0x10, RW)]);
         assert!(!RX.is_wx() && !RW.is_wx(), "neither segment alone is W+X");
         assert_eq!(page_perms(&plan, PAGE), Err(PlanError::WxViolation { page_va: 0x2000 }));
     }
@@ -524,10 +644,7 @@ mod tests {
     fn a_writable_segment_on_its_own_page_is_not_a_violation() {
         // The layout `user.ld` intends: .bss page-aligned, so RW never meets
         // R-X. Two pages, two distinct perms.
-        let plan = LoadPlan {
-            entry: 0x1000,
-            segments: vec![seg(0x1000, 0x100, 0x100, RX), seg(0x2000, 0x100, 0x100, RW)],
-        };
+        let plan = plan_of(vec![seg(0x1000, 0x100, 0x100, RX), seg(0x2000, 0x100, 0x100, RW)]);
         let pages = page_perms(&plan, PAGE).expect("page-separated RW and R-X are fine");
         assert_eq!(pages, BTreeMap::from([(0x1000, RX), (0x2000, RW)]));
     }
@@ -537,7 +654,7 @@ mod tests {
         // mem_size spans into a second page that file_size doesn't reach. Both
         // pages must be mapped or the bss tail (which holds the user stack —
         // see user.ld) is unmapped and `sp` faults.
-        let plan = LoadPlan { entry: 0, segments: vec![seg(0x1000, 0x10, PAGE + 0x10, RW)] };
+        let plan = plan_of(vec![seg(0x1000, 0x10, PAGE + 0x10, RW)]);
         let pages = page_perms(&plan, PAGE).expect("plain RW segment");
         assert_eq!(pages.keys().copied().collect::<Vec<_>>(), vec![0x1000, 0x2000]);
     }
@@ -602,7 +719,7 @@ mod tests {
     fn a_segment_ending_exactly_on_a_page_boundary_maps_no_extra_page() {
         // Pins the end-rounding against an off-by-one: a segment exactly one
         // page long must map one page, not two.
-        let plan = LoadPlan { entry: 0, segments: vec![seg(0x1000, PAGE, PAGE, RW)] };
+        let plan = plan_of(vec![seg(0x1000, PAGE, PAGE, RW)]);
         let pages = page_perms(&plan, PAGE).expect("plain RW segment");
         assert_eq!(pages.keys().copied().collect::<Vec<_>>(), vec![0x1000]);
     }

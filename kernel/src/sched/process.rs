@@ -8,7 +8,7 @@
 //! [`kernel_proc::cap`]; this module only decides *where the table lives*
 //! and grants the bootstrap capability. See `plans/legacy/v0.7b-capabilities.md`.
 
-use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use kernel_proc::cap::{CapTable, Handle};
 use kernel_proc::metric::MetricTable;
@@ -88,6 +88,21 @@ pub struct Process {
     /// process runs on one hart at a time, so the atomic is just for `&self`
     /// access; `Relaxed` suffices.
     pub heap_top: AtomicUsize,
+
+    /// May this process be granted hardware floating point? Derived from the ELF's
+    /// `e_flags` float ABI ([`kernel_proc::elf::FloatAbi`]) once its image is loaded —
+    /// unforgeable by accident, and mechanically checkable rather than taken on faith.
+    ///
+    /// Set after load (the process is built before the image is parsed), so it starts
+    /// `false` and a process whose load failed never gains FP.
+    /// `Relaxed`: written once during load, read afterwards from this process's own
+    /// trap handler.
+    pub fp_authorised: AtomicBool,
+
+    /// Has this process actually had `sstatus.FS` turned on — i.e. does it hold live FP
+    /// register state? Set by the lazy enable at its first FP trap.
+    /// `Relaxed`: same single-writer, own-hart pattern as `fp_authorised`.
+    pub fp_enabled: AtomicBool,
 }
 
 impl Process {
@@ -122,6 +137,10 @@ impl Process {
             span_names: Mutex::new(SpanNameTable::new()),
             metrics: Mutex::new(MetricTable::new()),
             heap_top: AtomicUsize::new(Self::HEAP_BASE),
+            // Both false until the image is loaded and its float ABI read; a process
+            // whose load fails therefore never gains FP authority.
+            fp_authorised: AtomicBool::new(false),
+            fp_enabled: AtomicBool::new(false),
         };
         (process, telemetry, span)
     }

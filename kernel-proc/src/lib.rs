@@ -27,6 +27,7 @@ extern crate alloc;
 
 pub mod cap;
 pub mod elf;
+pub mod fp;
 pub mod ipc;
 pub mod metric;
 pub mod notify;

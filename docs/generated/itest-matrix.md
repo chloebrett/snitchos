@@ -100,7 +100,7 @@
 | stitch-grant-revoke-capevents | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-hold-shows-endpoint-name | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-view-reads-a-file | stitch-fs | wfi | userspace, stitch, fs |
-| stitch-float-does-not-kill-the-kernel | stitch-repl | wfi | userspace, stitch |
+| stitch-float-evaluates-on-target | stitch-repl | wfi | userspace, stitch, fp |
 | stitch-hold-lists-caps | stitch-repl | wfi | userspace, stitch |
 | stitch-print-writes-to-console | stitch-repl | wfi | userspace, stitch |
 | stitch-reads-a-line | stitch-repl | wfi | userspace, stitch |

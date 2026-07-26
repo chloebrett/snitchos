@@ -747,6 +747,10 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
     ph!("pre-userspace");
     if let Some(layout) = user::user_layout(selected.unwrap_or(WorkloadKind::Init)) {
         user::init_metric();
+        // The FP counters must be interned before U-mode runs: the lazy-enable path
+        // emits from trap context, where interning a fresh string could re-enter the
+        // allocator/console locks.
+        crate::trap::fp::init_metrics();
         if layout.needs_endpoint {
             // The shared workload endpoint is the FS server's in the fs workloads;
             // name it so `hold` shows `for=fs` (see capability-names-design.md).

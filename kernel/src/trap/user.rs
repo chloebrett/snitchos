@@ -249,6 +249,10 @@ static USER_EXITS_METRIC: Once<StringId> = Once::new();
 pub struct Loaded {
     /// The entry-point VA (`e_entry`) to put in `sepc`.
     pub entry: usize,
+    /// The float ABI the image declares, from `e_flags` — the process's FP authority
+    /// claim. Carried out of the loader because the `Process` is built before its
+    /// image is parsed, so this is recorded on it afterwards.
+    pub float_abi: elf::FloatAbi,
 }
 
 /// Why loading the embedded program failed.
@@ -1091,13 +1095,22 @@ fn run_loaded_with_caps(
     // `a0` to the granted handle at entry, so the program receives its caps
     // instead of assuming a well-known handle. Neither side hardcodes a slot.
     match load_image(process.root_pa) {
-        Ok(loaded) => enter(
-            loaded,
-            root_pa,
-            bootstrap_handle.raw() as usize,
-            span_handle.raw() as usize,
-            0, // no endpoint cap for the non-IPC programs
-        ),
+        Ok(loaded) => {
+            // The image's own float ABI is this process's FP authority — recorded only
+            // now, because the `Process` is built before the image is parsed. A load
+            // that failed therefore never grants FP.
+            process.fp_authorised.store(
+                loaded.float_abi.uses_hardware_fp(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            enter(
+                loaded,
+                root_pa,
+                bootstrap_handle.raw() as usize,
+                span_handle.raw() as usize,
+                0, // no endpoint cap for the non-IPC programs
+            )
+        }
         Err(e) => panic!("userspace load failed: {e:?}"),
     }
 }
@@ -1203,13 +1216,20 @@ fn run_ipc(
     crate::sched::set_current_address_space(process.root_pa, process_ptr);
 
     match load(process.root_pa, image) {
-        Ok(loaded) => enter(
-            loaded,
-            root_pa,
-            bootstrap_handle.raw() as usize,
-            span_handle.raw() as usize,
-            endpoint_handle.raw() as usize,
-        ),
+        Ok(loaded) => {
+            // Same as the non-IPC path: FP authority is the loaded image's own claim.
+            process.fp_authorised.store(
+                loaded.float_abi.uses_hardware_fp(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            enter(
+                loaded,
+                root_pa,
+                bootstrap_handle.raw() as usize,
+                span_handle.raw() as usize,
+                endpoint_handle.raw() as usize,
+            )
+        }
         Err(e) => panic!("ipc userspace load failed: {e:?}"),
     }
 }
@@ -1267,7 +1287,7 @@ pub fn load(root_pa: usize, image: &[u8]) -> Result<Loaded, LoadError> {
         }
     }
 
-    Ok(Loaded { entry: plan.entry })
+    Ok(Loaded { entry: plan.entry, float_abi: plan.float_abi })
 }
 
 // sstatus field masks for the enter sequence.

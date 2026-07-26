@@ -17,6 +17,7 @@ core::arch::global_asm!(include_str!("trap.S"));
 /// endpoint machinery (`ipc`) — both reached through the trap dispatch in this
 /// module. Re-exported at the crate root so call sites stay `crate::user`,
 /// `crate::ipc`.
+pub mod fp;
 pub mod ipc;
 pub mod user;
 
@@ -216,12 +217,29 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
         // there's nothing smaller to terminate: panic.
         other => {
             let from_user = unsafe { &*frame }.sstatus & SSTATUS_SPP == 0;
-            match kernel_boot::trap::fault_disposition(other, from_user) {
-                FaultDisposition::TerminateProcess => {
-                    terminate_faulting_process(scause & !(1u64 << 63));
-                }
-                FaultDisposition::KernelPanic => {
-                    panic!("unhandled trap: {other:?} (scause={scause:#x})")
+            // An illegal instruction from U-mode may be a *request* for floating
+            // point rather than a fault: `sstatus.FS` starts Off, so a program's
+            // first FP instruction traps here. If the process is authorised, FP is
+            // enabled and the instruction retried — `sepc` is deliberately NOT
+            // advanced, so the `sret` re-executes it, now legally. Anything else
+            // (unauthorised, or FS already on so the instruction really is illegal)
+            // falls through to the terminate path below, having snitched its reason.
+            //
+            // SAFETY: as the other `frame` uses in this handler — sole accessor for
+            // the duration, and `try_enable` mutates only the saved `sstatus`.
+            let fp_enabled = from_user
+                && matches!(other, TrapCause::UnknownException(EXC_ILLEGAL_INSTRUCTION))
+                && fp::try_enable(unsafe { &mut *frame });
+            // Not an early `return`: the kill checkpoint at the end of this handler
+            // must still run on the way back to U-mode.
+            if !fp_enabled {
+                match kernel_boot::trap::fault_disposition(other, from_user) {
+                    FaultDisposition::TerminateProcess => {
+                        terminate_faulting_process(scause & !(1u64 << 63));
+                    }
+                    FaultDisposition::KernelPanic => {
+                        panic!("unhandled trap: {other:?} (scause={scause:#x})")
+                    }
                 }
             }
         }
@@ -281,6 +299,10 @@ fn handle_kernel_fault(scause: u64) -> ! {
 /// `sstatus.SPP` (bit 8): the privilege the trap came from. 0 = User.
 const SSTATUS_SPP: u64 = 1 << 8;
 
+/// `scause` code for an illegal instruction — what an FP instruction produces while
+/// `sstatus.FS` is Off, and so the trap the lazy FP enable hangs off.
+const EXC_ILLEGAL_INSTRUCTION: u64 = 2;
+
 /// A U-mode trap the kernel has no handler for — the faulting instruction was
 /// the process's, so the **process** dies and the machine carries on. Returning
 /// would re-run the faulting instruction forever, so this never returns.
@@ -315,6 +337,10 @@ fn terminate_faulting_process(code: u64) -> ! {
         exception_name(code),
     ));
 
+    // A faulting process can be holding FP just as an exiting one can, so release the
+    // claim on this path too — otherwise a process killed mid-FP takes FP with it.
+    crate::syscall::process::release_fp_claim();
+
     // The process is gone; this hart is no longer running it. Mirrors
     // `handle_exit` — the pointer must not outlive the address space.
     crate::process::CURRENT_PROCESS
@@ -328,6 +354,33 @@ fn terminate_faulting_process(code: u64) -> ! {
         crate::sched::wake(parent);
     }
     crate::sched::exit_now_owned()
+}
+
+/// Start feeding audio on **this hart's** timer wheel: enable the audio deadline at
+/// `period_ticks` and re-arm the timer to the (now sooner) deadline so the DAC drain
+/// begins promptly. Called from the `AudioEnqueue` path when a stream begins. The DAC
+/// MMIO is global, so whichever hart enqueues is the one that drains — no cross-hart
+/// hand-off. Re-arming resets the audio deadline, so the caller must invoke this only
+/// on the idle→active transition (the pwmdac `AUDIO_FEEDING` latch guarantees it).
+pub fn enable_audio_feed(period_ticks: u64) {
+    let now = CLOCK.now();
+    let interval = TIMER_INTERVAL_TICKS.load(Ordering::Relaxed);
+    let mut wheel = AUDIO_WHEEL.this_cpu().lock();
+    wheel
+        .get_or_insert_with(|| TimerWheel::new(now, interval))
+        .enable_audio(now, period_ticks);
+    let deadline = wheel.as_ref().map_or(now + period_ticks, TimerWheel::deadline);
+    drop(wheel);
+    CLOCK.arm(deadline);
+}
+
+/// Stop feeding audio on **this hart's** timer wheel — the audio deadline drops out of
+/// the multiplex and the timer reverts to the scheduler cadence on its next fire.
+/// Called from the drain when the ring goes idle (v2 Increment 5).
+pub fn disable_audio_feed() {
+    if let Some(wheel) = AUDIO_WHEEL.this_cpu().lock().as_mut() {
+        wheel.disable_audio();
+    }
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

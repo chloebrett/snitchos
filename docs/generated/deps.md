@@ -48,6 +48,7 @@ graph LR
     cram["cram"]
     cram_corpus["cram-corpus"]
     cram_eval["cram-eval"]
+    cram_gen["cram-gen"]
     glitch["glitch"]
     glitch_core["glitch-core"]
     glitch_proto["glitch-proto"]
@@ -74,6 +75,7 @@ graph LR
     cram_eval --> kvetch_model
     cram_eval --> kvetch_vocab
     cram_eval --> stitch
+    cram_gen --> stitch
     diagram --> protocol
     diagram --> snitchos_abi
     fs --> fs_core
@@ -143,6 +145,7 @@ graph LR
     xtask_cram --> cram
     xtask_cram --> cram_corpus
     xtask_cram --> cram_eval
+    xtask_cram --> cram_gen
     xtask_cram --> kvetch_model
     xtask_cram --> kvetch_vocab
     xtask_cram --> stitch

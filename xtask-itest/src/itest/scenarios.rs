@@ -368,46 +368,57 @@ pub fn stitch_reads_a_line(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
-/// `workload=stitch-repl`: **the bug this whole FP arc came from.** Typing a float
-/// at the REPL used to take the machine down — `1.5 + 1.5` compiles to an `f64`
-/// add, `sstatus.FS` is never set, so the FP instruction trapped as illegal and the
-/// trap dispatcher's catch-all `panic!` killed the kernel.
+/// `workload=stitch-repl`: **the bug this whole FP arc came from, now the feature.**
+/// Typing a float at the REPL used to take the machine down — `1.5 + 1.5` compiles to
+/// an `f64` add, `sstatus.FS` was never set, so the FP instruction trapped as illegal
+/// and the trap dispatcher's catch-all `panic!` killed the kernel.
 ///
-/// Asserts the machine *survives* it. That is the honest intermediate state: the
-/// REPL process itself is still killed, because userspace FP genuinely does not
-/// work yet (increments 3–5 of `plans/floating-point.md`). What changed is the
-/// blast radius — one process instead of the whole kernel.
+/// Now it evaluates. The whole of `plans/floating-point.md` is downstream of this one
+/// line of REPL input, so the scenario asserts the complete chain rather than just the
+/// answer:
 ///
-/// This scenario is a **tripwire for increment 4**, and is meant to be rewritten
-/// then: once FP authority is derived from the ELF and enabled lazily at this very
-/// trap, `1.5 + 1.5` should print `3` and the fault Log should stop appearing. If
-/// that lands and this scenario still passes unchanged, the lazy enable isn't
-/// reaching the REPL.
+///   1. **`snitchos.fp.processes_enabled`** — FP was *granted*, lazily, at the trap the
+///      FP instruction caused. No syscall asked for it; the fault was the request.
+///   2. **A `Log` naming the process and its authority** — an authority grant should be
+///      as observable as a capability grant, and the authority here is the ELF's own
+///      hard-float ABI, read off the binary rather than claimed.
+///   3. **The arithmetic is right** — `1.5 + 1.75` on the UART, chosen because `3.25`
+///      appears nowhere in the boot self-test (`=> 3` does: the demo evaluates
+///      `1 + 2`), so the assertion can't pass on an echo or on unrelated output.
+///   4. **The kernel is still alive** afterwards.
 ///
-/// Note the two engines only agree here because snemu models the FS gate
-/// (increment 3a): before that, snemu had no illegal-instruction cause at all and
-/// halted the run host-side instead of trapping the guest.
-pub fn stitch_float_does_not_kill_the_kernel(h: &mut View) -> Result<(), String> {
+/// It began life as `stitch-float-does-not-kill-the-kernel`, asserting only (4) —
+/// deliberately written as a tripwire that would fail when the lazy enable landed. It
+/// did fail, on the first run after increment 4, which is how we know the enable path
+/// is genuinely reaching the REPL rather than the scenario having been written to
+/// match whatever the code happened to do.
+///
+/// The two engines agree only because snemu models the FS gate and the FP unit
+/// (increment 3): before that, snemu had no illegal-instruction cause at all and halted
+/// the run host-side instead of trapping the guest.
+pub fn stitch_float_evaluates_on_target(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
         .ok_or("stitch REPL never reached its boot self-test within 30s")?;
 
-    h.send_input(b"1.5 + 1.5\n").map_err(|e| format!("inject REPL input: {e}"))?;
+    h.send_input(b"1.5 + 1.75\n").map_err(|e| format!("inject REPL input: {e}"))?;
 
-    // The FP instruction traps, and the kernel attributes the death to the REPL
-    // rather than dying with it.
+    h.wait_for(SEC * 30, is_metric_named("snitchos.fp.processes_enabled"))
+        .ok_or(
+            "no snitchos.fp.processes_enabled within 30s — the FP instruction didn't reach the \
+             lazy-enable path (constant-folded to integers? enable refused?)",
+        )?;
+
     h.wait_for(SEC * 30, |f, _| {
         matches!(f, OwnedFrame::Log { msg, .. }
-            if msg.contains("user fault") && msg.contains("illegal instruction"))
+            if msg.contains("fp enabled") && msg.contains("hard-float"))
     })
-    .ok_or(
-        "no 'user fault … illegal instruction' Log within 30s after typing a float. Either the \
-         float never reached an FP instruction (constant-folded? integer path?), or the kernel \
-         panicked instead of terminating the REPL",
-    )?;
+    .ok_or("no 'fp enabled … hard-float' Log — the grant happened but wasn't attributable")?;
 
-    // The point of the whole increment: the kernel is alive on the far side.
+    h.wait_for_log(SEC * 30, "3.25")
+        .map_err(|e| format!("{e} — the float didn't evaluate to 3.25 on the metal"))?;
+
     h.wait_for(SEC * 30, is_span_start_named("kernel.heartbeat"))
-        .ok_or("no heartbeat after the REPL's float — the kernel died with the REPL process")?;
+        .ok_or("no heartbeat after the REPL's float — the kernel didn't survive FP")?;
 
     Ok(())
 }
@@ -1008,7 +1019,11 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
 /// span appearing on the *server's* task id: the trace crossing the process
 /// boundary is what proves the round trip happened, rather than the REPL
 /// quietly falling back to its grammar-only menu.
-#[allow(dead_code, reason = "blocked on userspace FP — see plans/repl-completion.md")]
+#[allow(
+    dead_code,
+    reason = "FP no longer blocks it, but the REPL still never reaches the completion call \
+              and the body carries bisect scaffolding — see the note in itest.rs"
+)]
 pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
     // The boot self-test confirms the REPL is up and polling the console, so
     // injected keystrokes aren't dropped.

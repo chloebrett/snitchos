@@ -17,7 +17,9 @@ mod ipc;
 mod mem;
 mod metric;
 mod notify;
-mod process;
+// `pub(crate)` for `process::release_fp_claim`, which the fault-kill path in
+// `trap` calls so a process killed mid-FP releases its claim like an exiting one.
+pub(crate) mod process;
 mod span;
 mod transfer;
 

@@ -4,6 +4,22 @@ use core::sync::atomic::Ordering;
 
 use crate::trap::TrapFrame;
 
+/// Release the current process's floating-point claim, if it held one. Reads
+/// `CURRENT_PROCESS` before the exit path nulls it.
+///
+/// Shared by `Exit` and the fault-kill path, since a process can die either way and a
+/// leaked claim is indistinguishable from "FP is permanently taken".
+pub(crate) fn release_fp_claim() {
+    let process = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    if process.is_null() {
+        return;
+    }
+    // SAFETY: same as every other `CURRENT_PROCESS` deref in the syscall path — it
+    // points at the `Process` in the never-returning `enter` frame of this hart's task.
+    let had_fp = unsafe { &*process }.fp_enabled.load(Ordering::Relaxed);
+    crate::trap::fp::release(had_fp);
+}
+
 /// Terminate the calling user process with exit status `a0` (v0.12). Snitches
 /// `snitchos.user.exits_total`, clears this hart's current-process pointer,
 /// records the exit status + wakes any parent blocked in `Wait` on this task
@@ -17,6 +33,10 @@ pub(super) fn handle_exit(frame: &TrapFrame) -> ! {
     if let Some(id) = crate::user::user_exits_metric_id() {
         crate::tracing::emit_metric(id, 1);
     }
+    // Release any FP claim before dropping the process pointer, or the interim
+    // one-FP-process-at-a-time guard would leak: the first FP process's exit would
+    // permanently deny FP to every process after it.
+    release_fp_claim();
     crate::process::CURRENT_PROCESS
         .this_cpu()
         .store(core::ptr::null_mut(), Ordering::Relaxed);
