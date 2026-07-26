@@ -417,6 +417,14 @@ impl State {
                 self.advance_anchor(*t);
                 None
             }
+            Frame::AudioXRun { t, .. } => {
+                // v2 audio underrun — a missed DAC feed deadline. On the wire (the
+                // itest reads it directly); the running count also rides the
+                // `snitchos.audio.xruns_total` metric. Drawing it as a Tempo timeline
+                // event is a follow-on. Anchor for now.
+                self.advance_anchor(*t);
+                None
+            }
         }
     }
 

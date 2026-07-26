@@ -11,6 +11,7 @@
 //! do (it feeds an in-memory buffer straight to `decode_stream`).
 
 use std::io::Read;
+use std::net::UdpSocket;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
@@ -24,16 +25,21 @@ pub enum Source {
     Socket(PathBuf),
     /// Replay a previously recorded wire stream from a file.
     Replay(PathBuf),
+    /// A UDP port the board/QEMU streams telemetry datagrams to (M2.5). Each
+    /// datagram is a COBS batch; the payloads concatenate into one frame stream.
+    Udp(u16),
 }
 
 impl Source {
-    /// Resolve from the `--replay` flag: a path replays that file; its absence
-    /// uses the live `socket`.
+    /// Resolve the source from the CLI: `--replay <file>` replays that file,
+    /// else `--udp <port>` listens for datagrams, else the live `socket`. Replay
+    /// wins (offline analysis), then UDP, then the default socket.
     #[must_use]
-    pub fn resolve(replay: Option<PathBuf>, socket: PathBuf) -> Self {
-        match replay {
-            Some(path) => Source::Replay(path),
-            None => Source::Socket(socket),
+    pub fn resolve(replay: Option<PathBuf>, udp: Option<u16>, socket: PathBuf) -> Self {
+        match (replay, udp) {
+            (Some(path), _) => Source::Replay(path),
+            (None, Some(port)) => Source::Udp(port),
+            (None, None) => Source::Socket(socket),
         }
     }
 
@@ -45,7 +51,9 @@ impl Source {
     pub fn policy(&self) -> OnDecodeError {
         match self {
             Source::Socket(_) => OnDecodeError::Fail,
-            Source::Replay(_) => OnDecodeError::Resync,
+            // UDP is lossy — a dropped/reordered datagram is expected, and the
+            // next datagram begins on a frame boundary, so resync recovers.
+            Source::Replay(_) | Source::Udp(_) => OnDecodeError::Resync,
         }
     }
 
@@ -57,6 +65,7 @@ impl Source {
         match self {
             Source::Socket(path) => Ok(Box::new(UnixStream::connect(path)?)),
             Source::Replay(path) => Ok(Box::new(std::fs::File::open(path)?)),
+            Source::Udp(port) => Ok(Box::new(UdpReader::new(UdpSocket::bind(("0.0.0.0", *port))?))),
         }
     }
 
@@ -66,7 +75,70 @@ impl Source {
         match self {
             Source::Socket(path) => std::format!("socket {}", path.display()),
             Source::Replay(path) => std::format!("replay {}", path.display()),
+            Source::Udp(port) => std::format!("udp :{port}"),
         }
+    }
+}
+
+/// A source of datagram payloads. [`UdpSocket`] is the live one; the injection
+/// seam lets the stream-assembly logic be tested without binding a real socket
+/// (which stalls ad-hoc-signed test binaries under the macOS firewall).
+trait RecvDatagram {
+    /// Receive the next datagram's payload into `buf`, returning its length.
+    /// Blocks for a live socket; `Ok(0)` signals no more datagrams (stream end).
+    ///
+    /// # Errors
+    /// Whatever the underlying transport's receive fails with.
+    fn recv_datagram(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+}
+
+impl RecvDatagram for UdpSocket {
+    // Thin delegation to `UdpSocket::recv` — I/O glue, exercised at the logic
+    // level through the mock in tests, not unit-testable itself.
+    #[cfg_attr(test, mutants::skip)]
+    fn recv_datagram(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.recv(buf)
+    }
+}
+
+/// Receive buffer for one datagram. Telemetry datagrams are MTU-bounded (a
+/// batch payload ≤ ~1.5 KB), so this has ample margin; an oversized datagram is
+/// truncated by `recv` and resync recovers.
+const MAX_DATAGRAM: usize = 2048;
+
+/// Presents a datagram source as a byte [`Read`] stream by concatenating payloads.
+/// Each datagram is a COBS batch ending on a frame boundary, so the concatenation
+/// is a clean COBS stream for [`decode_stream`]; `read` pulls the next datagram
+/// when its buffer is drained (blocking for a live socket — no EOF).
+struct DatagramReader<D> {
+    source: D,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+/// The live UDP reader: a [`DatagramReader`] over a [`UdpSocket`].
+type UdpReader = DatagramReader<UdpSocket>;
+
+impl<D> DatagramReader<D> {
+    fn new(source: D) -> Self {
+        Self { source, buf: Vec::new(), pos: 0 }
+    }
+}
+
+impl<D: RecvDatagram> Read for DatagramReader<D> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.buf.len() {
+            let mut datagram = [0u8; MAX_DATAGRAM];
+            let n = self.source.recv_datagram(&mut datagram)?;
+            self.buf.clear();
+            self.buf.extend_from_slice(&datagram[..n]);
+            self.pos = 0;
+        }
+        let avail = &self.buf[self.pos..];
+        let take = avail.len().min(out.len());
+        out[..take].copy_from_slice(&avail[..take]);
+        self.pos += take;
+        Ok(take)
     }
 }
 
@@ -96,13 +168,13 @@ mod tests {
 
     #[test]
     fn resolve_without_replay_uses_the_socket() {
-        let s = Source::resolve(None, PathBuf::from("/tmp/sock"));
+        let s = Source::resolve(None, None, PathBuf::from("/tmp/sock"));
         assert_eq!(s, Source::Socket(PathBuf::from("/tmp/sock")));
     }
 
     #[test]
     fn resolve_with_replay_uses_the_file() {
-        let s = Source::resolve(Some(PathBuf::from("/rec.bin")), PathBuf::from("/tmp/sock"));
+        let s = Source::resolve(Some(PathBuf::from("/rec.bin")), None, PathBuf::from("/tmp/sock"));
         assert_eq!(s, Source::Replay(PathBuf::from("/rec.bin")));
     }
 
@@ -120,6 +192,97 @@ mod tests {
     fn socket_fails_fast_and_replay_resyncs() {
         assert_eq!(Source::Socket(PathBuf::from("/s")).policy(), OnDecodeError::Fail);
         assert_eq!(Source::Replay(PathBuf::from("/r")).policy(), OnDecodeError::Resync);
+    }
+
+    #[test]
+    fn resolve_with_udp_uses_the_udp_source() {
+        let s = Source::resolve(None, Some(9000), PathBuf::from("/tmp/sock"));
+        assert_eq!(s, Source::Udp(9000));
+    }
+
+    #[test]
+    fn udp_resyncs_like_a_lossy_transport() {
+        assert_eq!(Source::Udp(9000).policy(), OnDecodeError::Resync);
+    }
+
+    #[test]
+    fn describe_names_the_udp_port() {
+        let d = Source::Udp(9000).describe();
+        assert!(d.contains("udp") && d.contains("9000"), "{d}");
+    }
+
+    /// A queue of datagram payloads, drained one per `recv_datagram`, then EOF.
+    /// Lets the assembly + decode be tested without a real socket.
+    struct MockDatagrams {
+        queue: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl RecvDatagram for MockDatagrams {
+        fn recv_datagram(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.queue.pop_front() {
+                Some(d) => {
+                    buf[..d.len()].copy_from_slice(&d);
+                    Ok(d.len())
+                }
+                None => Ok(0), // no more datagrams — stream end
+            }
+        }
+    }
+
+    fn reader_over(datagrams: Vec<Vec<u8>>) -> DatagramReader<MockDatagrams> {
+        DatagramReader::new(MockDatagrams { queue: datagrams.into_iter().collect() })
+    }
+
+    #[test]
+    fn datagram_payloads_concatenate_into_the_byte_stream() {
+        use std::io::Read;
+        // The new logic: consecutive datagram payloads become one contiguous
+        // stream, the datagram boundaries invisible to the reader.
+        let mut reader = reader_over(std::vec![std::vec![1, 2, 3], std::vec![4, 5, 6]]);
+        let mut out = [0u8; 6];
+        reader.read_exact(&mut out).expect("read both datagrams");
+        assert_eq!(out, [1, 2, 3, 4, 5, 6], "payloads concatenate in order");
+    }
+
+    #[test]
+    fn frames_decode_across_datagram_boundaries() {
+        // Two frames delivered in two datagrams (one each): decode_stream over the
+        // reader must recover both, proving the datagram→stream seam feeds the
+        // decoder correctly. Also the empty final `recv` (EOF) terminates cleanly.
+        let a = Frame::Hello { timebase_hz: 10_000_000, protocol_version: protocol::PROTOCOL_VERSION };
+        let b = Frame::SpanEnd { id: SpanId(7), t: 42 };
+        let mut buf = [0u8; 128];
+        let da = protocol::wire_encode(&a, &mut buf).expect("encode a").to_vec();
+        let db = protocol::wire_encode(&b, &mut buf).expect("encode b").to_vec();
+
+        let mut got = Vec::new();
+        let summary = decode_stream(&mut reader_over(std::vec![da, db]), OnDecodeError::Resync, |f| {
+            got.push(OwnedFrame::from_borrowed(f));
+        })
+        .expect("decodes across datagrams");
+        assert_eq!(got, std::vec![OwnedFrame::from_borrowed(&a), OwnedFrame::from_borrowed(&b)]);
+        assert_eq!(summary.resyncs, 0, "clean datagrams need no resync");
+    }
+
+    #[test]
+    fn a_garbage_prefixed_datagram_decodes_the_frame_after_it_and_resyncs() {
+        // A datagram that begins mid-frame (bytes lost before it): an undecodable
+        // COBS chunk, then a valid frame. The Resync policy skips to the next
+        // `0x00` — the datagram's own frame boundary — and recovers.
+        let good = Frame::SpanEnd { id: SpanId(5), t: 11 };
+        let mut buf = [0u8; 128];
+        let mut payload = std::vec![0x01u8, 0x00]; // undecodable chunk + terminator
+        payload.extend_from_slice(protocol::wire_encode(&good, &mut buf).expect("encode"));
+
+        let mut got = Vec::new();
+        let summary = decode_stream(
+            &mut std::io::Cursor::new(payload),
+            OnDecodeError::Resync,
+            |f| got.push(OwnedFrame::from_borrowed(f)),
+        )
+        .expect("resync tolerates a garbage prefix");
+        assert_eq!(got, std::vec![OwnedFrame::from_borrowed(&good)]);
+        assert_eq!(summary.resyncs, 1, "the garbage prefix was skipped and counted");
     }
 
     #[test]

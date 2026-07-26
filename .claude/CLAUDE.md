@@ -251,7 +251,7 @@ cram-eval/    Host-only. How every rung is scored: the `Predictor` trait (one
               `kvetch-model`, never `cram`: evaluating compiles no backward
               pass. Driven by `cargo xtask cram --eval`.
               **The floor is uniform-over-legal, not babble** (measured:
-              2.758 vs 5.405 free-nll) — babble's termination pressure
+              2.742 vs 5.395 free-nll) — babble's termination pressure
               saturates on long files, a regime it never generates in.
 cram-corpus/  Host-only. Tier-0 corpus assembly: babble generation (parallel,
               byte-identical to sequential), the on-disk cache + manifest,

@@ -66,6 +66,12 @@ struct Args {
     /// no board or QEMU attached.
     #[arg(long, value_name = "FILE")]
     replay: Option<PathBuf>,
+
+    /// Listen for telemetry datagrams on this UDP port instead of the live
+    /// socket — the `net=` transport (M2.5). Each datagram is a COBS batch;
+    /// decode is resync-tolerant, since UDP may drop or reorder datagrams.
+    #[arg(long, value_name = "PORT")]
+    udp: Option<u16>,
 }
 
 #[cfg_attr(test, mutants::skip)] // I/O entry point — not unit-testable
@@ -85,7 +91,7 @@ fn main() -> std::io::Result<()> {
         prom::serve(state.clone(), args.prometheus)?;
     }
 
-    let source = Source::resolve(args.replay.clone(), PathBuf::from(SOCKET_PATH));
+    let source = Source::resolve(args.replay.clone(), args.udp, PathBuf::from(SOCKET_PATH));
     eprintln!("collector: source = {}", source.describe());
     if !args.no_otlp {
         eprintln!("collector: exporting OTLP traces to {}", &args.otlp);
