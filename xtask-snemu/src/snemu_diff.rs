@@ -59,6 +59,28 @@ pub fn dtb_base_for<'a>(workload: Option<&str>, default: &'a [u8]) -> &'a [u8] {
     }
 }
 
+/// The workload name that boots the default (`init`) workload with UDP telemetry
+/// over virtio-net instead of the console — the `net=` transport path (M2.5).
+pub const NET_TELEMETRY_WORKLOAD: &str = "net-telemetry";
+/// The fixed `net=` config the [`NET_TELEMETRY_WORKLOAD`] boots with: our
+/// ip/mac, the collector's ip/mac, dst port. Arbitrary but valid — snemu's
+/// virtio-net model strips the headers regardless of address.
+const NET_TELEMETRY_CONFIG: &str = "10.0.0.2,52:54:00:12:34:56,10.0.0.1,52:54:00:12:34:57,9000";
+
+/// The kernel bootargs for a workload, or `None` for the default (no-bootarg)
+/// boot. The single source for the workload→bootargs mapping: every snemu boot
+/// path routes through it. Most workloads map to `workload=<name>`; the
+/// [`NET_TELEMETRY_WORKLOAD`] maps to a `net=` config (selecting UDP telemetry,
+/// booting `init` underneath).
+#[must_use]
+pub fn workload_bootargs(workload: Option<&str>) -> Option<String> {
+    match workload {
+        Some(NET_TELEMETRY_WORKLOAD) => Some(format!("net={NET_TELEMETRY_CONFIG}")),
+        Some(w) => Some(format!("workload={w}")),
+        None => None,
+    }
+}
+
 /// Normalize a frame for structural comparison: zero the timestamp everywhere it
 /// appears, and zero the (wall-clock-driven) metric value. Everything else — ids,
 /// names, kinds, hart/task ids, span topology — is kept and compared.
@@ -850,9 +872,8 @@ pub fn load_workload_machine(
     hart_count: usize,
 ) -> Result<snemu::machine::Machine, String> {
     let ram_bytes = u64::from(ram_mb_for(workload)) * 1024 * 1024;
-    let mut dtb = match workload {
-        Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
-            .ok_or("DTB patch failed")?,
+    let mut dtb = match workload_bootargs(workload) {
+        Some(args) => snemu::dtb::set_bootargs(dtb_base, &args).ok_or("DTB patch failed")?,
         None => dtb_base.to_vec(),
     };
     // Match the DTB's declared RAM to the host Memory so the kernel sizes its frame

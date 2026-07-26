@@ -358,11 +358,13 @@ so its latency is precomputation at line starts (the same snapshot trick the
 continuation oracle already uses) rather than tokens a human waits on. Note this
 is not a licence to revive §2: whatever such a model emits must still be trained
 from search, not from the checker's derivations. Off the critical path either
-way. But
-as a **training-data generator** the cost is paid once, on the host: search finds
-good programs, the model is fine-tuned on what search found, and the deployed
-model does plain greedy or constrained decoding. That is AlphaZero's expert-
-iteration shape and it fits this project far better than search-at-inference.
+way.
+
+As a **training-data generator**, by contrast, the cost is paid once, on the
+host: search finds good programs, the model is fine-tuned on what search found,
+and the deployed model does plain greedy or constrained decoding. That is
+AlphaZero's expert-iteration shape and it fits this project far better than
+search-at-inference.
 
 **Why this matters beyond capability:** it is a second source of *manufactured
 search traces* (§5), and its wrong turns are **real** — genuinely explored and

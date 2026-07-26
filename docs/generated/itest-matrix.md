@@ -72,6 +72,7 @@
 | manifest-satisfy-grants-by-name | manifest-satisfy | wfi | userspace, fs |
 | manifest-satisfy-refuses-unsatisfiable | manifest-satisfy | wfi | userspace, fs |
 | mutex-storm | mutex-storm | cpu | smp, stress |
+| net-telemetry-over-udp | net-telemetry | wfi | boot, net |
 | notify-signal-wakes-waiter | notify-smoke | cpu | userspace |
 | kernel-panic-emits-frame | panic-now | wfi | sched |
 | smp-ping-pong-cadence | ping-pong | cpu | smp, ipi |

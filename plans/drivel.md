@@ -300,6 +300,29 @@ warning, names the program, byte, line and admitted-class count, and exits
 nonzero *after* printing everything else. Not fixed here — `stitch` was being
 edited concurrently, and this is a `stitch` bug rather than a harness one.
 
+### Retrained on the current language (2026-07-26, after `test` + `expect`)
+
+Corpus regenerated (1M programs, 86.9 MB) and drivel retrained at the same
+52,000 steps: loss 2.278 (run 2 reached 2.26), 46.8k tok/s, 37.9 min.
+
+| Measure | run 2 (older grammar) | now |
+|---|---|---|
+| Unconstrained parse, as sampled | 85.0% | **78.0%** |
+| Unconstrained parse, complete items | 91.0% | **88.5%** |
+
+**Do not read this as a regression in the rig.** Three things changed at once
+and the drop is not attributable to any one of them without a further run:
+Stitch gained two keywords (`test`, `expect`, so 59 token classes instead of
+57 — a larger grammar to learn at unchanged capacity), the corpus was
+regenerated from scratch, and the printer's `expect` bug was fixed. What the
+number does establish is a fresh baseline **on the language as it stands**,
+which the recorded 91% no longer described.
+
+The comparison is the ladder's own matrix rule (see the ladder doc) arriving in
+practice: run 2 and this run are different *cells*, not two measurements of one
+thing, because the corpus axis moved under them. Same trap as "loss is not
+comparable across corpora", one level up.
+
 ### The corpus cache now sees the grammar, not just a sample of its output
 
 The manual "delete the manifest after a printer change" ritual was a missing

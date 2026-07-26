@@ -266,6 +266,7 @@ fn load_corpus(programs: usize, layout: Layout) -> std::io::Result<String> {
             program_count: programs,
             layout,
             probe_digest: Manifest::probe_digest(layout),
+            grammar_digest: Manifest::grammar_digest(),
         }
         .render(),
     )?;
