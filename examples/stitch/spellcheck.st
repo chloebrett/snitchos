@@ -18,6 +18,7 @@
 // algebra (union/intersection/difference).
 
 use Str
+use List
 
 chars(s: Str) -> List<Str> = Str.split(s, "") |> filter(c -> c != "")
 
@@ -121,7 +122,9 @@ test "suggest against an empty dictionary is None" {
 
 test "suggestionsWithin lists every close-enough word, nearest first" {
     let dict = ["hello", "world", "help", "yell"]
-    expect suggestionsWithin(dict, "hell", 2) == ["help", "hello", "yell"]
+    // "world" (distance 4) is excluded; the rest are all distance 1 from
+    // "hell", so a stable sort leaves them in dictionary order.
+    expect suggestionsWithin(dict, "hell", 2) == ["hello", "help", "yell"]
 }
 
 test "suggestionsWithin is empty when nothing in the dictionary is close enough" {

@@ -689,6 +689,68 @@ was worth recording from each.
   program that reaches for real math (none currently planned need it, but
   worth flagging before one is written assuming it's available).
 
+### 18–22: huffman.st, diff.st, tokenbucket.st, circuitbreaker.st, spellcheck.st
+
+Five more, written in one continuous pass — **out of order**: items 16–17
+(`tictactoe.st`, `maze.st`) got skipped by mistake and are done separately,
+after this entry. Two genuinely new, reusable findings turned up (both
+below); everything else was established habits holding up.
+
+- **18. huffman.st** — 205 lines, 8 tests. **Found a real, previously-
+  undetected bug in every prior file that used `Str.split(s, "")` to get
+  "the characters of a string."** `Str.split` is a direct pass-through to
+  Rust's `str::split` (`natives.rs::native_split`), and Rust's documented
+  behavior for an *empty* separator pattern includes an empty-string piece
+  before the first character and after the last (`"abc".split("")` is 5
+  pieces — `["", "a", "b", "c", ""]` — not 3; `"".split("")` is 2 empty
+  pieces, not 0 or 1). `frequencies("abracadabra")` came back with a bogus
+  extra `Freq("", 2)` entry; a single-symbol `buildTree("aaaa")` built a
+  2-leaf tree instead of a bare `Leaf`; `buildTree(frequencies(""))` came
+  back `Some(Leaf("", 2))` instead of `None`. Root-caused by comparing
+  against a Rust `split("")` semantics check, not guesswork. **Why this
+  didn't surface earlier**: json.st's `escapeStr` also does
+  `Str.split(s, "") |> map(...) |> Str.join("")` unfiltered, and is
+  correct anyway — mapping any per-char escape lookup over `""` and
+  rejoining reproduces `""`, so the extra pieces are invisible in a
+  transform-then-rejoin. They only corrupt code that *counts* or *indexes*
+  characters, which huffman.st's `frequencies` does. Fixed with a `chars(s)
+  = Str.split(s, "") |> filter(c -> c != "")` helper (reused verbatim, or
+  near enough, in diff.st and spellcheck.st below) — **every future program
+  that wants "the characters of a string" should use this pattern from the
+  start**, not `Str.split(s, "")` bare.
+- **19. diff.st** — 99 lines, 7 tests. An LCS dynamic-programming table
+  built as nested `fold`s (row-by-row, then cell-by-cell within a row) —
+  the pattern spellcheck.st's Levenshtein table below reuses directly.
+  **`map` over a range (`0..=n`) stays a `Seq`, even though the range is
+  finite** — ranges are lazy by design (`docs/language-design.md`), and
+  `map`'s `Seq`-vs-`List` branch (natives.rs, same mechanism as the
+  `drop`/`take` finding in markov.st's entry) preserves whichever kind it
+  was given. `map(0..=count(b), _ -> 0)` used directly as a table row
+  faulted with `"List.at expects a List, got Seq"` the first time
+  `List.at` touched it. Fixed with `|> toList`. Every DP-table-style
+  program building a row via `map` over a range needs this; huffman.st and
+  spellcheck.st both hit and handled the same thing while `diff.st` was
+  still fresh.
+- **20. tokenbucket.st** — 105 lines, 7 tests. Straightforward `mut`-state
+  rate limiter; no new friction — bank.st's `mut`-semantics and `let mut`
+  lessons applied cleanly throughout.
+- **21. circuitbreaker.st** — 148 lines, 8 tests. A time-and-count-driven
+  state machine (vs. stim.st's key-event-driven one) with a `Show`
+  instance on the state `sum` itself. No new friction.
+- **22. spellcheck.st** — 133 lines, 9 tests. **`Set<T>` does not exist in
+  this interpreter at all — not a construction-limited stdlib type like
+  `Map`, but entirely unimplemented.** `plans/lang/01-grammar-and-precedence.md`
+  documents the *design* ("`Set<T>` — eager; no literal, `[1,2,3] |>
+  toSet`"), but grepping `natives.rs`/`value.rs`/`check.rs` for any trace
+  of `Set`, `toSet`, or a `Value::Set` variant found nothing — it's
+  design-doc-only, never built past that. A step further than the `Map`
+  finding (json.st's entry): `Map` at least exists, just construction-
+  limited. Cost nothing here (a spellchecker's dictionary only ever needs
+  membership testing, which `List` + `contains` gives for free), but would
+  matter to a program that wanted actual set algebra (union/intersection/
+  difference) — worth checking for before assuming `Set` is available in
+  any later program.
+
 - **Not tested in-language, and worth recording why**: wanted a `bank.st`
   test proving a function *without* `uses FsWrite` is refused when it
   tries `fsWrite` (the negative case for the capability-boundary finding

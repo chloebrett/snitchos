@@ -69,16 +69,28 @@ checks the whole workspace shares), and its `test` blocks pass.
        `on` strategies (fixed-K vs margin-scaled). (Elo's real formula is
        infeasible — no `pow`/`exp`/`sqrt`/`Float` math at all; landed as a
        documented integer piecewise-linear approximation — see findings.)
-- [ ] 16. `tictactoe.st` — board + win detection + minimax AI.
+- [ ] 16. `tictactoe.st` — board + win detection + minimax AI. (Skipped out
+       of order — see note below; still owed.)
 - [ ] 17. `maze.st` — BFS pathfinding over a wall grid, tuple coordinates.
-- [ ] 18. `huffman.st` — Huffman coding tree, encode/decode round-trip test.
-- [ ] 19. `diff.st` — LCS-based line diff (`sum DiffLine`), DP via nested
+       (Skipped out of order — see note below; still owed.)
+- [x] 18. `huffman.st` — Huffman coding tree, encode/decode round-trip test.
+       (Found & fixed a real bug in this batch's `Str.split(s, "")`
+       "characters of a string" idiom — see findings.)
+- [x] 19. `diff.st` — LCS-based line diff (`sum DiffLine`), DP via nested
        `fold`.
-- [ ] 20. `tokenbucket.st` — rate limiter, `mut` bucket state, per-request
+- [x] 20. `tokenbucket.st` — rate limiter, `mut` bucket state, per-request
        telemetry span.
-- [ ] 21. `circuitbreaker.st` — `sum State = Closed|Open|HalfOpen` state
+- [x] 21. `circuitbreaker.st` — `sum State = Closed|Open|HalfOpen` state
        machine, `on State : Show`.
-- [ ] 22. `spellcheck.st` — Levenshtein distance over a `Set<Str>` dictionary.
+- [x] 22. `spellcheck.st` — Levenshtein distance over a dictionary. (`Set<Str>`
+       doesn't exist in the interpreter at all — landed as `List<Str>` +
+       `contains`; see findings.)
+
+**Note (2026-07-26):** items 18–22 were written before 16–17 — an
+ordering slip while working through "do the next 5" autonomously (picked
+up the list past `elo.st` one item too far in). Not reordering the list
+itself (the work is done and correct under its real numbers); 16–17 are
+still owed and get done next.
 - [ ] 23. `formula.st` — spreadsheet cell graph, cross-references, cycle
        detection (`Result`), memoized eval.
 - [ ] 24. `template.st` — mustache-like `{{var}}`/`{{#each}}` renderer over
