@@ -136,13 +136,60 @@ depends on it.
 
 Each tranche is green in Stitch before its Rust file goes.
 
-1. `lib/stats.st` — **DONE**: 6 native tests, written beside the functions they
-   cover (integer-only, so they run on the metal — userspace FP is illegal).
-   `lib/text.st` next, then `canon_behaviour.rs` is deletable. Note the Rust
-   version tested `stats` through a *driver module* (`use stats` + a generated
-   `main`); the native ones call `summarise` directly, because they are inside
-   the module — which is the ergonomic difference the whole design is about.
-2. `stim.st` — the 1021-line prize. Motions, then operators, then modes.
+1. `lib/stats.st` + `lib/text.st` — **DONE**: 12 native tests, each beside the
+   function it covers. Integer/string only, so they run on the metal (userspace
+   FP is illegal). The ergonomic difference the design is about: the Rust
+   versions needed a `format!`-assembled driver module, the native ones call
+   `summarise`/`pad` directly because they are *inside* the module.
+
+   **`canon_behaviour.rs` was reduced, not deleted.** All 11 of its behavioural
+   assertions moved into Stitch, but one axis did not: a native test sits inside
+   its module and calls unqualified, so it says nothing about whether `ext`
+   exported anything or whether `stats.summarise` resolves from *another*
+   module. Nothing else covered that — `builtin_module_use.rs` tests the
+   built-in `Str`/`List` modules, and no canon program imports these two. So the
+   file survives as two import smoke tests over the export boundary. Deleting it
+   wholesale would have retired real coverage with every remaining test green.
+2. `stim.st` — the 1021-line prize. **Motions tranche DONE** (8 tests: motion
+   targets + wiseness, `h`/`l`, `j`/`k`, `0`/`$`, `^`, word motions, count
+   accumulation, count repetition). `stim_fsm.rs` is down to 53 tests / 903
+   lines; three helpers (`motion_rowcol`, `motion_wise`, `count_of`) went with
+   them, since projecting a variant to a string tag is exactly what a native
+   test does not need.
+
+   **The port does not bloat the file** — the worry going in was that a ~1000
+   line test suite would double a file that ships into the ramfs image. Measured:
+   118 lines of Rust became ~104 lines of Stitch, and the two files together went
+   1911 → 1897. The native form drops the `format!`, the doubled escaping, and
+   the projection-to-string-tag, which pays for the extra assertions.
+
+   Two forms are needed, not one: nullary variants compare with `==`
+   (`effect == Redraw`) because they are singleton values, while a variant
+   *carrying* a payload is a constructor when named bare, so `Save(_)` is still a
+   `match`. Both pinned in `native_test_runner.rs`.
+
+   **Operators tranche DONE** (12 tests: operator-pending, `d` + charwise, `dd`,
+   `d` + linewise, `c`, `y`, `Y`, charwise paste, linewise paste, delete-feeds-
+   register, cancel, counts-on-operators). `stim_fsm.rs` is down to 41 tests /
+   634 lines; `pending_op` and `clipboard_wise` went with them. The two files
+   together are now 1798 lines, down from 1911 at the start — the port keeps
+   *shrinking* the total.
+
+   Two small helpers live in `stim.st` for the tests: `pendingDelete` (a
+   construction the operator tests repeat a dozen times) and `isEdit` (because
+   `Edit(Str)` carries the buffer, so its tag is matched, not compared).
+
+   **Text-objects tranche DONE** (10 tests: operators over word motions, `i`/`a`
+   object-pending, `diw`, `ciw`/`yiw`, `daw`, the full `d`-`i`-`w` sequence,
+   quote objects, `ci"`/`yi"`, the no-pair cancel, single quotes). `stim_fsm.rs`
+   is down to 31 tests / 488 lines; `object_of`, `clipboard_text` and
+   `pending_op_of` went with them — all five string-projection helpers are now
+   gone, which was the file's whole reason for existing.
+
+   Running total: 1746 lines across both files, from 1911 at the start, with 32
+   of the original 61 tests moved.
+
+   Modes / insert-editing / render tranche next.
 3. `prelude.st` gets tests, which it has never had.
 
 `tests/{print,memory_churn,expressions}.rs` **stay in Rust**: their subject is

@@ -13,7 +13,7 @@
 //! The chain matches `tests/canon.rs` exactly, so the gate a candidate faces is
 //! the gate the shipped corpus already passes.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::check::{Severity, check_program};
@@ -79,7 +79,7 @@ pub fn run(src: &str) -> Outcome {
     let failed: Vec<String> = results
         .iter()
         .filter(|result| !result.passed())
-        .map(|result| result.name.to_string())
+        .map(|result| result.name.clone())
         .collect();
     if failed.is_empty() {
         return Outcome::Ok { tests: results.len() };
