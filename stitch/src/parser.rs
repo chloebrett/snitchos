@@ -672,9 +672,23 @@ impl Parser {
             self.bump();
             return Ok(self.spanned(start, ExprKind::List(Vec::new())));
         }
-        if matches!(self.peek(), TokenKind::Colon) && matches!(self.peek_at(1), TokenKind::RBracket) {
+        // A leading `:` can only be the empty map — no map entry starts with
+        // its separator — so commit on that one token and *demand* the `]`
+        // rather than peeking for it.
+        //
+        // The two-token version was correct on whole programs and wrong for the
+        // continuation oracle, which asks its questions one token at a time.
+        // Probing `[` with `:` appends a single token, so `peek_at(1)` was
+        // `Eof`, the empty-map branch was skipped, and the error landed *on*
+        // the colon — which `oracle::admits` reads as "this prefix is dead".
+        // The effect was that `[:]` could not be reached under a grammar mask
+        // at all: unreachable for babble, unemittable by any masked model.
+        // Committing here moves the failure to the missing `]`, one token
+        // later, which is exactly the "consumed it and wanted more" the oracle
+        // treats as viable.
+        if matches!(self.peek(), TokenKind::Colon) {
             self.bump(); // :
-            self.bump(); // ]
+            self.expect(&TokenKind::RBracket, "']' to close the empty map `[:]`")?;
             return Ok(self.spanned(start, ExprKind::Map(Vec::new())));
         }
         let first = self.parse_expr(0)?;

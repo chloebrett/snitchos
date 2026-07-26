@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use stitch::check::{Severity, check_program};
 use stitch::lower::lower_items_to_core;
 use stitch::parser::parse_program;
+use stitch::test_runner::run_tests;
 
 #[test]
 fn every_shipped_program_parses() {
@@ -66,6 +67,55 @@ fn the_type_gate_catches_an_error_when_there_is_one() {
         errors.contains(&Severity::Error),
         "the type gate reports nothing for a return-type mismatch: {errors:?}"
     );
+}
+
+/// Every native `test` declaration the canon ships must pass.
+///
+/// This is the gate that makes the runner load-bearing rather than merely
+/// available: without it a canon program's own tests could rot with nothing
+/// failing. Rust's job here is to *drive* the suite, not to author it — the
+/// assertions live in the `.st` files, in Stitch.
+#[test]
+fn every_shipped_programs_native_tests_pass() {
+    let mut failures = Vec::new();
+    for path in canon() {
+        let items = parse_program(&read(&path)).expect("canon parses");
+        for result in run_tests(&items) {
+            if !result.passed() {
+                failures.push(format!("{}: {} — {:?}", path.display(), result.name, result.verdict));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "native tests failed:\n{}", failures.join("\n"));
+}
+
+/// A green gate over *zero* tests is indistinguishable from a green gate over a
+/// working suite, and that is the state this gate shipped in — the runner
+/// existed before any canon program used it. A floor that ratchets, like
+/// `the_canon_is_not_empty`: raise it as tranches land, never lower it.
+#[test]
+fn the_canon_carries_native_tests() {
+    let found: usize = canon()
+        .iter()
+        .map(|path| run_tests(&parse_program(&read(path)).expect("canon parses")).len())
+        .sum();
+
+    assert!(found >= 6, "expected the canon's native suites, found {found}");
+}
+
+/// The gate above passes on arrival, which is only reassuring if it can fail —
+/// the same control `the_type_gate_catches_an_error_when_there_is_one` provides
+/// for the type stage, and for the same reason: a runner that silently found no
+/// tests would look identical from the outside.
+#[test]
+fn the_native_test_gate_catches_a_failing_test() {
+    let items = parse_program(r#"test "deliberately wrong" { expect 1 == 2 }"#)
+        .expect("control program parses");
+
+    let results = run_tests(&items);
+
+    assert_eq!(results.len(), 1, "the runner should find the control's test");
+    assert!(!results[0].passed(), "a false assertion must not pass");
 }
 
 /// The canon's value to the corpus is that it is *real Stitch as we write it*.

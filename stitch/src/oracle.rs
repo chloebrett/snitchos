@@ -747,6 +747,24 @@ mod tests {
     }
 
     #[test]
+    fn the_empty_map_literal_is_reachable_one_token_at_a_time() {
+        // `[:]` is legal Stitch, so a decoder constrained by this oracle has to
+        // be able to *get* there — and it can only ever append one token. If
+        // `Colon` is not admitted after `[`, the empty map is unreachable under
+        // the mask: babble can never generate one and no masked model can emit
+        // one, however much training data contains it.
+        //
+        // Found by scoring real Stitch: `plans/lang/samples.st` writes
+        // `fold([:], …)`, and the eval harness reported the oracle rejecting a
+        // token a human actually wrote.
+        let prefix = "let m = [";
+        assert!(
+            valid_next(prefix, prefix.len()).contains(TokenClass::Colon),
+            "`:` must be admitted after `[`, or `[:]` cannot be reached"
+        );
+    }
+
+    #[test]
     fn only_the_prefix_before_pos_is_considered() {
         // v0 contract: `valid_next` is a function of `src[..pos]`. Everything
         // at or after the cursor is invisible to it — stim will want the

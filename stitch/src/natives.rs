@@ -42,6 +42,7 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "concat",    arity: 2, func: native_concat,    module: None, export_as: None },
     NativeFn { name: "zip",       arity: 2, func: native_zip,       module: None, export_as: None },
     NativeFn { name: "enumerate", arity: 1, func: native_enumerate, module: None, export_as: None },
+    NativeFn { name: "toStr",     arity: 1, func: native_to_str,    module: None, export_as: None },
     // --- Seq module: lazy producers ---
     NativeFn { name: "iterate", arity: 2, func: native_iterate, module: Some("Seq"), export_as: None },
     NativeFn { name: "repeat",  arity: 1, func: native_repeat,  module: Some("Seq"), export_as: None },
@@ -56,6 +57,7 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "strStartsWith",arity: 2, func: native_starts_with,  module: Some("Str"), export_as: Some("startsWith") },
     NativeFn { name: "strSplit",     arity: 2, func: native_split,        module: Some("Str"), export_as: Some("split") },
     NativeFn { name: "strReplace",   arity: 3, func: native_replace,      module: Some("Str"), export_as: Some("replace") },
+    NativeFn { name: "strParseInt",  arity: 1, func: native_parse_int,    module: Some("Str"), export_as: Some("parseInt") },
     // --- List module: index operations (`list`-prefixed flat name, clean module name) ---
     NativeFn { name: "listAt",       arity: 2, func: native_list_at,      module: Some("List"), export_as: Some("at") },
     NativeFn { name: "listSet",      arity: 3, func: native_list_set,     module: Some("List"), export_as: Some("set") },
@@ -605,6 +607,41 @@ fn native_replace(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     let from = expect_str("Str.replace", from)?;
     let to = expect_str("Str.replace", to)?;
     Ok(Value::Str(text.replace(from, to).into()))
+}
+
+/// `Str.parseInt(s)` — `s` parsed as a base-10 `Int`, or `None` if `s` is not
+/// *exactly* an optional leading `-` followed by one or more digits (no
+/// surrounding whitespace tolerated, no partial parse — `"12x"` is `None`,
+/// not `Some(12)` — and no overflow past `i64`). The other stdlib numeric
+/// gap this closes alongside `toStr`: there was no `Str -> Int` conversion
+/// of any kind before this landed, so a hand-written recursive-descent
+/// parser had no way to turn a scanned digit run into a value without
+/// naming every digit by hand (see `examples/stitch/json.st`'s
+/// `digitValue`/`intToStr`, written before this native existed).
+fn native_parse_int(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s] = args else {
+        return Err(RuntimeError::new("Str.parseInt expects (s)"));
+    };
+    let text = expect_str("Str.parseInt", s)?;
+    Ok(match text.parse::<i64>() {
+        Ok(n) => some(Value::Int(n)),
+        Err(_) => none(),
+    })
+}
+
+/// `toStr(x)` — `x` rendered as user-facing text, via the same `Value::display`
+/// string interpolation already uses. A bare (unnamespaced) native like
+/// `toList`, not a `Str` member, because it takes any value, not a `Str`.
+/// The general `Int -> Str` (and `Float`/`Bool -> Str`) conversion the
+/// language had no way to spell before this landed — a program that
+/// computed a number could interpolate it (`"{n}"`) but not build a `Str`
+/// from it any other way (concatenate into a larger string, pass to
+/// something expecting a plain `Str`, etc).
+fn native_to_str(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [value] = args else {
+        return Err(RuntimeError::new("toStr expects (value)"));
+    };
+    Ok(Value::Str(value.display().into()))
 }
 
 /// `List.at(xs, i)` — the element at position `i` as `Some(elem)`, or `None`
@@ -1763,6 +1800,45 @@ mod tests {
         assert_eq!(
             run_str(r#"Str.replace("a.b.c", ".", "-")"#),
             Value::Str("a-b-c".into())
+        );
+    }
+
+    #[test]
+    fn str_parse_int_parses_a_decimal_integer() {
+        use crate::interp::{none, some};
+        assert_eq!(run_str(r#"Str.parseInt("42")"#), some(Value::Int(42)));
+        assert_eq!(run_str(r#"Str.parseInt("0")"#), some(Value::Int(0)));
+        assert_eq!(run_str(r#"Str.parseInt("-7")"#), some(Value::Int(-7)));
+        // Not a whole-string decimal integer: garbage, empty, a float, and
+        // surrounding whitespace (no implicit trim — a caller that wants
+        // that trims first, same discipline as everywhere else in `Str`).
+        assert_eq!(run_str(r#"Str.parseInt("abc")"#), none());
+        assert_eq!(run_str(r#"Str.parseInt("")"#), none());
+        assert_eq!(run_str(r#"Str.parseInt("12.5")"#), none());
+        assert_eq!(run_str(r#"Str.parseInt(" 12")"#), none());
+        assert_eq!(run_str(r#"Str.parseInt("12x")"#), none());
+    }
+
+    #[test]
+    fn to_str_renders_a_value_the_way_interpolation_does() {
+        // The same rendering `"{x}"` already uses (`Value::display`), just
+        // reachable as an ordinary call — the missing inverse of
+        // `Str.parseInt`, and the only way to turn a computed `Int`/`Float`
+        // into a `Str` (there was no such native before this pair landed).
+        assert_eq!(run_program(r#"main() = toStr(42)"#), Value::Str("42".into()));
+        assert_eq!(run_program(r#"main() = toStr(0 - 7)"#), Value::Str("-7".into()));
+        assert_eq!(run_program(r#"main() = toStr(true)"#), Value::Str("true".into()));
+        assert_eq!(run_program(r#"main() = toStr("hi")"#), Value::Str("hi".into()));
+    }
+
+    #[test]
+    fn to_str_and_parse_int_round_trip() {
+        assert_eq!(
+            run_str(r#"Str.parseInt(toStr(1234))"#),
+            {
+                use crate::interp::some;
+                some(Value::Int(1234))
+            }
         );
     }
 
