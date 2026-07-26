@@ -22,6 +22,23 @@ pub(crate) mod addr {
     /// Supervisor timer-compare (Sstc). The hart raises a supervisor timer
     /// interrupt once `time >= stimecmp`; the kernel arms it via `csrw 0x14d`.
     pub const STIMECMP: u16 = 0x14d;
+    /// Floating-point control and status. **The only stored FP CSR** —
+    /// `fflags` (0x001) and `frm` (0x002) are windows onto its low bits, not
+    /// registers of their own, and the CPU maps them here (see
+    /// `Hart::csr_access`). Reachable only while `sstatus.FS != Off`.
+    pub const FCSR: u16 = 0x003;
+}
+
+/// `fcsr` field layout. `fflags` is `fcsr[4:0]`, `frm` is `fcsr[7:5]`; the rest is
+/// reserved and reads as zero.
+pub(crate) mod fcsr {
+    /// Accrued exception flags — the `fflags` window. snemu stores them (so a
+    /// guest's writes round-trip) but never *accrues* them from arithmetic; see
+    /// `docs/floating-point-design.md` for why that gap is allowed to be lazy.
+    pub const FFLAGS_MASK: u64 = 0x1f;
+    /// Dynamic rounding mode — the `frm` window.
+    pub const FRM_SHIFT: u32 = 5;
+    pub const FRM_MASK: u64 = 0b111;
 }
 
 /// `sstatus` field masks (the S-mode view of the status register).
@@ -65,6 +82,7 @@ const SUPPORTED: &[u16] = &[
     addr::SIP,
     addr::SATP,
     addr::STIMECMP,
+    addr::FCSR,
 ];
 
 /// A CSR access named an address snemu doesn't model yet.
@@ -106,6 +124,7 @@ impl Csr {
             addr::SIP => 7,
             addr::SATP => 8,
             addr::STIMECMP => 9,
+            addr::FCSR => 10,
             _ => return None,
         })
     }

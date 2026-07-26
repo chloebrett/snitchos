@@ -152,16 +152,38 @@ Not started. Per the design doc's scope list, in a sensible landing order — ea
 step is independently testable, and the FS gate above means none of them changes
 observable behaviour until the kernel enables FP:
 
-1. **Register file + `fcsr`.** 32 × 64-bit `f` registers; `fcsr` as a plain
-   register that round-trips (so guest save/restore works) with `fflags` **not**
-   accrued. Add `fflags`/`frm`/`fcsr` to the modelled CSR set — note they are
-   currently gated by `is_fp_instruction`, so they trap before reaching the CSR
-   file, and the FS-on path needs them present.
-2. **Loads/stores** (`flw`/`fld`/`fsw`/`fsd`) + **NaN boxing**: a single-precision
-   value in a 64-bit register must be upper-all-ones, and reading an improperly
-   boxed one yields canonical NaN. Also teach `expand` the compressed FP forms
-   (`c.fld`/`c.fsd`/`c.fldsp`/`c.fsdsp`) — until then they report as snemu gaps,
-   which is correct but will block real programs.
+1. **Register file + `fcsr`** — **DONE.** `Hart.f: [u64; 32]`, held as raw bit
+   patterns rather than `f64` so a NaN payload we must preserve can't be
+   canonicalised by the host on the way through. `f0` is an ordinary register —
+   reusing `set_reg`'s index-0 special case would silently discard every write to
+   it, so `set_freg` deliberately has no such branch (own test).
+   `fcsr` is the **only stored FP CSR**: `fflags` and `frm` are *windows* onto
+   `fcsr[4:0]` and `fcsr[7:5]` (`FcsrWindow`), because modelling them as three
+   independent CSRs would lose a guest's rounding mode across a save/restore that
+   went in via `frm` and out via `fcsr`.
+   **`hash_state` had to grow `f`.** Easy to miss and silent: the snapshot tree
+   resumes from those hashes and `snemu diff` compares them, so omitting FP state
+   would let snapshot sharing resume with the wrong FP registers *and* make an FP
+   divergence invisible to the differential oracle.
+2. **Loads/stores + NaN boxing** — **DONE.** `flw`/`fld`/`fsw`/`fsd`, deliberately
+   *not* routed through `load_value`/`store_value`: those sign-extend a 32-bit
+   load, which is right for `lw` and wrong for `flw`. `flw` NaN-boxes (upper 32
+   bits all ones); `fsw` writes only the low word, so the box never reaches memory.
+   Tests observe results through a guest `ld` readback rather than host accessors
+   (the `run_amo_d` idiom), so a store that never reached memory can't pass.
+   Verified falsifiable, and the result is worth keeping: a zero-extending `flw`
+   fails the boxing test but **still passes** the `fsw` round-trip test — which is
+   precisely why this bug would stay hidden until something read the register as a
+   double.
+   Also added a **JIT on/off A/B** over FP loads/stores in a hot block. `compile_op`
+   rejects FP via its catch-all, so blocks end before one — but that invariant is
+   pinned rather than inherited, since a mis-compiled FP block is the failure
+   `snemu diff` cannot audit (both sides would be snemu's own code).
+   Still to do here: teach `expand` the compressed FP forms
+   (`c.fld`/`c.fsd`/`c.fldsp`/`c.fsdsp`). Until then they report as snemu gaps,
+   which is correct but will block real programs. Also, "reading an improperly boxed
+   value yields canonical NaN" is an *arithmetic* rule — it lands with step 3, not
+   here; step 2 only establishes the box on load.
 3. **OP-FP**: arithmetic, `fsqrt`, min/max, sign injection, compares, converts,
    moves, `fclass`. Mostly systematic width-variants over Rust `f32`/`f64`; even
    float→int saturation agrees (Rust's `as` has saturated since 1.45). Two
@@ -182,10 +204,22 @@ observable behaviour until the kernel enables FP:
    code, so it needs an internal JIT-on/JIT-off A/B rather than the differential
    oracle.
 
-Validate with `snemu diff` against QEMU as each family lands — but note the oracle
-only bites once the *kernel* enables FP (increment 4), since until then no guest
-program executes an FP instruction successfully on either side. Consider landing a
-small S-mode FP probe workload to get differential coverage earlier.
+**On the oracle (decided 2026-07-26).** `snemu diff` can't give differential FP
+coverage until the *kernel* enables FP (increment 4), because until then neither
+side executes an FP instruction successfully. An S-mode FP probe workload would get
+the oracle biting earlier — **rejected**: the kernel stays zero-FP, FP is a
+userspace-only authority (same call as `vf2-audio-design.md`'s fixed-point choice),
+and an `itest-workloads`-only exception isn't worth buying coverage that increment 4
+provides anyway.
+
+So 3b is built against **enumerated IEEE edge cases in host tests**, not a
+differential sweep — which is the honest tool here regardless, since for ordinary
+arithmetic the reference is IEEE-754 and Rust's `f64`, i.e. the same hardware QEMU
+runs on. A diff would mostly confirm that `fadd.d` adds. The cases that genuinely
+diverge from host behaviour are few and enumerable, and each wants its own test:
+canonical NaN generation, NaN boxing, sNaN handling, `fmin`/`fmax` NaN rules,
+`fcvt` saturation edges, `fclass`. Parity against QEMU arrives with increment 4, via
+an FP-authorised *user* program.
 
 ## Increment 4 — kernel opt-in FP, derived from the ELF, enabled lazily
 

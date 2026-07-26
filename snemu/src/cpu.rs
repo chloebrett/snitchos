@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use crate::block::{self, Block, BlockCache, Compiled};
 use crate::bus::Bus;
-use crate::csr::{Csr, CsrError, addr, sstatus};
+use crate::csr::{Csr, CsrError, addr, fcsr, sstatus};
 use crate::decode::{
-    Instr, amo_op, expand, funct3, funct7, is_compressed, is_fp_instruction, is_guest_illegal,
-    opcode, priv12, system,
+    Instr, amo_op, expand, fp_csr, fp_width, funct3, funct7, is_compressed, is_fp_instruction,
+    is_guest_illegal, nan_box, opcode, priv12, system,
 };
 use crate::fetch_cache::{FetchCache, Fetched};
 use crate::mem::{BusError, Memory, RAM_BASE};
@@ -243,6 +243,51 @@ enum CsrOp {
     Clear,
 }
 
+/// One of the two sub-fields of `fcsr` addressable as a CSR in its own right.
+/// `fflags` (0x001) and `frm` (0x002) are not separate registers — they are views
+/// onto `fcsr[4:0]` and `fcsr[7:5]`, so an access to either must read-modify-write
+/// the single stored `fcsr`.
+#[derive(Clone, Copy)]
+enum FcsrWindow {
+    /// `fflags` — `fcsr[4:0]`.
+    Flags,
+    /// `frm` — `fcsr[7:5]`.
+    RoundingMode,
+}
+
+impl FcsrWindow {
+    /// The window `csr` names, or `None` if it isn't one (including `fcsr` itself,
+    /// which is stored directly and needs no splicing).
+    fn of(csr: u16) -> Option<Self> {
+        match csr {
+            fp_csr::FFLAGS => Some(Self::Flags),
+            fp_csr::FRM => Some(Self::RoundingMode),
+            _ => None,
+        }
+    }
+
+    /// The window's current value, read out of a whole `fcsr`.
+    fn extract(self, fcsr_value: u64) -> u64 {
+        match self {
+            Self::Flags => fcsr_value & fcsr::FFLAGS_MASK,
+            Self::RoundingMode => (fcsr_value >> fcsr::FRM_SHIFT) & fcsr::FRM_MASK,
+        }
+    }
+
+    /// `fcsr` with this window replaced by `value`, every other bit untouched.
+    /// `value` is masked to the field width, so an over-wide write can't bleed into
+    /// the neighbouring field.
+    fn splice(self, fcsr_value: u64, value: u64) -> u64 {
+        match self {
+            Self::Flags => (fcsr_value & !fcsr::FFLAGS_MASK) | (value & fcsr::FFLAGS_MASK),
+            Self::RoundingMode => {
+                let cleared = fcsr_value & !(fcsr::FRM_MASK << fcsr::FRM_SHIFT);
+                cleared | ((value & fcsr::FRM_MASK) << fcsr::FRM_SHIFT)
+            }
+        }
+    }
+}
+
 fn csr_step_error(pc: u64, e: CsrError) -> StepError {
     match e {
         CsrError::Unknown(addr) => StepError::UnknownCsr { pc, addr },
@@ -261,6 +306,16 @@ impl From<BusError> for StepError {
 #[derive(Clone)]
 pub(crate) struct Hart {
     x: [u64; 32],
+    /// The floating-point register file, held as **raw bit patterns** rather than
+    /// `f64` — a register may hold a NaN-boxed single, and `f64` would risk the host
+    /// canonicalising a payload we're required to preserve verbatim.
+    ///
+    /// Unlike `x`, `f[0]` is an ordinary register: there is no hardwired-zero FP
+    /// register, so writes to it must land (see [`Hart::set_freg`]).
+    ///
+    /// Reachable only while `sstatus.FS != Off`; the gate in `execute` refuses every
+    /// FP instruction before this is touched otherwise.
+    f: [u64; 32],
     pc: u64,
     instret: u64,
     /// The shared machine clock as of this step — the `rdtime` / `stimecmp`
@@ -461,6 +516,7 @@ impl Hart {
     pub(crate) fn new() -> Self {
         Self {
             x: [0; 32],
+            f: [0; 32],
             pc: RAM_BASE,
             instret: 0,
             cycle: 0,
@@ -690,6 +746,11 @@ impl Hart {
     pub(crate) fn hash_state(&self, h: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         self.x.hash(h);
+        // FP state is machine state: the snapshot tree resumes from these hashes and
+        // `snemu diff` compares them, so omitting `f` would make an FP divergence
+        // invisible to the differential oracle and let snapshot sharing resume with
+        // the wrong FP registers.
+        self.f.hash(h);
         self.pc.hash(h);
         self.privilege.hash(h);
         self.csr.hash_state(h);
@@ -701,6 +762,18 @@ impl Hart {
         if i != 0 {
             self.x[i] = value;
         }
+    }
+
+    /// Write an FP register's raw bits. **No index-0 special case** — `f0` is an
+    /// ordinary register, unlike `x0`. Reusing [`set_reg`]'s shape here would
+    /// silently discard every write to `f0`.
+    fn set_freg(&mut self, i: usize, bits: u64) {
+        self.f[i] = bits;
+    }
+
+    /// Read an FP register's raw bits.
+    fn freg(&self, i: usize) -> u64 {
+        self.f[i]
     }
 
     /// Snapshot the register file — the block executor caches it in a host local
@@ -1051,6 +1124,8 @@ impl Hart {
             }
             opcode::LOAD => self.load(instr, bus),
             opcode::STORE => self.store(instr, bus),
+            opcode::LOAD_FP => self.load_fp(instr, bus),
+            opcode::STORE_FP => self.store_fp(instr, bus),
             opcode::AMO => self.amo(instr, bus),
             opcode::SYSTEM => self.system(instr),
             opcode::MISC_MEM => {
@@ -1296,6 +1371,44 @@ impl Hart {
         Ok(false)
     }
 
+    /// LOAD-FP: `flw` / `fld`. `fld` moves 64 bits verbatim; `flw` loads 32 and
+    /// **NaN-boxes** them. Deliberately not routed through [`load_value`]: that
+    /// sign-extends a 32-bit load, which is right for `lw` and wrong for `flw`.
+    fn load_fp(&mut self, instr: Instr, bus: &Bus) -> Result<(), StepError> {
+        let va = self.x[instr.rs1()].wrapping_add(instr.i_imm());
+        let Some(addr) = self.translate_or_trap(va, Access::Load, bus) else {
+            return Ok(()); // faulted → trapped, don't advance
+        };
+        let bits = match instr.funct3() {
+            fp_width::W => nan_box(bus.read_u32(addr)?),
+            fp_width::D => bus.read_u64(addr)?,
+            _ => return Err(self.unimplemented(instr.0)),
+        };
+        self.set_freg(instr.rd(), bits);
+        self.advance();
+        Ok(())
+    }
+
+    /// STORE-FP: `fsw` / `fsd`. `fsw` writes **only** the low word — the NaN-box's
+    /// all-ones upper half is register-internal and must never reach memory.
+    fn store_fp(&mut self, instr: Instr, bus: &mut Bus) -> Result<(), StepError> {
+        let va = self.x[instr.rs1()].wrapping_add(instr.s_imm());
+        let Some(addr) = self.translate_or_trap(va, Access::Store, bus) else {
+            return Ok(()); // faulted → trapped, don't advance
+        };
+        if self.reservation == Some(addr) {
+            self.reservation = None; // a write to the reserved cell breaks lr/sc
+        }
+        let bits = self.freg(instr.rs2());
+        match instr.funct3() {
+            fp_width::W => bus.write_u32(addr, bits as u32)?,
+            fp_width::D => bus.write_u64(addr, bits)?,
+            _ => return Err(self.unimplemented(instr.0)),
+        }
+        self.advance();
+        Ok(())
+    }
+
     /// AMO: atomic read-modify-write. Reads the addressed word/doubleword,
     /// combines it with rs2, stores the result, and returns the old value in rd.
     /// Single hart, so the sequence is atomic with no reservation tracking; the
@@ -1394,6 +1507,28 @@ impl Hart {
             // The `time` counter is read-only and computed, not stored: it's the
             // shared machine clock, deterministic across harts.
             self.set_reg(instr.rd(), self.cycle);
+            self.advance();
+            return Ok(());
+        }
+        // `fflags` and `frm` are *windows* onto `fcsr[4:0]` and `fcsr[7:5]`, not
+        // registers of their own — a guest that sets the rounding mode via `frm` and
+        // then saves state via `fcsr` must see the mode there. Read/modify/write the
+        // window, then splice it back into the one stored register.
+        if let Some(window) = FcsrWindow::of(csr) {
+            let stored = self.csr.read(addr::FCSR).map_err(|e| csr_step_error(pc, e))?;
+            let old = window.extract(stored);
+            let new = match op {
+                CsrOp::Write => source,
+                CsrOp::Set => old | source,
+                CsrOp::Clear => old & !source,
+            };
+            // Unlike a plain CSR, a window write is never skipped for a zero source:
+            // `Set`/`Clear` with source 0 leave the field unchanged anyway, and the
+            // splice below is a no-op in that case.
+            self.csr
+                .write(addr::FCSR, window.splice(stored, new))
+                .map_err(|e| csr_step_error(pc, e))?;
+            self.set_reg(instr.rd(), old);
             self.advance();
             return Ok(());
         }
@@ -1701,7 +1836,7 @@ fn set_timer(harts: &mut [Hart], caller: usize, deadline: u64) -> (i64, u64) {
 mod tests {
     use super::*;
     use crate::csr::{addr, sstatus};
-    use crate::decode::{ALT_OP_BIT, funct3, funct7, opcode, priv12, system};
+    use crate::decode::{ALT_OP_BIT, fp_csr, funct3, funct7, opcode, priv12, system};
     use crate::mem::{Memory, RAM_BASE};
     use crate::mmu::pte;
 
@@ -3413,6 +3548,273 @@ mod tests {
         stval: u64,
         instret: u64,
         marker: u64,
+    }
+
+    /// Boot a hart with FP enabled — the state the kernel will put a task in once
+    /// lazy FP enable lands. Until then every FP test has to arrange it by hand,
+    /// since nothing in snemu sets `FS`; the guest does.
+    fn cpu_with_fp(program: &[u32]) -> Cpu {
+        let mut cpu = cpu_with(program);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+        cpu
+    }
+
+    /// `fcsr` round-trips as a plain register, which is all a context switch needs:
+    /// the kernel saves and restores it across a switch, so a value written must
+    /// read back bit-for-bit. Accrued `fflags` are deliberately *not* computed by
+    /// snemu (see `docs/floating-point-design.md`) — that's a gap `snemu diff` would
+    /// catch immediately and attributably if a guest ever branched on them, which is
+    /// why it's allowed to be lazy. Round-tripping is not optional in the same way:
+    /// a save/restore that silently dropped bits would corrupt guest state with no
+    /// divergence to point at.
+    #[test]
+    fn fcsr_round_trips_as_a_plain_register() {
+        // csrrw x1, fcsr, x2 — writes x2 into fcsr, old value into x1.
+        let mut cpu = cpu_with_fp(&[csrrw(1, 2, fp_csr::FCSR), csrrs(3, 0, fp_csr::FCSR)]);
+        cpu.set_reg(2, 0xe5); // frm=7 (a reserved mode), fflags=0x05
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(1), 0, "fcsr resets to 0 — round-to-nearest-even, no flags");
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(3), 0xe5, "fcsr read back what was written");
+    }
+
+    /// `fflags` and `frm` are **windows onto `fcsr`**, not registers of their own:
+    /// `fflags` is `fcsr[4:0]` and `frm` is `fcsr[7:5]`. Modelling them as three
+    /// independent CSRs is the obvious mistake, and it would break a guest that sets
+    /// the rounding mode via `frm` and then saves state via `fcsr` — the mode would
+    /// vanish across the switch.
+    #[test]
+    fn fflags_and_frm_are_windows_onto_fcsr() {
+        let mut cpu = cpu_with_fp(&[
+            csrrw(0, 1, fp_csr::FCSR),  // fcsr <- x1
+            csrrs(2, 0, fp_csr::FFLAGS), // x2 <- fflags
+            csrrs(3, 0, fp_csr::FRM),    // x3 <- frm
+            csrrw(0, 4, fp_csr::FRM),    // frm <- x4
+            csrrs(5, 0, fp_csr::FCSR),   // x5 <- fcsr
+        ]);
+        cpu.set_reg(1, 0xff); // every flag set, frm = 7
+        cpu.set_reg(4, 0b010); // then switch rounding mode to 2 (RDN)
+        for _ in 0..5 {
+            cpu.step().unwrap();
+        }
+        assert_eq!(cpu.reg(2), 0x1f, "fflags is fcsr[4:0]");
+        assert_eq!(cpu.reg(3), 0b111, "frm is fcsr[7:5]");
+        assert_eq!(
+            cpu.reg(5),
+            0b010_11111,
+            "writing frm replaced only fcsr[7:5], leaving the flags alone",
+        );
+    }
+
+    /// Encode an FP load: `flw`/`fld` (opcode LOAD-FP), width by funct3 (2 = w,
+    /// 3 = d). Same I-type shape as an integer load, but `rd` names an f register.
+    fn fp_load(width: u32, fd: u32, base: u32, imm: i32) -> u32 {
+        ((imm as u32 & 0xfff) << 20) | (base << 15) | (width << 12) | (fd << 7) | opcode::LOAD_FP
+    }
+
+    /// Encode an FP store: `fsw`/`fsd` (opcode STORE-FP), width by funct3.
+    fn fp_store(width: u32, fs: u32, base: u32, imm: i32) -> u32 {
+        let imm = imm as u32 & 0xfff;
+        ((imm >> 5) << 25) | (fs << 20) | (base << 15) | (width << 12) | ((imm & 0x1f) << 7)
+            | opcode::STORE_FP
+    }
+
+    const FUNCT3_W: u32 = 0b010;
+    const FUNCT3_D: u32 = 0b011;
+
+    const FP_SRC: u64 = RAM_BASE + 0x100;
+    const FP_DST: u64 = RAM_BASE + 0x108;
+
+    /// Run an FP `program` with FP enabled, then read the result back **the way the
+    /// guest would** — an integer `ld` of `FP_DST` into x5 — rather than reaching
+    /// into host memory. Same idiom as `run_amo_d`: the observation goes through the
+    /// instruction set, so a store that didn't really reach memory can't pass.
+    ///
+    /// `FP_SRC` is seeded with `src` and preloaded into x1; `FP_DST` with
+    /// `dst_sentinel` and preloaded into x2, so a partial-width store reveals which
+    /// neighbouring bytes it left alone.
+    fn run_fp_program(program: &[u32], src: u64, dst_sentinel: u64) -> u64 {
+        let mut mem = Memory::new(0x2000);
+        for (i, &word) in program.iter().enumerate() {
+            mem.write_u32(RAM_BASE + i as u64 * 4, word).unwrap();
+        }
+        let readback = RAM_BASE + program.len() as u64 * 4;
+        mem.write_u32(readback, ld(5, 2, 0)).unwrap();
+        mem.write_u64(FP_SRC, src).unwrap();
+        mem.write_u64(FP_DST, dst_sentinel).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+        cpu.set_reg(1, FP_SRC);
+        cpu.set_reg(2, FP_DST);
+        for _ in 0..=program.len() {
+            cpu.step().unwrap();
+        }
+        cpu.reg(5)
+    }
+
+    /// A double survives `fld` → `fsd` bit-for-bit. The baseline the whole FP unit
+    /// rests on: if the register file can't hold a value, nothing above it matters.
+    ///
+    /// Uses a signalling-NaN-adjacent payload rather than a friendly number on
+    /// purpose — a load/store pair must move *bits*, not values, so it must not
+    /// canonicalise or otherwise "helpfully" rewrite what it carries. (Arithmetic
+    /// is where canonical NaN applies; moves are not arithmetic.)
+    #[test]
+    fn fld_then_fsd_round_trips_a_double_bit_for_bit() {
+        const PAYLOAD: u64 = 0x7ff0_0000_dead_beef; // an sNaN with a payload
+        let out = run_fp_program(
+            &[
+                fp_load(FUNCT3_D, 1, 1, 0),  // fld f1, 0(x1)
+                fp_store(FUNCT3_D, 1, 2, 0), // fsd f1, 0(x2)
+            ],
+            PAYLOAD,
+            0,
+        );
+        assert_eq!(out, PAYLOAD, "fld/fsd moved bits, not values");
+    }
+
+    /// **NaN boxing.** A single-precision value in a 64-bit FP register must be held
+    /// with all-ones in the upper 32 bits — that's how RV64D distinguishes a real
+    /// `f32` from the low half of some `f64`. Observable without any arithmetic:
+    /// `flw` a word, then `fsd` the whole register out and look at the upper half.
+    ///
+    /// Getting this wrong is quiet. A zero-extending `flw` would still round-trip
+    /// through `fsw` (which only touches the low word) and would still compute the
+    /// right answers for a while — it breaks later, when something reads the
+    /// register as a double.
+    #[test]
+    fn flw_nan_boxes_the_single_into_the_upper_bits() {
+        const SINGLE: u32 = 0x4048_f5c3; // 3.14f32
+        let out = run_fp_program(
+            &[
+                fp_load(FUNCT3_W, 3, 1, 0),  // flw f3, 0(x1)
+                fp_store(FUNCT3_D, 3, 2, 0), // fsd f3, 0(x2) — the whole 64 bits
+            ],
+            u64::from(SINGLE),
+            0,
+        );
+        assert_eq!(
+            out,
+            0xffff_ffff_0000_0000 | u64::from(SINGLE),
+            "flw must NaN-box: upper 32 bits all ones, single in the low word",
+        );
+    }
+
+    /// `fsw` writes **only** the low word — it must not spill the NaN-box's
+    /// all-ones upper half into the neighbouring 4 bytes of guest memory.
+    #[test]
+    fn fsw_stores_only_the_low_word() {
+        const SINGLE: u32 = 0x4048_f5c3;
+        let out = run_fp_program(
+            &[
+                fp_load(FUNCT3_W, 3, 1, 0),  // flw f3, 0(x1)
+                fp_store(FUNCT3_W, 3, 2, 0), // fsw f3, 0(x2)
+            ],
+            u64::from(SINGLE),
+            0xaaaa_aaaa_aaaa_aaaa, // sentinel in both halves of the destination
+        );
+        assert_eq!(
+            out,
+            0xaaaa_aaaa_0000_0000 | u64::from(SINGLE),
+            "fsw wrote 4 bytes; the next 4 kept their sentinel",
+        );
+    }
+
+    /// `f0` is an ordinary register — unlike `x0` it is **not** hardwired to zero.
+    /// The integer register file special-cases index 0, and reusing that path for FP
+    /// would silently discard every write to `f0`.
+    #[test]
+    fn f0_is_writable_unlike_x0() {
+        const PAYLOAD: u64 = 0x0123_4567_89ab_cdef;
+        let out = run_fp_program(
+            &[
+                fp_load(FUNCT3_D, 0, 1, 0),  // fld f0, 0(x1)
+                fp_store(FUNCT3_D, 0, 2, 0), // fsd f0, 0(x2)
+            ],
+            PAYLOAD,
+            0,
+        );
+        assert_eq!(out, PAYLOAD, "f0 held its value");
+    }
+
+    /// FP loads/stores inside a **hot block** must behave identically with the block
+    /// JIT on and off. `compile_op` rejects FP opcodes via its catch-all, so a block
+    /// ends before one and the interpreter runs it — but that's an invariant worth
+    /// pinning rather than inheriting, because it is the one class of failure
+    /// `snemu diff` structurally cannot audit: both sides of the diff would be
+    /// running snemu's own code, so QEMU never gets a look in. The oracle has to be
+    /// internal (JIT on == JIT off), exactly as for the guest-illegal encodings.
+    #[test]
+    fn fp_loads_and_stores_are_identical_with_the_block_jit_hot() {
+        const PAYLOAD: u64 = 0x3ff0_0000_0000_0000; // 1.0f64
+        const ITERATIONS: u64 = 40;
+        let program = &[
+            fp_load(FUNCT3_D, 1, 1, 0),  // fld  f1, 0(x1)
+            fp_store(FUNCT3_D, 1, 2, 0), // fsd  f1, 0(x2)
+            addi(3, 3, 1),               // x3 += 1
+            bne(3, 4, -12),              // loop until x3 == x4 — goes hot
+            ld(5, 2, 0),                 // x5 <- the stored double, read back as an integer
+        ];
+        let run = |jit: bool| {
+            let mut mem = Memory::new(0x2000);
+            for (i, &word) in program.iter().enumerate() {
+                mem.write_u32(RAM_BASE + i as u64 * 4, word).unwrap();
+            }
+            mem.write_u64(FP_SRC, PAYLOAD).unwrap();
+            let mut cpu = Cpu::new(mem);
+            cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+            cpu.set_block_jit(jit);
+            cpu.set_reg(1, FP_SRC);
+            cpu.set_reg(2, FP_DST);
+            cpu.set_reg(4, ITERATIONS);
+            let exit_pc = RAM_BASE + program.len() as u64 * 4;
+            for _ in 0..2000 {
+                if cpu.pc() == exit_pc {
+                    break;
+                }
+                cpu.step().unwrap();
+            }
+            cpu.step().unwrap(); // the readback `ld`
+            (cpu.reg(5), cpu.reg(3), cpu.instret(), cpu.hart.block_jit_hits())
+        };
+        let (off_value, off_count, off_instret, _) = run(false);
+        let (on_value, on_count, on_instret, hits) = run(true);
+
+        assert_eq!(off_value, PAYLOAD, "the interpreter moved the double");
+        assert_eq!(off_count, ITERATIONS, "the loop ran to completion");
+        assert!(hits > 0, "the loop went hot, so the JIT path was exercised");
+        assert_eq!(
+            (on_value, on_count, on_instret),
+            (off_value, off_count, off_instret),
+            "block JIT ON must match the interpreter OFF across FP loads/stores",
+        );
+    }
+
+    /// FP registers are part of the **machine state hash**, which is what the
+    /// snapshot tree and `snemu diff` compare. If `hash_state` skipped `f`, two
+    /// machines differing only in FP state would hash equal — snapshot sharing could
+    /// resume from a state with the wrong FP registers, and a divergence in FP state
+    /// would be invisible to the differential oracle. Silent, and exactly the sort of
+    /// thing that surfaces as an inexplicable numeric difference much later.
+    #[test]
+    fn fp_registers_are_part_of_the_machine_state_hash() {
+        let hash_of = |payload: u64| {
+            let mut mem = Memory::new(0x2000);
+            mem.write_u32(RAM_BASE, fp_load(FUNCT3_D, 1, 1, 0)).unwrap(); // fld f1, 0(x1)
+            mem.write_u64(FP_SRC, payload).unwrap();
+            let mut cpu = Cpu::new(mem);
+            cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+            cpu.set_reg(1, FP_SRC);
+            cpu.step().unwrap();
+            let mut h = std::hash::DefaultHasher::new();
+            cpu.hart.hash_state(&mut h);
+            std::hash::Hasher::finish(&h)
+        };
+        assert_ne!(
+            hash_of(0x1111_1111_1111_1111),
+            hash_of(0x2222_2222_2222_2222),
+            "a difference in FP register state must change the machine state hash",
+        );
     }
 
     /// A floating-point instruction while `sstatus.FS == Off` is illegal **for the

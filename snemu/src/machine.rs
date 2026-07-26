@@ -495,9 +495,6 @@ impl Machine {
     /// Telemetry payload the virtio-net device extracted from its TX datagrams
     /// (headers stripped) — the frame stream for a `net=` boot, the counterpart
     /// to [`Self::virtio_tx_output`] for the console path.
-    // Consumed by the `net=` itest (the harness reads this stream when the boot
-    // carries `net=`); wired next.
-    #[allow(dead_code)]
     #[must_use]
     pub fn net_tx_output(&self) -> &[u8] {
         self.bus.net_tx_output()

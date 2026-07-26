@@ -32,6 +32,24 @@ pub(crate) mod opcode {
     pub const OP_FP: u32 = 0x53;
 }
 
+/// Access width for an FP load/store, `instr[14:12]`. Numerically the same as the
+/// integer `LW`/`LD` selectors, but named separately because the *semantics*
+/// differ: a 32-bit FP load NaN-boxes rather than sign-extending.
+pub(crate) mod fp_width {
+    /// Single precision — `flw` / `fsw`.
+    pub const W: u32 = 0b010;
+    /// Double precision — `fld` / `fsd`.
+    pub const D: u32 = 0b011;
+}
+
+/// Hold a 32-bit single in a 64-bit FP register the way RV64D requires: upper 32
+/// bits all ones. That's what distinguishes a genuine `f32` from the low half of
+/// some `f64`, and it's why a zero-extending `flw` is a bug that stays hidden until
+/// something reads the register as a double.
+pub(crate) fn nan_box(single: u32) -> u64 {
+    0xffff_ffff_0000_0000 | u64::from(single)
+}
+
 /// The FP control CSRs, gated by `sstatus.FS` exactly like the FP instructions.
 pub(crate) mod fp_csr {
     /// Accrued exception flags (`fcsr[4:0]`).
