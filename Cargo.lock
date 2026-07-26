@@ -282,6 +282,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cram-gen"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "stitch",
+ "ureq",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1989,6 +1999,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

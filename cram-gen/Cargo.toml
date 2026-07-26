@@ -1,0 +1,25 @@
+[package]
+name = "cram-gen"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The gate — parse → type → the program's own tests. The harness decides what to
+# ask for; `stitch` decides whether the answer is Stitch.
+stitch = { path = "../stitch" }
+# Blocking HTTP against a local model server. No async runtime: this is ~8-16
+# in-flight requests to localhost, which is threads-and-blocking territory, and
+# `ureq` is already the workspace's HTTP client (collector's OTLP export).
+# `json` for `send_json`/`into_json` — collector uses `ureq` without it because
+# it hand-rolls OTLP protobuf-JSON; here the request and response are both
+# ordinary JSON and there is no reason to write that by hand.
+ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
