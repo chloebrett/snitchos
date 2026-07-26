@@ -49,7 +49,9 @@ on. Nothing else.
 
 > Originally "lower than babble's". Increment 3 measured uniform-over-legal
 > *beating* babble by 2.6 nats, so "beat babble" would have been clearable
-> while losing to a model with no tables at all. The bar is **free-nll 2.758**.
+> while losing to a model with no tables at all. The bar is **free-nll 2.742**
+> (uniform, over 9 programs / 10,950 decisions). The bar is a property of the
+> held-out set, so re-measure it whenever the corpus grows.
 
 ### Why 2K lines is enough (and where it stops being enough)
 
@@ -262,25 +264,25 @@ in the gate), and `cargo xtask cram --eval` prints the scoreboard. The
 standalone `parse-rate` bin is retired into it — a separate binary is how that
 metric drifted into measuring one rung with no floor to compare it to.
 
-Scored over every real `.st` file in the repo (8 programs, 58 KB, 8,318
-decisions, 681 of them forced):
+Scored over every real `.st` file in the repo (9 programs, 74.5 KB, 10,950
+decisions, 800 of them forced — includes the `examples/` corpus):
 
 | rung | nll | free-nll | perplexity | free-nll over first 50 tokens |
 |---|---:|---:|---:|---:|
-| babble (tuned tables) | 4.962 | 5.405 | 222.4 | 2.599 |
-| uniform-over-legal | 2.533 | 2.758 | **15.8** | 2.117 |
+| babble (tuned tables) | 5.001 | 5.395 | 220.4 | 2.619 |
+| uniform-over-legal | 2.541 | 2.742 | **15.5** | 2.062 |
 
-**Uniform-over-legal beats babble by 2.6 nats.** The plan assumed babble's
+**Uniform-over-legal beats babble by 2.65 nats.** The plan assumed babble's
 tuned tables were the floor; they are not, and the assumption was never
 measured. Recorded consequences:
 
 1. **The floor row is uniform, not babble.** Increment 6's win condition
-   changes accordingly: drivel must beat **2.758**, not babble's 5.405.
+   changes accordingly: drivel must beat **2.742**, not babble's 5.395.
    Clearing "the floor" while losing to a model with no tables at all would
    have been a hollow win, and the plan as written would have accepted it.
-2. **The cause is regime, not tables-are-bad.** babble scores 2.599 over the
-   first 50 tokens of a program and 5.405 overall; uniform is flat at
-   2.117/2.758, as a rung with no notion of position must be. babble's
+2. **The cause is regime, not tables-are-bad.** babble scores 2.619 over the
+   first 50 tokens of a program and 5.395 overall; uniform is flat at
+   2.062/2.742, as a rung with no notion of position must be. babble's
    finishing pressure saturates at `PRESSURE_CAP` on a long file, throwing
    nearly all its mass onto closers and `Eof` — a regime it *never generates
    in*, since its own walks stop by ~27 tokens. This is why the report carries
@@ -290,15 +292,33 @@ measured. Recorded consequences:
    short programs and a bad *model* of long files. Those are different jobs,
    and the eval measures the second one.
 
-### The harness found a real oracle/parser disagreement on its first run
+### The harness found a real oracle/parser disagreement on its first run — now fixed
 
-`plans/lang/samples.st:79` writes `fold([:], …)` — the empty-map literal. The
-oracle does not admit `Colon` after `[`, so a grammar-masked decoder **cannot
-emit `[:]` at all**, and babble can never generate one. The parser accepts it;
-`valid_next` does not. Reported rather than asserted away: the run prints the
-warning, names the program, byte, line and admitted-class count, and exits
-nonzero *after* printing everything else. Not fixed here — `stitch` was being
-edited concurrently, and this is a `stitch` bug rather than a harness one.
+`plans/lang/samples.st:79` writes `fold([:], …)`, the empty-map literal, and the
+run reported the oracle rejecting a token a human actually wrote.
+
+**Root cause: two tokens of lookahead in a one-token-at-a-time world.**
+`parse_collection` recognised the empty map with
+`peek() == Colon && peek_at(1) == RBracket`. That is correct on a whole program
+and wrong for the continuation oracle, which probes by appending *one* token
+plus `Eof` — so `peek_at(1)` was `Eof`, the branch was skipped, and the parse
+error landed **on** the colon, which `oracle::admits` reads as "dead prefix".
+The consequence was not cosmetic: `[:]` was **unreachable under a grammar
+mask** — babble could never generate one, and no masked model could ever emit
+one, however much training data contained it.
+
+The fix commits on the single token (a map entry cannot start with its own
+separator) and *demands* the `]` instead of peeking for it, moving the failure
+one token later to where the oracle correctly reads it as "consumed it and
+wanted more". Accepted language unchanged; only the error position moves.
+
+**The general lesson, worth more than the bug:** a parser that needs *k > 1*
+tokens of lookahead to commit has a prefix its own oracle calls dead. Any such
+branch is a hole in the decode mask. This is the second time the oracle's
+one-token contract has caught a latent assumption (the first was maximal munch
+and the load-bearing space in `> =`).
+
+Zero disagreements now, over 10,950 decisions.
 
 ### Retrained on the current language (2026-07-26, after `test` + `expect`)
 
