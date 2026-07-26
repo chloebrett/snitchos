@@ -81,6 +81,17 @@ fn round_trips_calls_and_access() {
     assert_round_trips("let a = f(1, 2)  let b = g(label: 1)  let c = p.x  let d = p?.x  let e = xs[0]  let f2 = h()");
 }
 
+/// `..` at the head of a call argument is the *spread* (`Point(..p, x: 1)`),
+/// not a range, so a range argument has to say so with parentheses. The two
+/// share a leading token and nothing else.
+#[test]
+fn round_trips_a_range_argument_against_the_spread() {
+    assert_round_trips("let a = f((..))");
+    assert_round_trips("let b = f((..10))");
+    assert_round_trips("let c = f(1..10)");
+    assert_round_trips("let d = Point(..p, x: 1)");
+}
+
 #[test]
 fn round_trips_collections() {
     assert_round_trips("let a = [1, 2, 3]  let b = [:]  let c = [k: 1, j: 2]  let d = (1, 2)  let e = ()");
@@ -102,6 +113,32 @@ fn round_trips_blocks_and_statements() {
     assert_round_trips("f() = { let a = 1  let mut b = 2  b = 3  g(b)  a + b }");
     assert_round_trips("g() = { h() }");
     assert_round_trips("empty() = { }");
+}
+
+/// Statements are separated by whitespace and terminated by nothing, so a
+/// statement ending in an unfinished token reaches into the next one: an open
+/// range takes it as the range's end, and a bare `@` takes a following
+/// identifier as a field (`@name` is receiver-field shorthand).
+///
+/// The repair has to know that a statement is not always an expression —
+/// `(let label = ..=)` is a syntax error, not a parenthesised binding — so what
+/// gets wrapped is the trailing expression, never the statement.
+#[test]
+fn round_trips_statements_that_would_run_into_the_next_one() {
+    assert_round_trips(r#"f() = { let label = (..=) "value" }"#);
+    assert_round_trips("g() = { let n = (1..) done() }");
+    assert_round_trips("h() = { x == (@) line }");
+    assert_round_trips("i() = { @ @ }");
+}
+
+/// The repair must be the *smallest* subexpression that ends in the offending
+/// token, not the whole statement. Wrapping the statement moves a `(` to its
+/// front, where the statement before it reads the parentheses as a call and
+/// swallows it — trading one seam for another one line up.
+#[test]
+fn sealing_a_statement_does_not_hand_the_previous_one_a_call() {
+    assert_round_trips(r#"f() = { ["field"] 1.5 ~> (@) token }"#);
+    assert_round_trips("g() = { [1] 2 + (3..) done() }");
 }
 
 #[test]

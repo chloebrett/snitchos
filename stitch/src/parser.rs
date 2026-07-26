@@ -95,6 +95,54 @@ pub fn parse(src: &str) -> Result<Expr, ParseError> {
     parse_expr_entry(src).map_err(|err| err.in_entry(Entry::Expr))
 }
 
+/// Parse a program from an already-lexed token stream.
+///
+/// For the continuation oracle, which asks the same prefix 58 questions and
+/// would otherwise re-lex it 58 times. Lexing once and appending a candidate
+/// token is the difference between "fine on the host" and "fits in a 16 MiB
+/// process heap".
+///
+/// # Errors
+/// As [`parse_program`].
+pub(crate) fn parse_program_tokens(
+    tokens: Vec<Token>,
+    lex_errors: Vec<LexError>,
+) -> Result<Vec<Item>, ParseError> {
+    let mut parser = Parser::from_tokens(tokens, lex_errors);
+    if let Some(err) = parser.lex_error() {
+        return Err(err);
+    }
+    let mut items = Vec::new();
+    while !matches!(parser.peek(), TokenKind::Eof) {
+        items.push(parser.parse_item()?);
+    }
+    Ok(items)
+}
+
+/// [`parse`] from an already-lexed token stream — the expression-entry twin of
+/// [`parse_program_tokens`].
+///
+/// # Errors
+/// As [`parse`].
+pub(crate) fn parse_expr_tokens(
+    tokens: Vec<Token>,
+    lex_errors: Vec<LexError>,
+) -> Result<Expr, ParseError> {
+    let mut parser = Parser::from_tokens(tokens, lex_errors);
+    let result = (|| {
+        if let Some(err) = parser.lex_error() {
+            return Err(err);
+        }
+        let expr = parser.parse_expr(0)?;
+        if matches!(parser.peek(), TokenKind::Semicolon) {
+            return Err(parser.err(NO_SEMICOLONS));
+        }
+        parser.expect(&TokenKind::Eof, "end of input")?;
+        Ok(expr)
+    })();
+    result.map_err(|err| err.in_entry(Entry::Expr))
+}
+
 /// [`parse`] without the entry tagging — split out so every failure path is
 /// tagged in one place.
 fn parse_expr_entry(src: &str) -> Result<Expr, ParseError> {

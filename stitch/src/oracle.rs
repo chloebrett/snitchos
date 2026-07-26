@@ -10,7 +10,7 @@
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::lexer::TokenKind;
+use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 
 /// A token's *class* — [`crate::lexer::TokenKind`] with the payloads stripped.
 /// The oracle answers in classes because "an integer literal is legal here" is
@@ -426,6 +426,15 @@ impl Entry {
         };
         err.map(|e| e.span.start)
     }
+
+    /// [`Self::stops_at`], from tokens already lexed.
+    fn stops_at_tokens(self, tokens: Vec<Token>, lex_errors: Vec<LexError>) -> Option<usize> {
+        let err = match self {
+            Self::Program => crate::parser::parse_program_tokens(tokens, lex_errors).err(),
+            Self::Expr => crate::parser::parse_expr_tokens(tokens, lex_errors).err(),
+        };
+        err.map(|e| e.span.start)
+    }
 }
 
 /// Could a token of `class` legally follow `prefix`?
@@ -449,6 +458,79 @@ fn admits(prefix: &str, class: TokenClass, entry: Entry) -> bool {
         None => true,
         Some(stop) => stop > appended_at,
     }
+}
+
+/// The lexed prefix, reused across every probe of one query.
+///
+/// Re-lexing the prefix per class was the oracle's dominant cost: 58 classes ×
+/// (a formatted source string + a full re-lex) per entry, which is invisible on
+/// the host and exhausts a 16 MiB process heap on the metal. Lexing once and
+/// appending a candidate token leaves only the parse.
+struct Probes {
+    /// The prefix's tokens, trailing `Eof` removed so a candidate can be pushed.
+    base: Vec<Token>,
+    lex_errors: Vec<LexError>,
+    /// Where an appended token starts — the viability rule's pivot.
+    appended_at: usize,
+}
+
+impl Probes {
+    fn new(prefix: &str) -> Self {
+        let lexed = lex(prefix);
+        let mut base = lexed.tokens;
+        base.pop(); // the trailing `Eof`
+        // The separator is notional now: tokens are appended directly, so the
+        // maximal-munch hazard that made a literal space necessary cannot
+        // arise. The offset is kept so the "did parsing stop at the appended
+        // token?" comparison reads the same as before.
+        Self { base, lex_errors: lexed.errors, appended_at: prefix.len() + 1 }
+    }
+
+    /// The prefix's tokens plus `class`'s representative and `Eof`.
+    fn with(&self, class: TokenClass) -> Option<Vec<Token>> {
+        let kind = representative_kind(class)?;
+        let lexeme_len = representative(class)?.len();
+        let mut tokens = Vec::with_capacity(self.base.len() + 2);
+        tokens.extend_from_slice(&self.base);
+        let end = self.appended_at + lexeme_len;
+        tokens.push(Token { kind, span: Span { start: self.appended_at, end } });
+        tokens.push(Token { kind: TokenKind::Eof, span: Span { start: end, end } });
+        Some(tokens)
+    }
+
+    fn admits(&self, class: TokenClass, entry: Entry) -> bool {
+        let Some(tokens) = self.with(class) else {
+            return false; // `Eof` is answered by the caller
+        };
+        match entry.stops_at_tokens(tokens, self.lex_errors.clone()) {
+            None => true,
+            Some(stop) => stop > self.appended_at,
+        }
+    }
+}
+
+/// A class's representative as a *token*, skipping the lexer.
+///
+/// Paired with [`representative`] — `every_representative_lexes_to_the_class_it_represents`
+/// pins that the two agree, so this table cannot drift into probing a different
+/// token than the one the sampler will later emit.
+fn representative_kind(class: TokenClass) -> Option<TokenKind> {
+    Some(match class {
+        TokenClass::Int => TokenKind::Int(0),
+        TokenClass::Float => TokenKind::Float(0.0),
+        TokenClass::Bool => TokenKind::Bool(true),
+        TokenClass::Str => TokenKind::Str(Vec::new()),
+        TokenClass::Ident => TokenKind::Ident(String::from("x")),
+        TokenClass::Placeholder => TokenKind::Placeholder(None),
+        TokenClass::Eof => return None,
+        fixed => {
+            // Every remaining class has one fixed spelling, so its lexeme lexes
+            // to exactly one token — reuse the lexer rather than restate 50
+            // mappings that could drift from `representative`.
+            let mut lexed = lex(representative(fixed)?);
+            lexed.tokens.first_mut().map(|t| core::mem::replace(&mut t.kind, TokenKind::Eof))?
+        }
+    })
 }
 
 /// Which token classes may legally follow `src[..pos]`, read as a program?
@@ -488,9 +570,17 @@ pub fn valid_next_in(src: &str, pos: usize, entry: Entry) -> TokenSet {
     let Some(prefix) = src.get(..pos) else {
         return TokenSet::EMPTY;
     };
+    // One lex for the whole query, not one per class.
+    let probes = Probes::new(prefix);
     ALL.iter()
         .copied()
-        .filter(|class| admits(prefix, *class, entry))
+        .filter(|class| {
+            if *class == TokenClass::Eof {
+                entry.accepts(prefix)
+            } else {
+                probes.admits(*class, entry)
+            }
+        })
         .fold(TokenSet::EMPTY, TokenSet::with)
 }
 

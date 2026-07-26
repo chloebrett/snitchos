@@ -49,7 +49,46 @@ Two things the increment added beyond the plan:
 builds and boots. **Tab does not work on target**, for a reason worth
 recording carefully.
 
-### ⚠ The oracle is host-shaped, not metal-shaped
+### ⚠ Tab wedges the guest — target-only, host-green, NOT root-caused
+
+**Corrected diagnosis.** An earlier version of this note said the cause was
+heap exhaustion (232 probes × ~68 KiB talc regions ≈ the 16 MiB
+`Process::HEAP_MAX`). The arithmetic fit suspiciously well, and it was
+**wrong**: the kernel refuses `MapAnon` with `RefusalReason::OutOfMemory` and
+refusals snitch, and **no `SyscallRefused` frame is ever emitted**. The heap is
+never exhausted. Recording this because the near-miss is instructive — a number
+that lands on a known cap is a hypothesis, not evidence.
+
+What is actually established:
+
+| Evidence | Reading |
+|---|---|
+| `emit("probe", 7)\n` round-trips | console input, injection and the workload are fine |
+| `use M.` alone echoes | partial-line input and echo are fine |
+| `use M.\t` echoes *nothing* | the hang is inside `feed_with` — it returns echo at chunk *end*, so a hang on Tab swallows the preceding characters too |
+| the client-side counter never fires | the REPL never reaches the IPC call: it is the **grammar**, not the wire |
+| `Forced` (`use M.`) hangs too | not the model path — it is `stitch::complete` / `valid_next` itself |
+| no `SyscallRefused` | not heap exhaustion |
+| no exit-frame | the process is not killed |
+| no panic/overflow `Log` | no *kernel* panic reported |
+| **`kernel.heartbeat` stops too** | the whole guest stops producing frames, not just the REPL |
+| unchanged at `--steps 4B` and a 120 s wait | not merely slow |
+| the identical call is green on host | environment-dependent, not a logic bug |
+
+Note one measurement was misread along the way: `View::guest_instret` reports
+instret at the last *matched* frame, so "flat instret" means "no frames
+arrived", not "the guest stopped executing". Do not read it as a progress
+counter.
+
+**Still unexplained:** what differs on target. Heap and refusals are ruled out;
+stack depth, an opt-level-dependent miscompile in the userspace build (there is
+a documented latent UB class there), and a snemu fidelity gap are all still
+open. The next probes worth running: call `complete()` from a *non-console*
+path on target (a boot self-test in the REPL) to remove the editor and console
+from the picture entirely; and try `--opt hi`/`max` to see whether the
+behaviour is opt-dependent.
+
+### The allocation reduction (done anyway, and worth having)
 
 One `complete()` makes **232 probes** — 58 token classes × 2 grammar entries —
 and each probe allocates a `format!("{prefix} {lexeme}")` string, a fresh token
@@ -71,20 +110,29 @@ How it was pinned down, since none of it was visible from the symptom:
 | `Forced` (`use M.`) hangs too | the model path entirely; it is `valid_next` itself |
 | process did not exit; instret flat at 15.4 M over a 20 s wait | computation — the guest is idle, i.e. blocked or spinning in a way snemu skips |
 
-**The fix (not yet done): stop re-lexing per probe.** `admits` currently
-formats a new source string and re-lexes the whole prefix for each of 58
-classes. Lexing the prefix *once* and appending a candidate token to a cloned
-token vector removes 232 string allocations and 232 lexes per query, leaving
-only the parses. That was already identified as the obvious optimisation when
-the oracle was built and deferred as "not needed yet" — this is the measurement
-that says it is needed. A second lever if that is not enough: the menu only
-ever displays `MENU_LIMIT` entries, so probing could stop early once enough
-classes are known, at the cost of an exact count.
+`valid_next_in` now lexes the prefix **once per query** and probes by appending
+a candidate *token* (`oracle::Probes` + `parser::{parse_program_tokens,
+parse_expr_tokens}`), instead of formatting a fresh source string and re-lexing
+the whole prefix for each of 58 classes. That removes 232 string allocations
+and 232 lexes per `complete()`, leaving the parses. Behaviour is unchanged —
+773 stitch tests green, including
+`the_single_class_query_agrees_with_the_full_set`, which pins the single-class
+and full-set paths against each other.
+
+It did **not** fix the wedge, which is how the heap hypothesis was falsified.
+It is kept because it is a real reduction that any fix will want anyway, and
+because the token-wise probe is the more honest formulation: the space
+separator it replaces existed only to defeat maximal munch, a hazard that
+cannot arise when tokens are appended directly.
+
+A second lever, still available: the menu only ever displays `MENU_LIMIT`
+entries, so probing could stop once enough classes are known — at the cost of
+the exact "(N total)" count.
 
 **The lesson worth keeping:** the design doc said "measure latency at increment
-4, before adding IPC on top". I skipped it, and the cost turned out not to be
-latency at all but *allocation volume* against a cap that does not exist on the
-host. Host-green is not target-green for anything that allocates in a loop.
+4, before adding IPC on top". I skipped it, and paid for it — not in latency,
+but in a target-only failure discovered three increments later, with the whole
+stack built on top of it.
 
 **Status of the pieces:** the workload, the server, the protocol, the client
 platform method and the scenario body all exist and are correct as far as they

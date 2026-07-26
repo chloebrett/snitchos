@@ -937,7 +937,6 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
 /// per-process heap and the REPL hangs in talc's OOM path before it can ask
 /// the server anything. Kept here so the fix lands against a ready gate — see
 /// `plans/repl-completion.md`.
-#[allow(dead_code, reason = "registered once the oracle is affordable on target")]
 ///
 /// The chain: a keystroke arrives over the UART, the line editor sees Tab, the
 /// grammar decides it cannot settle this position alone, and only then does the
@@ -946,6 +945,7 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
 /// span appearing on the *server's* task id: the trace crossing the process
 /// boundary is what proves the round trip happened, rather than the REPL
 /// quietly falling back to its grammar-only menu.
+#[allow(dead_code, reason = "registered once the target-only wedge is root-caused")]
 pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
     // The boot self-test confirms the REPL is up and polling the console, so
     // injected keystrokes aren't dropped.
@@ -957,6 +957,7 @@ pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
     // one legal spelling would be answered locally and never reach the server —
     // that economy is the point, but it would make a poor test of the wire.)
     h.send_input(b"let x =\t").map_err(|e| format!("inject REPL input: {e}"))?;
+    #[allow(unreachable_code)]
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, .. } => {
             strings.get(name_id).map(String::as_str) == Some("probe")

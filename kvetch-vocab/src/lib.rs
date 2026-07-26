@@ -24,6 +24,17 @@ use alloc::vec::Vec;
 /// far enough away to be a non-issue. Widening it is a vocab-version change.
 pub type TokenId = u16;
 
+/// Identifies a serialized vocab, distinguishing "not a vocab" from "a vocab I
+/// cannot read".
+const VOCAB_MAGIC: [u8; 8] = *b"KVETCHVC";
+
+/// Bumped when the format or the merge semantics change, so an older file is
+/// refused rather than silently misread.
+const VOCAB_VERSION: u32 = 1;
+
+/// Magic, version, merge count.
+const VOCAB_HEADER: usize = 8 + 4 + 4;
+
 /// The number of base tokens: one per byte value.
 ///
 /// Byte-level is what makes encoding *total* — there is no unknown-character
@@ -129,6 +140,63 @@ impl Vocab {
     /// because `len` without `is_empty` is a clippy lint and an odd API.
     pub fn is_empty(&self) -> bool {
         self.tokens.is_empty()
+    }
+
+    /// Serialize to the on-disk vocab format: magic, version, merge count, then
+    /// the merges as little-endian `u16` pairs.
+    ///
+    /// **A checkpoint without its vocab is meaningless** — the weights index a
+    /// token table, and a different tokenization makes them index the wrong
+    /// rows. The merges alone are enough, since the byte tokens are implicit and
+    /// [`Vocab::with_merges`] rebuilds the table deterministically from them.
+    ///
+    /// Merge order is wire law, as it is everywhere else in this crate.
+    pub fn encode_vocab(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(VOCAB_HEADER + self.merges.len() * 4);
+        out.extend_from_slice(&VOCAB_MAGIC);
+        out.extend_from_slice(&VOCAB_VERSION.to_le_bytes());
+        out.extend_from_slice(&(self.merges.len() as u32).to_le_bytes());
+
+        for &(left, right) in &self.merges {
+            out.extend_from_slice(&left.to_le_bytes());
+            out.extend_from_slice(&right.to_le_bytes());
+        }
+
+        out
+    }
+
+    /// Load a serialized vocab, or `None` if it is not one this build can read.
+    ///
+    /// Every rejection is `None` rather than a panic or a guess, for the same
+    /// reason a checkpoint's is: a misread vocab produces a model that runs and
+    /// is quietly wrong.
+    pub fn decode_vocab(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < VOCAB_HEADER || bytes[..8] != VOCAB_MAGIC {
+            return None;
+        }
+
+        let word = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+        if word(8)? != VOCAB_VERSION {
+            return None;
+        }
+        let declared = word(12)? as usize;
+
+        let payload = bytes.get(VOCAB_HEADER..)?;
+        if payload.len() != declared * 4 {
+            return None;
+        }
+
+        let merges: Vec<(TokenId, TokenId)> = payload
+            .chunks_exact(4)
+            .map(|entry| {
+                (
+                    TokenId::from_le_bytes([entry[0], entry[1]]),
+                    TokenId::from_le_bytes([entry[2], entry[3]]),
+                )
+            })
+            .collect();
+
+        Some(Self::with_merges(&merges))
     }
 
     /// Encode text into token ids. Total: any input encodes.
@@ -329,6 +397,42 @@ mod tests {
 
     fn encoded_len(vocab: &Vocab, corpus: &[&str]) -> usize {
         corpus.iter().map(|text| vocab.encode(text).len()).sum()
+    }
+
+    #[test]
+    fn a_vocab_round_trips_through_its_serialized_form() {
+        let original = let_vocab();
+
+        let restored =
+            Vocab::decode_vocab(&original.encode_vocab()).expect("own output must decode");
+
+        assert_eq!(restored.len(), original.len());
+        for text in tricky_texts() {
+            assert_eq!(
+                restored.encode(text),
+                original.encode(text),
+                "a restored vocab must tokenize identically; anything else \
+                 silently changes what a checkpoint's weights mean"
+            );
+        }
+    }
+
+    #[test]
+    fn a_damaged_vocab_is_rejected_rather_than_misread() {
+        let encoded = let_vocab().encode_vocab();
+
+        let mut wrong_magic = encoded.clone();
+        wrong_magic[0] ^= 0xff;
+        assert!(
+            Vocab::decode_vocab(&wrong_magic).is_none(),
+            "magic not checked"
+        );
+
+        assert!(Vocab::decode_vocab(&[]).is_none(), "empty input not rejected");
+        assert!(
+            Vocab::decode_vocab(&encoded[..encoded.len() - 2]).is_none(),
+            "truncation not detected"
+        );
     }
 
     #[test]

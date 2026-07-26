@@ -563,10 +563,10 @@ fn print_block(stmts: &[Stmt], result: Option<&Expr>, depth: usize) -> String {
     }
     let mut lines: Vec<String> = stmts
         .iter()
-        .map(|stmt| print_stmt(stmt, depth + 1))
+        .map(|stmt| print_stmt(stmt, depth + 1, false))
         .chain(result.map(|expr| print_at(expr, LOOSEST_BP, depth + 1)))
         .collect();
-    seal_seams(&mut lines);
+    seal_seams(&mut lines, stmts, depth);
 
     let mut out = String::from("{\n");
     for line in &lines {
@@ -593,11 +593,81 @@ fn print_block(stmts: &[Stmt], result: Option<&Expr>, depth: usize) -> String {
 /// `(` reads as a *call* of the statement before it. `{ @ @ }` is two receiver
 /// statements and needs no help; `{ @ line }` cannot be written at all. Looking
 /// at both sides is what tells those apart.
-fn seal_seams(lines: &mut [String]) {
+///
+/// The repair is structural, not textual. A statement is not always an
+/// expression: `(let label = ..=)` is not a parenthesised `let`, it is a syntax
+/// error. What gets wrapped is the statement's *trailing expression* — the
+/// binding's value, the assignment's value, the callback's call — which is
+/// where the offending token actually lives.
+fn seal_seams(lines: &mut [String], stmts: &[Stmt], depth: usize) {
     for i in 0..lines.len().saturating_sub(1) {
-        if absorbs(&lines[i], &lines[i + 1]) {
-            lines[i] = format!("({})", lines[i]);
+        if !absorbs(&lines[i], &lines[i + 1]) {
+            continue;
         }
+        lines[i] = match stmts.get(i) {
+            Some(stmt) => print_stmt(stmt, depth + 1, true),
+            // The block's result expression, which nothing follows.
+            None => format!("({})", lines[i]),
+        };
+    }
+}
+
+/// Print `expr`, parenthesising the *smallest* subexpression that ends in the
+/// token which would run into whatever follows.
+///
+/// Wrapping the whole expression also works and is wrong: it moves a `(` to the
+/// front of the statement, where the statement before it reads the parentheses
+/// as a call and swallows it instead. `1.5 ~> @` before a `token` statement
+/// becomes `1.5 ~> (@)`, not `(1.5 ~> @)` — which is what the source that
+/// produced such a program had to write for the same reason.
+///
+/// The walk mirrors [`right_open`]: same right spine, and where that returns
+/// true, this wraps.
+fn seal_tail(expr: &Expr, min_bp: u8, depth: usize) -> String {
+    match &expr.kind {
+        ExprKind::Binary { op, left, right } => {
+            let (l_bp, r_bp) = binding_power(*op);
+            let left_bp = if is_non_assoc(*op) { r_bp } else { l_bp };
+            format!(
+                "{} {} {}",
+                print_at(left, left_bp, depth),
+                binop_text(*op),
+                seal_tail(right, r_bp, depth)
+            )
+        }
+        ExprKind::Unary { op, operand } => {
+            let text = String::from(match op {
+                UnOp::Neg => "-",
+                UnOp::Not => "not ",
+            });
+            text + &seal_tail(operand, PREFIX_BP, depth)
+        }
+        ExprKind::Lambda { params, body } => {
+            let params = if params.len() == 1 {
+                params[0].clone()
+            } else {
+                format!("({})", params.join(", "))
+            };
+            format!("{params} -> {}", seal_tail(body, LOOSEST_BP, depth))
+        }
+        ExprKind::If { cond, then, els } => format!(
+            "{} => {} | {}",
+            print_at(cond, BRANCH_BP, depth),
+            print_at(then, BRANCH_BP, depth),
+            seal_tail(els, BRANCH_BP, depth)
+        ),
+        ExprKind::Range { end: Some(end), .. } => {
+            // Only the end can be the offending tail; the dots are interior.
+            let (_, r_bp) = binding_power(BinOp::Range);
+            let printed = print_at(expr, min_bp, depth);
+            let tail = seal_tail(end, r_bp, depth);
+            let plain = print_at(end, r_bp, depth);
+            printed
+                .strip_suffix(&plain)
+                .map_or(printed.clone(), |head| format!("{head}{tail}"))
+        }
+        // The tail itself: a bare `@` or a range still waiting for its end.
+        _ => format!("({})", print_at(expr, LOOSEST_BP, depth)),
     }
 }
 
@@ -618,11 +688,21 @@ fn absorbs(left: &str, right: &str) -> bool {
     (left.ends_with("..") || left.ends_with("..=")) && crate::parser::token_starts_expr(&next)
 }
 
-fn print_stmt(stmt: &Stmt, depth: usize) -> String {
+/// Print one statement. `wrap_tail` seals its trailing expression, the repair
+/// [`seal_seams`] applies when the statement would otherwise reach across the
+/// newline into the next one.
+fn print_stmt(stmt: &Stmt, depth: usize, wrap_tail: bool) -> String {
+    let tail = |expr: &Expr| {
+        if wrap_tail {
+            seal_tail(expr, LOOSEST_BP, depth)
+        } else {
+            print_at(expr, LOOSEST_BP, depth)
+        }
+    };
     match stmt {
         Stmt::Let { name, mutable, value } => {
             let mutability = if *mutable { "mut " } else { "" };
-            format!("let {mutability}{name} = {}", print_at(value, LOOSEST_BP, depth))
+            format!("let {mutability}{name} = {}", tail(value))
         }
         // The target parses at the loosest precedence (the parser reads a whole
         // expression, then looks for `=`), so it must print there too. Printing
@@ -632,13 +712,13 @@ fn print_stmt(stmt: &Stmt, depth: usize) -> String {
         Stmt::Assign { target, value } => format!(
             "{} = {}",
             print_at(target, LOOSEST_BP, depth),
-            print_at(value, LOOSEST_BP, depth)
+            tail(value)
         ),
         Stmt::Use { binding, call } => {
             let binding = binding.as_ref().map_or(String::new(), |b| format!("{b} "));
-            format!("use {binding}<- {}", print_at(call, LOOSEST_BP, depth))
+            format!("use {binding}<- {}", tail(call))
         }
-        Stmt::Expr(expr) => print_at(expr, LOOSEST_BP, depth),
+        Stmt::Expr(expr) => tail(expr),
     }
 }
 
@@ -676,10 +756,25 @@ fn print_elems(items: &[Expr], depth: usize) -> String {
         .join(", ")
 }
 
+/// Print one call argument.
+///
+/// Argument position is the one place `..` is ambiguous: it opens a *spread*
+/// (`Point(..p, x: 1)`), which is only legal here, so a range that happens to
+/// start with the same token has to be parenthesised out of the way. `f(..)`
+/// is a spread missing its base — a parse error, not a range.
+fn print_argument(value: &Expr, depth: usize) -> String {
+    let text = print_at(value, LOOSEST_BP, depth);
+    let is_spread = matches!(value.kind, ExprKind::Spread(_));
+    if text.starts_with("..") && !is_spread {
+        return format!("({text})");
+    }
+    text
+}
+
 fn print_args(args: &[Arg], depth: usize) -> String {
     args.iter()
         .map(|arg| {
-            let value = print_at(&arg.value, LOOSEST_BP, depth);
+            let value = print_argument(&arg.value, depth);
             match &arg.label {
                 Some(label) => format!("{label}: {value}"),
                 None => value,
