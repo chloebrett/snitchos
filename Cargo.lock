@@ -931,6 +931,7 @@ dependencies = [
  "kernel-boot",
  "kernel-devices",
  "kernel-mem",
+ "kernel-net",
  "kernel-obs",
  "kernel-proc",
  "linked_list_allocator",

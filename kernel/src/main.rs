@@ -26,7 +26,7 @@ mod syscall;
 mod trap;
 mod workloads;
 
-pub(crate) use device::{console, fwcfg, plic, pwmdac, ramfb, uart, virtio_console};
+pub(crate) use device::{console, fwcfg, plic, pwmdac, ramfb, uart, virtio_console, virtio_net};
 pub(crate) use mem::{frame, heap, heap_smoke, mmu};
 pub(crate) use obs::{counter, heartbeat, tracing};
 pub(crate) use sched::{demo_tasks, process};
@@ -261,18 +261,35 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
 
         {
             span!("telemetry_init");
-            // SAFETY: dtb came from the DTB we just parsed.
-            match unsafe { virtio_console::init(&dtb) } {
-                Ok(()) => {
-                    // Hello MUST be the first frame on the wire — the host
-                    // anchors session wall-clock to its arrival. Then flush
-                    // the spans we've been buffering so far (kernel.boot
-                    // start, console_init pair, telemetry_init start).
-                    tracing::send_hello(timebase_hz as u32);
-                    tracing::flush_pre_init();
-                    println!("virtio-console: ready");
+            // `net=` selects UDP telemetry over virtio-net; otherwise the
+            // virtio-console carries frames. Either way Hello MUST be the first
+            // frame on the wire — the host anchors session wall-clock to its
+            // arrival — followed by the buffered pre-init spans (kernel.boot
+            // start, console_init pair, telemetry_init start).
+            let net_boot = dtb.chosen().bootargs().and_then(kernel_boot::bootargs::net);
+            // SAFETY: dtb came from the DTB we just parsed; mmu::enable has run.
+            let net_up = match net_boot {
+                Some(Ok(nb)) => unsafe { tracing::init_net_sink(&dtb, &nb) },
+                Some(Err(_)) => {
+                    println!("net: malformed net= bootarg, ignored");
+                    false
                 }
-                Err(e) => println!("virtio-console: init failed: {:?}", e),
+                None => false,
+            };
+            if net_up {
+                tracing::send_hello(timebase_hz as u32);
+                tracing::flush_pre_init();
+                println!("virtio-net: telemetry ready");
+            } else {
+                // SAFETY: as above.
+                match unsafe { virtio_console::init(&dtb) } {
+                    Ok(()) => {
+                        tracing::send_hello(timebase_hz as u32);
+                        tracing::flush_pre_init();
+                        println!("virtio-console: ready");
+                    }
+                    Err(e) => println!("virtio-console: init failed: {:?}", e),
+                }
             }
         }
     }

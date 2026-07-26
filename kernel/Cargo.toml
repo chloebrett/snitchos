@@ -33,6 +33,7 @@ postcard = { version = "1", default-features = false }
 kernel-boot = { path = "../kernel-boot" }
 kernel-devices = { path = "../kernel-devices" }
 kernel-mem = { path = "../kernel-mem" }
+kernel-net = { path = "../kernel-net" }
 kernel-obs = { path = "../kernel-obs" }
 kernel-proc = { path = "../kernel-proc" }
 snitchos-abi = { path = "../abi" }

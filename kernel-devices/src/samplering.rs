@@ -11,7 +11,7 @@
 //! caller re-submits the tail on the next turn. A full ring accepts 0 — the signal to
 //! back off. This is what decouples glitch's chunky refills from the steady per-sample
 //! drain (and is where an underrun becomes observable: the drain finding this empty
-//! mid-stream is the XRun).
+//! mid-stream is the `XRun`).
 //!
 //! **Why `&mut self` is enough (no atomics).** Same discipline as `ConsoleRing`: the
 //! kernel wraps this in a `kernel::sync::Mutex` taken by both the timer drain and the

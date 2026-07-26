@@ -13,8 +13,54 @@ use kernel_obs::preinit::PreInitBuffer;
 use kernel_obs::sink::FrameSink;
 use kernel_obs::span::{self, SpanCursor, SpanIds};
 
+use kernel_net::{NetConfig, NetDevice, TxFull, UdpBatcher};
+
 use crate::trap::CLOCK;
-use crate::virtio_console;
+use crate::{virtio_console, virtio_net};
+
+/// Fixed source port for telemetry egress (start of the ephemeral range). The
+/// wire format carries only the destination; the source is arbitrary.
+const TELEMETRY_SRC_PORT: u16 = 49152;
+
+/// Bridges the UDP batcher to the kernel virtio-net driver. The driver's `send`
+/// spins to completion, so it never reports back-pressure — hence the infallible
+/// `Ok`.
+struct VirtioNet;
+
+impl NetDevice for VirtioNet {
+    fn send(&mut self, frame: &[u8]) -> Result<(), TxFull> {
+        virtio_net::send(frame);
+        Ok(())
+    }
+}
+
+/// The UDP telemetry sink, installed by [`init_net_sink`] when `net=` selects it
+/// and the virtio-net device is present. When up, [`KernelSink`] routes frames
+/// here instead of the virtio-console.
+static UDP_TX: crate::sync::Once<crate::sync::Mutex<UdpBatcher<VirtioNet>>> =
+    crate::sync::Once::new();
+
+/// Bring up the virtio-net device and install the UDP telemetry sink from a
+/// parsed `net=` bootarg. Returns whether the sink is now live (`false` if no
+/// virtio-net device was found — the caller falls back to the console).
+///
+/// # Safety
+/// As [`virtio_net::init`]: the DTB must be valid and higher-half MMIO live.
+pub unsafe fn init_net_sink(dtb: &fdt::Fdt, nb: &kernel_boot::bootargs::NetBoot) -> bool {
+    if unsafe { virtio_net::init(dtb) }.is_err() {
+        return false;
+    }
+    let config = NetConfig {
+        src_mac: nb.src_mac,
+        src_ip: nb.src_ip,
+        dst_mac: nb.dst_mac,
+        dst_ip: nb.dst_ip,
+        src_port: TELEMETRY_SRC_PORT,
+        dst_port: nb.dst_port,
+    };
+    UDP_TX.call_once(|| crate::sync::Mutex::new(UdpBatcher::new(config, VirtioNet)));
+    true
+}
 
 /// Read the RISC-V `time` CSR — a monotonically increasing 64-bit cycle
 /// counter clocked at the rate the DTB reports as `timebase-frequency`.
@@ -75,7 +121,15 @@ impl FrameSink for KernelSink {
         let Ok(bytes) = protocol::wire_encode(frame, &mut buf) else {
             return;
         };
-        if virtio_console::CONSOLE.get().is_some() {
+        if let Some(udp) = UDP_TX.get() {
+            // One datagram per frame for now: telemetry trickles out below the
+            // MTU, so relying on batch-overflow would never flush. A
+            // heartbeat-driven flush that packs many frames per datagram is the
+            // efficiency follow-up (design open-question #2).
+            let mut batcher = udp.lock();
+            batcher.push_bytes(bytes);
+            batcher.flush();
+        } else if virtio_console::CONSOLE.get().is_some() {
             virtio_console::send(bytes);
         } else {
             PRE_INIT_BUFFER.lock().append(bytes);

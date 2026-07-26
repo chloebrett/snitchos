@@ -13,3 +13,4 @@ pub mod pwmdac;
 pub mod ramfb;
 pub mod uart;
 pub mod virtio_console;
+pub mod virtio_net;
