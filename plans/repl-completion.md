@@ -49,7 +49,60 @@ Two things the increment added beyond the plan:
 builds and boots. **Tab does not work on target**, for a reason worth
 recording carefully.
 
-### ⚠ Tab wedges the guest — target-only, host-green, NOT root-caused
+### ⚠ ROOT CAUSE: userspace floating point is illegal on the metal
+
+**Found by running the scenario under QEMU** (`--engine qemu`), which reported
+what snemu swallowed:
+
+```
+Kernel panic: panicked at kernel/src/trap/mod.rs:203:18:
+unhandled trap: UnknownException(2) (scause=0x2)
+```
+
+`scause=2` is **illegal instruction**. Nothing in the kernel ever sets
+`sstatus.FS`, so it stays at its reset value (Off) and *every* floating-point
+instruction traps — in userspace as much as in the kernel. The oracle probes
+all 58 token classes including `Float`, whose token carries an `f64`; parsing
+or even moving one emits FP. Hence: host-green, target-dead, and dead in the
+`Forced` path too (every class is probed before the set is known).
+
+**This is not a completion bug.** Confirmed by removing completion entirely
+and typing a float at the prompt:
+
+```
+stitch> 1.5 + 1.5
+Kernel panic: unhandled trap: UnknownException(2) (scause=0x2)
+```
+
+Three separate findings fall out, none of them about Tab:
+
+1. **Stitch cannot use floats on target.** The language has full float support
+   (`TokenKind::Float`, `ExprKind::Float`, float arithmetic) and none of it can
+   run on the metal. It had simply never been exercised — every on-target
+   Stitch program and fixture to date (`primes.st`, the REPL demo) is integer
+   only. Fixing it means enabling FP for user mode: set `sstatus.FS` on user
+   entry *and* save/restore the FP registers in `TaskContext` on context switch
+   (they are not in it today). The kernel itself stays zero-FP, as designed —
+   this is about what *userspace* may do.
+2. **A user program can panic the kernel with one illegal instruction.** The
+   `UnknownException` arm at `trap/mod.rs:203` panics regardless of privilege,
+   even though the surrounding code already distinguishes `from_user`. An
+   unhandled *user* trap should kill the process (as other user faults do), not
+   take down the machine. That is a robustness hole independent of FP, and
+   arguably the more serious of the two.
+3. **snemu hid a kernel panic.** Under snemu the guest simply stopped emitting
+   frames; under QEMU the same run printed the panic. The `panic-now` scenario
+   exists precisely to assert that kernel panics reach the wire, so this is a
+   real fidelity gap — either the trap is mis-executed or the panic telemetry
+   never flushed. Worth a `snemu diff` investigation on its own.
+
+**What this cost:** the earlier heap-exhaustion diagnosis was wrong, and so was
+the instinct to keep bisecting under snemu. One `--engine qemu` run — the
+documented "fidelity escape hatch" — answered in 60 seconds what an hour of
+snemu-side inference did not. When the engine that gives *worse* signal is the
+one being interrogated, switch engines earlier.
+
+### Superseded diagnosis (kept for the lesson)
 
 **Corrected diagnosis.** An earlier version of this note said the cause was
 heap exhaustion (232 probes × ~68 KiB talc regions ≈ the 16 MiB
