@@ -69,10 +69,12 @@ checks the whole workspace shares), and its `test` blocks pass.
        `on` strategies (fixed-K vs margin-scaled). (Elo's real formula is
        infeasible — no `pow`/`exp`/`sqrt`/`Float` math at all; landed as a
        documented integer piecewise-linear approximation — see findings.)
-- [ ] 16. `tictactoe.st` — board + win detection + minimax AI. (Skipped out
-       of order — see note below; still owed.)
-- [ ] 17. `maze.st` — BFS pathfinding over a wall grid, tuple coordinates.
-       (Skipped out of order — see note below; still owed.)
+- [x] 16. `tictactoe.st` — board + win detection + minimax AI. (Written
+       after 18–22, correcting the ordering slip below. Found a new variant
+       of the maximal-munch gotcha — a `let … = … |> f(args)` statement
+       followed by a line starting with `(` fuses the same way; see
+       findings.)
+- [x] 17. `maze.st` — BFS pathfinding over a wall grid, tuple coordinates.
 - [x] 18. `huffman.st` — Huffman coding tree, encode/decode round-trip test.
        (Found & fixed a real bug in this batch's `Str.split(s, "")`
        "characters of a string" idiom — see findings.)
@@ -89,8 +91,8 @@ checks the whole workspace shares), and its `test` blocks pass.
 **Note (2026-07-26):** items 18–22 were written before 16–17 — an
 ordering slip while working through "do the next 5" autonomously (picked
 up the list past `elo.st` one item too far in). Not reordering the list
-itself (the work is done and correct under its real numbers); 16–17 are
-still owed and get done next.
+itself; 16–17 were written afterward to close the gap, so all of 11–22 are
+now done regardless of the order they landed in.
 - [ ] 23. `formula.st` — spreadsheet cell graph, cross-references, cycle
        detection (`Result`), memoized eval.
 - [ ] 24. `template.st` — mustache-like `{{var}}`/`{{#each}}` renderer over

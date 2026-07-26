@@ -751,6 +751,57 @@ below); everything else was established habits holding up.
   difference) — worth checking for before assuming `Set` is available in
   any later program.
 
+### 16–17: tictactoe.st, maze.st (the two skipped out of order)
+
+- **16. tictactoe.st** — 149 lines, 8 tests. A minimax AI, deliberately
+  never run from an empty board — the full game tree (up to `9!` leaf
+  paths) risks `test_runner::DEFAULT_FUEL`'s 1,000,000-step budget for no
+  real benefit, since minimax's correctness is exactly as visible (and far
+  cheaper to check) from a small near-endgame position. Verified every
+  scenario in an independent Python
+  re-implementation before writing the `.st` (by now a fully standard step
+  for this batch) — and good thing: the first draft of the "must block"
+  test used a board with *two* live winning threats for the opponent at
+  once, an unwinnable position no correct block exists for, caught only
+  because the simulator's answer (still a forced loss even after the
+  "right" block) didn't match the intended scenario.
+  - **A new, sneakier variant of the maximal-munch gotcha**: a statement
+    starting with bare `(` doesn't just fuse with the *previous statement's
+    result* (the bank.st/vm.st shape already on file) — it can fuse with
+    the tail end of a **`|>` pipe's right-hand call specifically**, one
+    level deeper than "adjacent statements." `let m = List.at(marks, 0) |>
+    unwrapOr(Empty)` followed immediately by a new statement starting
+    `(m != Empty and …)` doesn't parse as two statements — the parser keeps
+    extending `unwrapOr(Empty)`'s postfix chain across the (invisible to
+    it) line break into `unwrapOr(Empty)(m != Empty and …)`, a *second*
+    call applying `unwrapOr(Empty)`'s result to the parenthesized
+    expression. `eval_pipe` then evaluates that whole nested-call node as
+    its right side, which means evaluating the *inner* call
+    `unwrapOr(Empty)` (one argument) as a normal call first — faulting
+    with `"function expects 2 argument(s), got 1"`, an error that names
+    the right function but the wrong arity, pointing nowhere near the
+    actual mistake (a missing statement separator two lines down, not an
+    arity bug in `unwrapOr` at all). Fixed by dropping the (unnecessary —
+    `and` already binds tighter than `=>`) parens around the following
+    condition, which happened to remove the leading `(` too. **Refines the
+    rule of thumb from bank.st's entry**: it's not just "never start a
+    statement with bare `(` right after an expression-statement" — a `let
+    … = … |> f(args)` binding is just as much at risk as a bare expression
+    statement, since the pipe's RHS is itself a call whose postfix chain
+    can extend across the boundary the same way.
+
+- **17. maze.st** — 105 lines, 5 tests. BFS shortest-path over a wall grid,
+  using plain `(Int, Int)` tuples for coordinates — a **deliberate
+  exception** to the "prefer a named `prod` once read more than once" habit
+  (vm.st's entry): `(row, col)` is a universally-understood positional pair
+  in a way `Popped(value, rest)` isn't, so naming its fields would add
+  ceremony without adding clarity. Worth recording as the boundary case for
+  that earlier rule of thumb — the rule is about domain-specific field
+  *meaning* needing names, not about tuple arity as such. No new language
+  friction beyond the tictactoe.st finding above (this file was written
+  after that fix, so it never hit the same shape). Verified against a
+  Python BFS reference before writing the `.st`, same as tictactoe.st.
+
 - **Not tested in-language, and worth recording why**: wanted a `bank.st`
   test proving a function *without* `uses FsWrite` is refused when it
   tries `fsWrite` (the negative case for the capability-boundary finding
