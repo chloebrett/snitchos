@@ -600,6 +600,26 @@ pub fn audio_write(sink: usize, samples: &[i16]) -> Result<(), Denied> {
     if ret == usize::MAX { Err(Denied) } else { Ok(()) }
 }
 
+/// Largest sample batch one [`audio_enqueue`] carries — the same per-syscall copy cap
+/// as [`AUDIO_WRITE_MAX`].
+pub const AUDIO_ENQUEUE_MAX: usize = AUDIO_WRITE_MAX;
+
+/// Enqueue signed-PCM `samples` into the kernel's **async DAC ring** via `AudioEnqueue`,
+/// gated on the `AudioSink` cap at `sink`. Unlike [`audio_write`] this **does not
+/// block** for playback: it returns how many leading samples the ring accepted (fewer
+/// than offered when it's near full — the caller re-offers the tail; `0` means back off
+/// and let the drain catch up). `Err(Denied)` if the kernel refused (no `AudioSink`, or
+/// an over-long / bad range). Offer at most [`AUDIO_ENQUEUE_MAX`] per call.
+pub fn audio_enqueue(sink: usize, samples: &[i16]) -> Result<usize, Denied> {
+    // SAFETY: `ecall`; the kernel validates the `AudioSink` cap at a0 and the
+    // `(ptr, count)` range, copies the samples out, and returns the accepted count in
+    // a0 — `usize::MAX` if refused.
+    let ret = unsafe {
+        ecall(Syscall::AudioEnqueue, [sink, samples.as_ptr() as usize, samples.len(), 0, 0, 0, 0])
+    }[0];
+    if ret == usize::MAX { Err(Denied) } else { Ok(ret) }
+}
+
 /// Read up to `dst.len()` buffered console-input bytes into `dst`; returns how
 /// many were read (`0` if nothing is buffered — non-blocking). The input mirror
 /// of [`debug_write`] (the `ConsoleRead` syscall). A caller wanting a full line

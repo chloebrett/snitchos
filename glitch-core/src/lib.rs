@@ -46,6 +46,15 @@ fn sample_count(duration_ms: u32) -> u32 {
     (u64::from(duration_ms) * u64::from(FS_HZ) / 1000) as u32
 }
 
+/// How many samples to offer the async `AudioEnqueue` this turn: the remaining tail,
+/// capped at the syscall's per-call `max`. The kernel ring then accepts as many as fit
+/// and reports the count back, so the server advances by *that* and re-offers the rest
+/// — this only bounds the offer, back-pressure does the pacing.
+#[must_use]
+pub fn next_chunk_len(remaining: usize, max: usize) -> usize {
+    remaining.min(max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +95,20 @@ mod tests {
     fn refuses_a_supra_nyquist_frequency() {
         // A square needs ≥ 2 samples/period; freq == fs gives period 1.
         assert!(plan_play(Play { freq_hz: FS_HZ, duration_ms: 1000 }).is_none());
+    }
+
+    #[test]
+    fn a_chunk_is_capped_at_the_syscall_max() {
+        assert_eq!(next_chunk_len(1000, 128), 128, "a long tail is offered one max-sized chunk");
+    }
+
+    #[test]
+    fn the_final_chunk_is_the_remainder() {
+        assert_eq!(next_chunk_len(50, 128), 50, "the last chunk is what's left, not the cap");
+    }
+
+    #[test]
+    fn an_exhausted_stream_offers_a_zero_chunk() {
+        assert_eq!(next_chunk_len(0, 128), 0);
     }
 }

@@ -44,11 +44,31 @@ const AUDIO_RING_CAP: usize = 4096;
 static AUDIO_RING: crate::sync::Mutex<SampleRing<AUDIO_RING_CAP>> =
     crate::sync::Mutex::new(SampleRing::new());
 
+/// Whether the async audio feed is currently running (some hart's timer wheel has its
+/// audio deadline enabled). Latched on by the first [`enqueue`] of a stream, off when
+/// [`drain_one`] finds the ring idle — so the audio timer runs only while there's
+/// audio to play, and re-enabling doesn't reset the deadline on every enqueue.
+static AUDIO_FEEDING: AtomicBool = AtomicBool::new(false);
+
+/// The per-sample interval in timer ticks at the configured DAC rate — the audio
+/// deadline period for the timer wheel. `timebase / rate`, matching the pacing
+/// `configure` computes for the blocking path.
+fn audio_period_ticks() -> u64 {
+    let timebase = crate::trap::TIMEBASE_HZ.load(Ordering::Relaxed);
+    timebase / u64::from(DAC_RATE_HZ)
+}
+
 /// Enqueue samples into the async DAC ring, returning how many were accepted (fewer
 /// than offered when the ring is near full — back-pressure). Non-blocking: it never
-/// paces or touches MMIO, unlike [`play_samples`]. The timer drain feeds the DAC.
+/// paces or touches MMIO, unlike [`play_samples`]. On the first enqueue of a stream it
+/// brings the DAC up and turns on this hart's audio feed; the timer drain does the rest.
 pub fn enqueue(samples: &[i16]) -> usize {
-    AUDIO_RING.lock().push_slice(samples)
+    let accepted = AUDIO_RING.lock().push_slice(samples);
+    if accepted > 0 && !AUDIO_FEEDING.swap(true, Ordering::Relaxed) {
+        ensure_up();
+        crate::trap::enable_audio_feed(audio_period_ticks());
+    }
+    accepted
 }
 
 /// Cumulative audio under-runs — a missed DAC feed deadline (the ring was empty while
@@ -83,7 +103,13 @@ pub fn drain_one() {
             XRUNS.inc();
             XRUNS_PENDING.fetch_add(1, Ordering::Relaxed);
         }
-        DrainOutcome::Idle => {}
+        DrainOutcome::Idle => {
+            // The ring emptied with no active stream — the play is done. Turn the audio
+            // feed back off so the timer stops firing at the sample rate until the next
+            // stream (no idle 8 kHz overhead).
+            AUDIO_FEEDING.store(false, Ordering::Relaxed);
+            crate::trap::disable_audio_feed();
+        }
     }
 }
 

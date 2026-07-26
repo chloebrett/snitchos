@@ -3,17 +3,18 @@
 //!
 //! Holds an `AudioSink` cap and `RECV` on the shared endpoint. One kind of caller
 //! in v1: a client `call`s a [`Play`] request; glitch synthesizes it (the pure
-//! [`glitch_core::plan_play`] policy), streams the samples through the cap-gated
-//! `AudioWrite` syscall, and replies `Played`/`Refused`. Volume is the server's
-//! policy, so a client names only the note. See `plans/glitch.md` (Increment 5c).
+//! [`glitch_core::plan_play`] policy), feeds the samples into the kernel's **async DAC
+//! ring** via the cap-gated `AudioEnqueue` syscall (v2 — non-blocking, back-pressured),
+//! and replies `Played`/`Refused`. Volume is the server's policy, so a client names
+//! only the note. See `plans/glitch.md` and `plans/glitch-v2-async-ring.md`.
 
 #![no_std]
 
-use glitch_core::plan_play;
+use glitch_core::{next_chunk_len, plan_play};
 use glitch_proto::{Play, Reply};
 use snitchos_user::{
-    AUDIO_WRITE_MAX, Endpoint, Metric, audio_write, delegated_handle, register_counter, reply,
-    tracer,
+    AUDIO_ENQUEUE_MAX, Endpoint, Metric, audio_enqueue, delegated_handle, register_counter, reply,
+    tracer, yield_now,
 };
 
 /// The shared glitch endpoint, read as the first **delegated** cap. Matches
@@ -62,23 +63,32 @@ pub fn serve() -> ! {
     }
 }
 
-/// Synthesize `req` and stream it to the DAC in ≤[`AUDIO_WRITE_MAX`] chunks (the
-/// kernel's per-call cap). `Err` if the frequency is unsynthesizable, or the kernel
-/// refused a write (we don't hold the `AudioSink`, or a bad range).
+/// Synthesize `req` and feed it into the async DAC ring, ≤[`AUDIO_ENQUEUE_MAX`] samples
+/// per `AudioEnqueue`. Non-blocking with back-pressure: each call reports how many
+/// samples the ring accepted; unaccepted samples stay buffered and are re-offered, and
+/// when the ring is full ([`audio_enqueue`] accepts 0) glitch [`yield_now`]s so the
+/// timer drain can make room. `Err` if the frequency is unsynthesizable, or the kernel
+/// refused (we don't hold the `AudioSink`, or a bad range).
 fn emit(sink: usize, req: Play) -> Result<(), ()> {
-    let samples = plan_play(req).ok_or(())?;
-    let mut buf = [0i16; AUDIO_WRITE_MAX];
+    let mut samples = plan_play(req).ok_or(())?;
+    let mut buf = [0i16; AUDIO_ENQUEUE_MAX];
     let mut n = 0;
-    for s in samples {
-        buf[n] = s;
-        n += 1;
-        if n == AUDIO_WRITE_MAX {
-            audio_write(sink, &buf).map_err(|_| ())?;
-            n = 0;
+    loop {
+        while n < AUDIO_ENQUEUE_MAX {
+            let Some(s) = samples.next() else { break };
+            buf[n] = s;
+            n += 1;
         }
+        if n == 0 {
+            return Ok(()); // synthesis exhausted and everything accepted
+        }
+        let offer = next_chunk_len(n, AUDIO_ENQUEUE_MAX);
+        let accepted = audio_enqueue(sink, &buf[..offer]).map_err(|_| ())?;
+        if accepted == 0 {
+            yield_now(); // ring full — let the drain catch up before re-offering
+            continue;
+        }
+        buf.copy_within(accepted..n, 0); // keep the unaccepted tail for next time
+        n -= accepted;
     }
-    if n > 0 {
-        audio_write(sink, &buf[..n]).map_err(|_| ())?;
-    }
-    Ok(())
 }
