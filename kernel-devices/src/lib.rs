@@ -26,6 +26,7 @@ pub mod iomux;
 pub mod plic;
 pub mod pwmdac;
 pub mod ramfb;
+pub mod samplering;
 pub mod syscrg;
 pub mod uart;
 pub mod virtio;
