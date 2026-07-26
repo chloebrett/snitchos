@@ -35,11 +35,12 @@ checks the whole workspace shares), and its `test` blocks pass.
       descent, `Result`/`?`.
 - [x] 2. `bank.st` — ledger with `mut` accounts, `uses Telemetry` + `uses
       FsWrite` audit log, capability-gated `on` methods.
-- [ ] 3. `vm.st` — toy stack-based bytecode interpreter (`sum Instr`),
+- [x] 3. `vm.st` — toy stack-based bytecode interpreter (`sum Instr`),
       tail-recursive step function.
-- [ ] 4. `graph.st` — BFS/DFS/topo-sort/connected-components over
-      `Map<Str, List<Str>>`, no mutation.
-- [ ] 5. `markov.st` — Markov-chain text generator, seeded LCG, `uses
+- [x] 4. `graph.st` — BFS/DFS/topo-sort/connected-components over
+      `Map<Str, List<Str>>`, no mutation. (Landed as `List<AdjEntry>`, not
+      `Map` — see findings doc, entry 1.)
+- [x] 5. `markov.st` — Markov-chain text generator, seeded LCG, `uses
       Telemetry` span.
 - [ ] 6. `sched.st` — priority vs round-robin task scheduler simulation via
       `contract Schedulable`.

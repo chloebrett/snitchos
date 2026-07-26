@@ -280,6 +280,158 @@ now.
   row — and it works, exactly as `natives.rs`'s `shout()/main()` refusal
   test implies from the other direction.
 
+### 3. vm.st
+
+- Lines: 242. Tests: 16 (16 pass).
+- What it exercises: a `sum`-typed instruction set, a self-tail-recursive
+  `step` driver, `Result`-threaded error handling, a named `prod Popped`
+  used instead of `at2`-style tuple access (see json.st's entry — first
+  payoff of that "prefer a named product once a pair is read more than
+  once" lesson).
+
+- **Fixed (2026-07-26): a real interpreter bug, not a documentation one —
+  `Env::bind` reset the self-tail-call marker on every `let`/match-binding,
+  silently disabling the tail-call trampoline for almost any realistic
+  recursive function.** This is the most consequential finding in the batch
+  so far, more so than the `mut`-aliasing doc bug, because it's a
+  correctness/scalability bug in the shipped interpreter, not a stale
+  sentence in a design doc.
+
+  - **Symptom:** `step`'s loop over `sumTo(5)`'s ~50-odd instructions faulted
+    with `"call stack too deep"` (`MAX_CALL_DEPTH = 48`, `env.rs`) even
+    though `step(prog, state) = match … { … => step(prog, next) }` is
+    exactly the self-tail-recursive shape `interp.rs`'s own tests
+    (`self_tail_recursive_function_via_match_runs_in_bounded_stack`) prove
+    gets trampolined for a *million* iterations.
+  - **Isolated by bisection** (`cargo nextest run` in a loop, narrowing a
+    scratch repro added to `stitch/tests/examples.rs`): the difference
+    between the working million-iteration test and my failing ~50-iteration
+    one wasn't iteration count, nesting depth, or calling a helper function
+    from the match *subject* — it was that every one of my match arms
+    **bound a variable** (`Some(instr)`, `Ok(Continue(next))`, or a plain
+    `let`), where the passing stdlib tests use a wildcard `_` for their
+    recursive arm. `try_match`'s `Pattern::Binding` arm calls `env.extend`,
+    which calls `Env::bind`; `Pattern::Wildcard` just clones the env.
+  - **Root cause** (`env.rs::bind`, the function backing `extend`/
+    `extend_mut`): hardcoded `self_closure: None` on every call. `bind` runs
+    for *every* local variable binding — a `let`, or a pattern that names
+    rather than discards a value — not just at real call boundaries. Any
+    binding between the start of a self-tail-recursive function's body and
+    its tail call wiped the "I am still executing my own tail position"
+    marker, so the tail call fell back to an ordinary (stack-growing) call.
+    Given that a wildcard-only recursive arm is the unusual case — almost
+    every real recursive function destructures its next state by name, or
+    binds an intermediate `let` — this bug was live for close to the entire
+    space of realistic tail-recursive Stitch programs; the existing test
+    suite's `count(n) = match n { 0 => 0  _ => count(n-1) }`-shaped tests
+    happened to dodge it by using `_`.
+  - **Fix**: `self_closure: self.self_closure.clone()` in `bind`, preserving
+    (not resetting) the marker across a local binding — one line. The three
+    *other* `self_closure: None` sites in `env.rs` (`globals_only`,
+    `sibling_module`, `extend_cell`) are correct as-is: each represents a
+    genuine call-boundary-like context (either immediately overwritten by
+    `with_self_closure` during call setup, or a real scope change), verified
+    by reading every call site before touching only the one that was wrong.
+  - **Verification**: a new regression test,
+    `interp.rs::self_tail_recursive_function_survives_a_let_binding_before_the_call`
+    (same shape as the two existing trampoline tests, but with a `let`
+    binding — and separately a named match arm — ahead of the tail call;
+    both were the RED case before the fix). Full `cargo nextest run -p
+    stitch --features testing` (811 tests), the `no_std` riscv64 lib target,
+    and `cargo clippy -p stitch --lib` all clean after.
+  - This is exactly the kind of bug that stays invisible in a codebase's own
+    test suite forever: every existing tail-recursive stdlib/prelude
+    function either doesn't recurse deep enough to need the trampoline, or
+    happens to use `_`. It only surfaces once a program recurses **and**
+    binds — i.e., once someone writes an actually-realistic recursive
+    algorithm over actually-nontrivial input. json.st's `scanDigits`/
+    `scanStr`/`scanArr` (recursive, binding-heavy) never hit it only because
+    every test string was a handful of characters.
+
+- **A second, unrelated bug — in my own `sumTo` program, not the
+  interpreter — caught by simulating the instruction list in Python outside
+  Stitch entirely, after the depth fix stopped masking it.** Once `step`
+  could actually run to completion, `run(sumTo(5))` came back `Ok(0)`
+  instead of `Ok(15)`. The loop's exit path assumed the spent (zero)
+  counter would be on *top* of the stack for a plain `Pop`, but the loop
+  invariant (`[acc, counter]`, established once and never actually
+  re-derived at the exit point) puts `acc` on top there — so the original
+  `Pop` was discarding the accumulator and keeping the dead counter. Fixed
+  by inserting a `Swap` before the final `Pop`. Two lessons: (1) a stack
+  machine's control-flow correctness is exactly the kind of thing that
+  *looks* obviously right from the instruction list and is trivially wrong
+  in a way native tests over a couple of small `n` values didn't catch
+  either (`sumTo(0)` and `sumTo(1)` both happen to reach the buggy exit with
+  an empty-enough stack that the bug's symptom — silently answering `0` —
+  coincides with one of them, so weak coverage could have shipped this);
+  (2) when native-test debugging stalls, dropping to an *external*,
+  from-scratch reimplementation of the same semantics in a throwaway script
+  is a fast, cheap way to get a second, independent opinion on "what should
+  this actually compute" — cheaper here than continuing to hand-trace
+  Stitch source by eye, which is exactly how the *first* version of this
+  bug (an earlier, different ordering mistake in `Swap` itself) was caught,
+  and exactly how this *second* one wasn't, until the tooling changed.
+
+### 4. graph.st
+
+- Lines: 246. Tests: 13 (13 pass). First program in the batch that passed
+  its gate on the very first run — every earlier finding (association lists
+  over `Map`, named `prod`s over tuples, parenthesize `(x |> f)?`, watch for
+  a bare `(` starting a statement, `mut`'s real semantics) applied cleanly
+  from the start instead of being discovered mid-file. That's the payoff
+  this findings doc is for.
+- What it exercises: `bfs`/`dfs`/`topoSort`/`connectedComponents` as
+  worklist loops (queue vs. stack vs. Kahn's-algorithm frontier) — all
+  self-tail-recursive with bindings ahead of the tail call, deliberately
+  exercising the `Env::bind` fix from vm.st's entry on a program that
+  actually needed it to be correct (a graph with a few hundred nodes would
+  have blown `MAX_CALL_DEPTH` before that fix).
+- No new language friction found. Worth recording as a data point on its
+  own: once the association-list-over-`Map` and named-`prod`-over-tuple
+  patterns are established habits (this file's `Edge`/`AdjEntry`/`Degree`),
+  and once the `?`/`|>` precedence and maximal-munch gotchas are known to
+  watch for, a `fold`/`filter`/`map`-heavy program over immutable data reads
+  and writes essentially like idiomatic Rust or F# — the batch's friction so
+  far has been concentrated in `mut`-heavy state (bank.st) and hand-rolled
+  parsing/interpretation (json.st, vm.st), not in this "ordinary functional
+  data processing" register.
+
+### 5. markov.st
+
+- Lines: 177. Tests: 10 (10 pass).
+- What it exercises: `use <-` block sugar (`span("markov.generate")`, first
+  use in the batch — `use <-` itself was already shipped/validated via
+  `fs-image/primes.st`, just not exercised here yet), direct tuple
+  pattern-matching (`match pair { (w1, w2) => … }`, distinct from the `at2`
+  workaround — see the file's own header comment for why that's not a
+  contradiction), a hand-rolled LCG as pure state-in-state-out (`Rng`/
+  `Draw`), and a second, cleaner instance of the association-list-over-`Map`
+  pattern (`List<Transition>`).
+
+- **`take`/`takeWhile`/`drop`/`dropWhile` are `Seq`-only — they fault on a
+  `List`, unlike `fold`/`filter`/`map`, which special-case both.**
+  `buildChain` reached for `drop(words, 1)` (the obvious way to write
+  "`words`, shifted by one, for zipping into bigrams") and got `"drop
+  expects a Seq, got List"`. `natives.rs` confirms: `native_take`/
+  `native_take_while`/`native_drop`/`native_drop_while` all hard-`match`
+  on `Value::Seq` and error otherwise, while `native_map`/(presumably
+  `filter`/`fold`, same shape) check `if let Value::Seq(_) = collection`
+  first and fall through to a `List` path if not. There is also no `List ->
+  Seq` conversion native (`toList` goes the other direction only), so
+  there's no bridge — a `List` that needs `drop` semantics has to reach for
+  a `List`-native equivalent instead. Fixed here with `List.removeAt(words,
+  0)` (removing index 0 *is* "drop 1"). Filed alongside the `Map`
+  limitation as a second "the eager/lazy split isn't uniform across the
+  stdlib" finding — worth being alert for with `take`/`takeWhile` too, even
+  though neither came up in this file.
+
+- Otherwise clean — the LCG and generation loop worked exactly as
+  hand-simulated in a scratch Python script before writing the `.st` (same
+  methodology as vm.st's entry: cheaper to get a second opinion from an
+  independent reimplementation than to keep re-deriving arithmetic by eye),
+  and every expected sequence in the tests matched the interpreter's actual
+  output on the first run once the `drop`/`use List` fixes landed.
+
 - **Not tested in-language, and worth recording why**: wanted a `bank.st`
   test proving a function *without* `uses FsWrite` is refused when it
   tries `fsWrite` (the negative case for the capability-boundary finding
