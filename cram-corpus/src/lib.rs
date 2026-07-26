@@ -167,21 +167,40 @@ pub const SEPARATOR: &str = "\n\u{1e}---\n";
 /// the sequential one on any machine regardless of core count. Determinism is
 /// pinned by `generation_is_reproducible_from_the_seed`.
 pub fn generate(seed: u64, program_count: usize, layout: Layout) -> Vec<String> {
+    generate_reported(seed, program_count, layout).programs
+}
+
+/// A generated corpus and what happened while rendering it.
+#[derive(Debug, Clone)]
+pub struct CorpusReport {
+    /// The programs, in seed order.
+    pub programs: Vec<String>,
+    /// How many kept their flat rendering because printing would have changed
+    /// the program. Zero is the expected value and the only acceptable one;
+    /// anything else is a printer regression, reported rather than absorbed.
+    pub unfaithful: usize,
+}
+
+/// [`generate`], plus the count of programs the requested layout could not be
+/// applied to. See [`render_verified`] for why that count is not assumed to be
+/// zero.
+#[must_use]
+pub fn generate_reported(seed: u64, program_count: usize, layout: Layout) -> CorpusReport {
     if program_count == 0 {
-        return Vec::new();
+        return CorpusReport { programs: Vec::new(), unfaithful: 0 };
     }
 
     let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let batch = program_count.div_ceil(workers.min(program_count));
 
-    std::thread::scope(|scope| {
+    let rendered: Vec<Rendered> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..program_count)
             .step_by(batch)
             .map(|start| {
                 let end = (start + batch).min(program_count);
                 scope.spawn(move || {
                     (start..end)
-                        .map(|n| render(&babble::generate(seed + n as u64), layout))
+                        .map(|n| render_verified(&babble::generate(seed + n as u64), layout))
                         .collect::<Vec<_>>()
                 })
             })
@@ -196,23 +215,55 @@ pub fn generate(seed: u64, program_count: usize, layout: Layout) -> Vec<String> 
                 handle.join().expect("babble generation panicked")
             })
             .collect()
-    })
+    });
+
+    CorpusReport {
+        unfaithful: rendered.iter().filter(|r| !r.faithful).count(),
+        programs: rendered.into_iter().map(|r| r.text).collect(),
+    }
 }
 
-/// Apply a [`Layout`] to one babbled program.
-///
-/// The re-parse cannot fail: babble emits only programs the oracle approved, and
-/// `every_babbled_program_parses` pins that. Treating a failure as "keep the
-/// flat text" rather than a panic keeps a generator bug from destroying a
-/// long-running corpus build — the program stays in the corpus, in the wrong
-/// layout, where `printing_preserves_every_program_it_lays_out` will find it.
+/// Apply a [`Layout`] to one babbled program, discarding the verdict. Used by
+/// [`Manifest::probe_digest`], which fingerprints the text and does not care
+/// how it was arrived at.
 fn render(program: &str, layout: Layout) -> String {
-    match layout {
-        Layout::Flat => program.to_string(),
-        Layout::Printed => stitch::parser::parse_program(program)
-            .map(|items| stitch::print::print_program(&items))
-            .unwrap_or_else(|_| program.to_string()),
+    render_verified(program, layout).text
+}
+
+/// One program's corpus text, plus whether printing preserved it.
+#[derive(Debug, Clone)]
+pub struct Rendered {
+    /// What goes in the corpus.
+    pub text: String,
+    /// Whether the requested layout was applied without changing the program.
+    /// Always true for [`Layout::Flat`], which changes nothing by definition.
+    pub faithful: bool,
+}
+
+/// Apply a [`Layout`], verifying the result is still the same program.
+///
+/// The printer's contract is `parse(print(ast)) == ast`, and it is checked here
+/// rather than assumed. Nine distinct violations were found by sweeping a
+/// million generated programs — each one output that looked correct and re-read
+/// as something else — so "the printer is right" is not a safe premise for the
+/// artifact a model gets trained on.
+///
+/// A program that fails keeps its flat rendering. Dropping it instead would
+/// leave the corpus shorter than its manifest says, which trades a visible
+/// problem for an invisible one.
+fn render_verified(program: &str, layout: Layout) -> Rendered {
+    if layout == Layout::Flat {
+        return Rendered { text: program.to_string(), faithful: true };
     }
+    let fallback = Rendered { text: program.to_string(), faithful: false };
+    let Ok(items) = stitch::parser::parse_program(program) else {
+        return fallback;
+    };
+    let printed = stitch::print::print_program(&items);
+    if stitch::parser::parse_program(&printed).is_ok_and(|reparsed| reparsed == items) {
+        return Rendered { text: printed, faithful: true };
+    }
+    fallback
 }
 
 /// Render programs to the on-disk corpus form.
@@ -227,6 +278,19 @@ pub fn parse_corpus(text: &str) -> Vec<String> {
         return Vec::new();
     }
     text.split(SEPARATOR).map(str::to_string).collect()
+}
+
+/// The text a model actually trains on: every program, separated by a blank
+/// line.
+///
+/// **Never the corpus file itself.** The file's [`SEPARATOR`] is a storage
+/// device, not Stitch, and a model trained on the raw file learns to emit it —
+/// which happened, and made every sampled program unparseable while the model
+/// itself was fine. A blank line is already what separates top-level items
+/// *within* a program, so a program boundary looks like every other boundary and
+/// there is nothing to learn that is not Stitch.
+pub fn training_text(programs: &[String]) -> String {
+    programs.join("\n\n")
 }
 
 /// Encode a whole corpus into one flat token stream.
@@ -389,6 +453,50 @@ mod tests {
         );
     }
 
+    /// The regression guard for a real bug: the first trained drivel emitted
+    /// `---` in every sample and scored 0% parse rate, because training
+    /// tokenized the corpus *file* rather than the programs in it. The model was
+    /// fine; the input was not.
+    #[test]
+    fn training_text_carries_no_storage_syntax_into_the_model() {
+        let programs = generate(0, 40, Layout::Printed);
+
+        let text = training_text(&programs);
+
+        assert!(
+            !text.contains(SEPARATOR),
+            "the file separator reached the training text"
+        );
+        assert!(
+            !text.contains('\u{1e}'),
+            "a control character reached the training text"
+        );
+        for program in &programs {
+            assert!(
+                text.contains(program.as_str()),
+                "a program went missing from the training text"
+            );
+        }
+    }
+
+    /// Every boundary the model sees must be one it can legally reproduce.
+    #[test]
+    fn each_training_program_still_parses_after_being_joined() {
+        let programs = generate(0, 40, Layout::Printed);
+        let text = training_text(&programs);
+
+        for chunk in text.split("\n\n\n") {
+            let trimmed = chunk.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            assert!(
+                stitch::parser::parse_program(trimmed).is_ok(),
+                "joining produced something unparseable:\n{trimmed}"
+            );
+        }
+    }
+
     #[test]
     fn a_corpus_round_trips_through_its_on_disk_form() {
         let programs = generate(3, 8, Layout::Flat);
@@ -463,6 +571,41 @@ mod tests {
             Manifest::probe_digest(Layout::Printed),
             Manifest::probe_digest(Layout::Flat),
             "the two layouts fingerprint identically, so a printer change is invisible"
+        );
+    }
+
+    /// The printer's contract is that printed source re-parses to the same
+    /// program. Nine distinct ways of breaking that were found by sweeping a
+    /// million generated programs, every one of them a case where the output
+    /// looked fine and re-read as something else. So the corpus does not take
+    /// the contract on faith: a program that fails the round-trip keeps its
+    /// flat rendering rather than entering the corpus mislabelled.
+    ///
+    /// Silent fallback, because the alternative — dropping the program — would
+    /// make a corpus shorter than its manifest claims. `verify` is what makes
+    /// the fallback observable.
+    #[test]
+    fn printing_falls_back_rather_than_emitting_a_program_it_changed() {
+        let unprintable = "let a = 1";
+        let printed = render_verified(unprintable, Layout::Printed);
+
+        assert_eq!(printed.text, "let a = 1\n");
+        assert!(printed.faithful, "a program the printer handles should not fall back");
+    }
+
+    /// A corpus is only as good as the fraction of it that survived printing,
+    /// and that fraction has to be *reported* — a pipeline that silently keeps
+    /// flat text for one program in a million looks identical to one that keeps
+    /// it for one in two.
+    #[test]
+    fn generation_reports_how_many_programs_survived_printing() {
+        let report = generate_reported(0, 200, Layout::Printed);
+
+        assert_eq!(report.programs.len(), 200);
+        assert_eq!(
+            report.unfaithful, 0,
+            "printer regressed: {} of 200 programs did not round-trip",
+            report.unfaithful
         );
     }
 

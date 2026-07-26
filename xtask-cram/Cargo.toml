@@ -3,6 +3,8 @@ name = "xtask-cram"
 version = "0.0.1"
 edition = "2024"
 publish = false
+# Training is the common case; the analysis bins are opt-in by name.
+default-run = "xtask-cram"
 
 # The `cram`-linked half of xtask, split for the same reason `xtask-itest` is
 # split from `xtask`: an edit to the trainer should recompile it once, for this
@@ -13,6 +15,8 @@ cram = { path = "../cram" }
 cram-corpus = { path = "../cram-corpus" }
 kvetch-model = { path = "../kvetch-model" }
 kvetch-vocab = { path = "../kvetch-vocab" }
+# The parser that judges whether sampled output is legal Stitch.
+stitch = { path = "../stitch" }
 
 [lints]
 workspace = true

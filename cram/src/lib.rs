@@ -123,6 +123,14 @@ mod cblas {
 #[cfg(target_vendor = "apple")]
 impl Gemm for AccelerateGemm {
     fn sgemm(&self, spec: GemmSpec, a: &[f32], b: &[f32], c: &mut [f32]) {
+        // BLAS rejects a zero leading dimension outright rather than treating an
+        // empty multiply as a no-op, so degenerate shapes are handled here. They
+        // arise legitimately — sampling from an empty prompt is zero positions.
+        if spec.m == 0 || spec.n == 0 || spec.k == 0 {
+            c.fill(0.0);
+            return;
+        }
+
         let flag = |transposed: bool| {
             if transposed {
                 cblas::TRANS

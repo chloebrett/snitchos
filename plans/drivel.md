@@ -180,6 +180,76 @@ Consequences, in order of importance:
    programs and ~33 minutes of generation — affordable, and now the sizing
    question for increment 5.
 
+## The first trained drivel, and what it caught (2026-07-26)
+
+**Run 1**: 52,000 steps, 35 min, loss 6.93 → 1.93, 50.4k tok/s. Unconstrained
+parse rate: **0/200**.
+
+The samples said why, immediately:
+
+```
+prod line()
+contract span<port, buffer, buffer> { }
+sum delta = task
+use edge
+```
+
+That is competent Stitch. Every sample failed for one reason: it also emitted
+`---`, the **corpus separator**. Training tokenized the corpus *file* rather than
+the programs inside it, so `\n\x1e---\n` was in the stream and the model learned
+it. The vocab was built from parsed programs and the token stream was not — two
+paths that should have shared one.
+
+**15% of the training corpus was separator** (26.75M tokens → 22.75M once fixed).
+A sixth of the compute went into learning a delimiter.
+
+Fixed by parsing once and feeding both paths, with programs joined by a **blank
+line** — already what separates top-level items *within* a babbled program, so a
+program boundary looks like every other boundary and there is nothing to learn
+that is not Stitch.
+
+**The evaluation earned its keep on its first run.** A bare `0.0%` would have
+sent someone hunting through the backward pass, which was correct all along.
+Printing three samples beside the number turned a mystery into an obvious bug in
+seconds — worth keeping in every eval this ladder grows.
+
+## Increment 5 result: drivel learns Stitch's grammar (2026-07-26)
+
+**Run 2**, separator-free: 52,000 steps, 35.5 min, 50k tok/s, loss 6.93 → 2.26.
+
+| Measure | Rate |
+|---|---|
+| **Unconstrained parse, as sampled** | **170/200 = 85.0%** |
+| **Unconstrained parse, complete items** | **182/200 = 91.0%** |
+
+The gap is the token budget: a fixed 96-token sample often stops mid-construct,
+which is a property of the harness rather than the model. Both are reported so
+neither can be quoted as the other. ~9% are genuine model errors.
+
+**A 918K-parameter model, trained for 35 minutes, writes syntactically valid
+Stitch ~9 times in 10 with no grammar mask.** Samples:
+
+```
+contract buffer { }
+sum entry<price> = field(@) | depth
+let price = not @ or ().token
+ext sum count<total> = price
+on task -> @ -> @ { }
+```
+
+**The answer to the ceiling probe is yes** — a model this small learns the
+grammar when data is not the constraint. That was the gate on increments 2/3/6
+being worth attempting, and it is now open.
+
+### Loss went *up* between run 1 and run 2, and run 2 is far better
+
+Run 1 reached 1.93; run 2 reached 2.26 and went from 0% to 91% parse rate. The
+separator was cheap-to-predict filler — 15% of tokens, nearly free to model —
+that dragged the average down. **Loss is not comparable across corpora**, only
+within one. Worth remembering before any rung is compared to another on loss
+alone; the ladder's eval gates are right to be defined on held-out task metrics
+instead.
+
 ## Order of execution (not the increment numbering)
 
 Increments are units of work; this is the order they land in. **The

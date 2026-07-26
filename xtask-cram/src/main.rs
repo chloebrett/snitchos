@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use cram::AccelerateGemm;
 use cram::run::{Progress, TrainingConfig, train};
-use cram_corpus::{Layout, Manifest, parse_corpus, render_corpus, tokenize};
+use cram_corpus::{Layout, Manifest, parse_corpus, render_corpus, tokenize, training_text};
 use kvetch_model::Rung;
 use kvetch_vocab::Vocab;
 
@@ -51,8 +51,13 @@ fn main() -> std::io::Result<()> {
     };
 
     let corpus = load_corpus(options.programs, options.layout)?;
-    let vocab = build_vocab(&corpus, options.vocab_size);
-    let tokens = encode(&vocab, &corpus);
+    // Train and tokenize on the *programs*, never the corpus file. The file's
+    // `\n\x1e---\n` separators are not Stitch, and a model trained on them
+    // learns to emit them — which it did, and every sampled program was legal
+    // Stitch interrupted by a delimiter that is not.
+    let programs = parse_corpus(&corpus);
+    let vocab = build_vocab(&programs, options.vocab_size);
+    let tokens = encode(&vocab, &programs);
 
     let checkpoint_dir = PathBuf::from(CHECKPOINT_DIR);
     std::fs::create_dir_all(&checkpoint_dir)?;
@@ -80,11 +85,16 @@ fn main() -> std::io::Result<()> {
     );
 
     std::fs::write(&checkpoint_path, model.encode())?;
+    // Beside the weights, always: they index this token table, and loading them
+    // against a different one produces a model that runs and is nonsense.
+    let vocab_path = checkpoint_dir.join(format!("{stem}.vocab"));
+    std::fs::write(&vocab_path, vocab.encode_vocab())?;
 
     println!(
-        "\ndone in {:.1}s\n  checkpoint {}\n  curve      {}",
+        "\ndone in {:.1}s\n  checkpoint {}\n  vocab      {}\n  curve      {}",
         started.elapsed().as_secs_f64(),
         checkpoint_path.display(),
+        vocab_path.display(),
         curve_path.display()
     );
     Ok(())
@@ -222,9 +232,8 @@ fn load_corpus(programs: usize, layout: Layout) -> std::io::Result<String> {
     Ok(text)
 }
 
-fn build_vocab(corpus: &str, size: usize) -> Vocab {
+fn build_vocab(programs: &[String], size: usize) -> Vocab {
     let started = Instant::now();
-    let programs = parse_corpus(corpus);
     let texts: Vec<&str> = programs.iter().map(String::as_str).collect();
     let vocab = Vocab::train(&texts, size);
 
@@ -241,14 +250,22 @@ fn build_vocab(corpus: &str, size: usize) -> Vocab {
     vocab
 }
 
-fn encode(vocab: &Vocab, corpus: &str) -> Vec<u16> {
+/// One flat token stream over every program.
+///
+/// The join lives in [`cram_corpus::training_text`], not here: this file having
+/// its own copy of "how programs become training text" is precisely how the
+/// separator bug happened — `build_vocab` used the parsed programs while this
+/// path used the raw corpus file, and nothing could test either.
+fn encode(vocab: &Vocab, programs: &[String]) -> Vec<u16> {
     let started = Instant::now();
-    let tokens = tokenize(vocab, corpus);
+    let text = training_text(programs);
+    let tokens = tokenize(vocab, &text);
+
     println!(
         "tokens     {} in {:.1}s ({:.2} bytes/token)",
         tokens.len(),
         started.elapsed().as_secs_f64(),
-        corpus.len() as f64 / tokens.len() as f64
+        text.len() as f64 / tokens.len() as f64
     );
     tokens
 }

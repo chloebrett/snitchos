@@ -268,9 +268,81 @@ pub fn train<G: Gemm + Sync>(
     Model::new(model_config, vocab, weights).expect("weight count is unchanged by training")
 }
 
+/// Draw `max_tokens` tokens from `model`, continuing `prompt`.
+///
+/// **Unconstrained** — no oracle mask. That is the whole point of the
+/// grammar-learnability probe: masked output parses by construction and would
+/// measure nothing about the model. See `plans/drivel.md`.
+///
+/// Sampled rather than greedy, because greedy decoding yields exactly one
+/// program however many times you run it, and `parse%` needs a distribution.
+/// `temperature` scales the logits before the draw; the `seed` makes the whole
+/// sample reproducible.
+///
+/// Cost is `O(max_tokens²)` — every step re-runs the whole prefix, since there
+/// is no KV cache yet. Fine for a few hundred samples; the cache is the fix when
+/// it stops being.
+pub fn sample<G: Gemm>(
+    model: &Model,
+    gemm: &G,
+    prompt: &[u16],
+    max_tokens: usize,
+    temperature: f32,
+    seed: u64,
+) -> Vec<u16> {
+    let vocab = model.vocab();
+    let mut tokens = prompt.to_vec();
+
+    for step in 0..max_tokens {
+        let logits = model.forward_with(&tokens, gemm);
+        let last = &logits[logits.len() - vocab..];
+
+        let mut probabilities: Vec<f32> = last.iter().map(|z| z / temperature).collect();
+        softmax_in_place(&mut probabilities);
+
+        let draw = splitmix64(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) ^ step as u64);
+        tokens.push(pick(&probabilities, draw));
+    }
+
+    tokens
+}
+
+/// Inverse-CDF sample from `probabilities` using the low 24 bits of `draw`.
+///
+/// Falls back to the last index only when floating-point error leaves the
+/// cumulative sum a hair under the target, which is a rounding artifact rather
+/// than a real outcome.
+fn pick(probabilities: &[f32], draw: u64) -> u16 {
+    let target = (draw >> 40) as f32 / 16_777_216.0;
+    let mut cumulative = 0.0;
+
+    for (index, probability) in probabilities.iter().enumerate() {
+        cumulative += probability;
+        if cumulative >= target {
+            return index as u16;
+        }
+    }
+
+    (probabilities.len() - 1) as u16
+}
+
+fn softmax_in_place(row: &mut [f32]) {
+    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut total = 0.0;
+
+    for value in row.iter_mut() {
+        *value = (*value - max).exp();
+        total += *value;
+    }
+    for value in row.iter_mut() {
+        *value /= total;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kvetch_model::{ModelConfig, NaiveGemm};
 
     fn schedule() -> TrainingConfig {
         TrainingConfig {
@@ -279,6 +351,38 @@ mod tests {
             learning_rate: 1.0,
             ..TrainingConfig::default()
         }
+    }
+
+    #[test]
+    fn sampling_is_reproducible_and_stays_inside_the_vocab() {
+        let config = ModelConfig {
+            d_model: 8,
+            layers: 1,
+            heads: 2,
+            ffn: 16,
+        };
+        let vocab = 11;
+        let model = Model::new(config, vocab, pseudo_random_weights(config.param_count(vocab), 3))
+            .expect("weight count matches");
+
+        let drawn = sample(&model, &NaiveGemm, &[1, 2], 6, 1.0, 17);
+
+        assert_eq!(drawn.len(), 8, "prompt plus one token per step");
+        assert_eq!(&drawn[..2], &[1, 2], "the prompt must survive verbatim");
+        assert!(
+            drawn.iter().all(|&token| (token as usize) < vocab),
+            "sampled a token outside the vocab: {drawn:?}"
+        );
+        assert_eq!(
+            drawn,
+            sample(&model, &NaiveGemm, &[1, 2], 6, 1.0, 17),
+            "same seed must give the same sample"
+        );
+        assert_ne!(
+            drawn,
+            sample(&model, &NaiveGemm, &[1, 2], 6, 1.0, 18),
+            "a different seed should explore elsewhere"
+        );
     }
 
     #[test]

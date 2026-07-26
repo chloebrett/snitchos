@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use cram_corpus::{Layout, Manifest, generate, parse_corpus, render_corpus};
+use cram_corpus::{Layout, Manifest, generate_reported, parse_corpus, render_corpus};
 
 const DEFAULT_DIR: &str = "corpora";
 
@@ -41,8 +41,9 @@ fn main() -> std::io::Result<()> {
     }
 
     let started = Instant::now();
-    let programs = generate(seed, count, layout);
+    let corpus = generate_reported(seed, count, layout);
     let elapsed = started.elapsed();
+    let programs = corpus.programs;
 
     std::fs::create_dir_all(&dir)?;
     std::fs::write(&corpus_path, render_corpus(&programs))?;
@@ -59,6 +60,10 @@ fn main() -> std::io::Result<()> {
     )?;
 
     report("generated", &corpus_path, &programs, Some(elapsed));
+    // A printer that changes a program is a correctness bug in the corpus, not
+    // a statistic — so it is stated on its own line, and stated even at zero,
+    // because "no line appeared" and "the check did not run" look the same.
+    println!("  {} programs kept the flat rendering (printer round-trip failed)", corpus.unfaithful);
     Ok(())
 }
 
