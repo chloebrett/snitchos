@@ -14,6 +14,7 @@ use std::io::{BufRead, BufReader};
 use stitch::gate::{self, Outcome};
 
 pub mod prompt;
+pub mod recipe;
 
 /// A model that can answer a system+user pair. The trait exists so every stage
 /// below it is testable with no model present.
@@ -28,10 +29,14 @@ pub trait Model {
     /// `on_chunk` returns `false` to stop generation early — which is how the
     /// guard abandons a candidate the instant it becomes unrecoverable instead
     /// of paying for the rest of it.
+    /// `prefill` is text the assistant is treated as having already written, so
+    /// generation *continues* it rather than starting over. Empty for a fresh
+    /// candidate; the last-good prefix when a correction is rewinding.
     fn complete(
         &self,
         system: &str,
         user: &str,
+        prefill: &str,
         on_chunk: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, String>;
 }
@@ -164,11 +169,61 @@ pub struct Run {
     /// Streamed fragments, which is one per token — the basis for tok/s, and so
     /// for whether a 500k-token corpus is an afternoon or a week.
     pub tokens: usize,
-    /// Generation was stopped early because the program became unrecoverable.
-    /// Only ever set by [`run_once_guarded`].
+    /// Correction ran out of budget. Under [`run_once_corrected`] the program
+    /// still ran to completion afterwards — this records that the guard gave
+    /// up, not that generation was cut short. [`run_once_guarded`] does cut it
+    /// short, and sets this too.
     pub abandoned: bool,
+    /// Every rewind, in order.
+    pub corrections: Vec<Correction>,
     pub outcome: Outcome,
 }
+
+/// One rewind: what the model wanted to write, what it wrote instead, and the
+/// program it was writing into.
+///
+/// This is the by-product worth more than the corpus. Each row is a labelled
+/// pair — *this construct is what the model reaches for, this is what the
+/// language actually permits* — which is simultaneously a diagnostic (which
+/// features does it systematically get wrong?), something to visualise, and the
+/// repair-trace training data `docs/kvetch-rl-design.md` §5 wants but expected
+/// to have to manufacture.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Correction {
+    /// The valid program immediately before the rejected text — the state the
+    /// model was in when it made the choice. Trimmed to the tail, because the
+    /// preceding two hundred lines are not what explains the slip.
+    pub context: String,
+    /// The text the oracle refused. **What the model wanted to say.**
+    pub discarded: String,
+    /// What it produced on resume, with the same prefix and one more draw.
+    pub replacement: String,
+    /// Chunks thrown away. 1 unless the model repeated itself at the same spot,
+    /// in which case the rewind reached further.
+    pub depth: usize,
+}
+
+/// Render control characters visibly, so a one-line marker is unambiguous
+/// about what it is quoting. A rewind has already printed its text to the
+/// terminal as real newlines; naming it again as `ext Time = Int\n` makes clear
+/// which bytes are being discarded.
+#[must_use]
+pub fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// How much preceding program to keep with a correction. Enough to see the
+/// construct being written, not so much that the interesting part is buried.
+const CORRECTION_CONTEXT: usize = 240;
 
 /// One row of a batch manifest.
 ///
@@ -178,6 +233,9 @@ pub struct Run {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CandidateRecord {
     pub index: usize,
+    /// Which recipe produced it — without this a batch is a bag of programs
+    /// with no way to ask which axes actually yield.
+    pub domain: String,
     /// `empty` | `parse` | `type` | `tests` | `ok`.
     pub stage: String,
     /// The gate's own message — the raw material for a repair trace.
@@ -186,6 +244,8 @@ pub struct CandidateRecord {
     pub seconds: f64,
     pub reasoned: bool,
     pub extra_blocks: usize,
+    /// Every rewind, with what the model wanted beside what replaced it.
+    pub corrections: Vec<Correction>,
 }
 
 /// Ask `model` for a program and take it all the way to a gate verdict.
@@ -198,7 +258,7 @@ pub fn run_once<M: Model + ?Sized>(
     on_chunk: &mut dyn FnMut(&str),
 ) -> Result<Run, String> {
     let mut tokens = 0usize;
-    let raw = model.complete(&prompt::system(), &prompt::user(task), &mut |chunk| {
+    let raw = model.complete(&prompt::system(), &prompt::user(task), "", &mut |chunk| {
         tokens += 1;
         on_chunk(chunk);
         true
@@ -237,7 +297,7 @@ pub fn run_once_guarded<M: Model + ?Sized>(
     let mut tokens = 0usize;
     let mut seen = String::new();
     let mut abandoned = false;
-    let raw = model.complete(&prompt::system(), &prompt::user(task), &mut |chunk| {
+    let raw = model.complete(&prompt::system(), &prompt::user(task), "", &mut |chunk| {
         tokens += 1;
         on_chunk(chunk);
         seen.push_str(chunk);
@@ -249,11 +309,139 @@ pub fn run_once_guarded<M: Model + ?Sized>(
     Ok(assemble(raw, tokens, abandoned))
 }
 
+/// [`run_once_guarded`], but on abandonment **rewind to the last good prefix and
+/// resume** rather than throwing the candidate away.
+///
+/// This is the payoff for knowing *which* token was fatal. Everything before it
+/// is fine — often hundreds of lines of correct Stitch — so the only thing worth
+/// discarding is the token itself. Generation resumes from the surviving prefix,
+/// and the model gets another draw at that one position.
+///
+/// It is not a decoder mask: the fatal token is not removed from the
+/// distribution, so the model may pick it again. `budget` bounds how many times
+/// that is tolerated. The mask proper needs `top_logprobs` at the rewind point —
+/// which this makes cheap, because there are only ever a handful of them.
+///
+/// # Errors
+/// Only if a model call fails.
+pub fn run_once_corrected<M: Model + ?Sized>(
+    model: &M,
+    task: &str,
+    budget: usize,
+    on_chunk: &mut dyn FnMut(&str),
+    on_rewind: &mut dyn FnMut(&str),
+) -> Result<Run, String> {
+    let (system, user) = (prompt::system(), prompt::user(task));
+    // Kept as chunks, not one string, so a rewind can be measured in tokens.
+    let mut kept: Vec<String> = Vec::new();
+    let mut tokens = 0usize;
+    let mut corrections: Vec<Correction> = Vec::new();
+    // The rewind waiting to learn what replaced it.
+    let mut pending: Option<(String, String, usize)> = None;
+    // How far back to reach. Handing back a prefix that ends exactly where the
+    // model went wrong tends to reproduce the mistake — it is the same state —
+    // so each successive attempt reaches further.
+    let mut depth = 1usize;
+    // Consecutive failures with no progress. The budget bounds *being stuck*,
+    // not total rewinds: a long program that recovers cleanly ten times is
+    // going fine, and abandoning it for a total count would punish length.
+    let mut stuck = 0usize;
+    // The longest valid program reached so far. Progress means *beating this* —
+    // emitting chunks is not the same thing. A model that writes `\n` then `}`
+    // and dies has produced two chunks and advanced nothing, and treating that
+    // as progress loops forever (observed live: forty rewinds of `" }"`).
+    let mut high_water = 0usize;
+
+    loop {
+        let prefix: String = kept.concat();
+        let mut round: Vec<String> = Vec::new();
+        let mut doomed = false;
+        let raw = model.complete(&system, &user, &prefix, &mut |chunk| {
+            tokens += 1;
+            on_chunk(chunk);
+            if let Some((context, discarded, depth)) = pending.take() {
+                corrections.push(Correction {
+                    context,
+                    discarded,
+                    replacement: chunk.to_string(),
+                    depth,
+                });
+            }
+            round.push(chunk.to_string());
+            doomed = is_doomed(
+                extract(&format!("{prefix}{}", round.concat())).program.trim_end(),
+            );
+            !doomed
+        })?;
+
+        if !doomed {
+            let mut run = assemble(format!("{prefix}{raw}"), tokens, false);
+            run.corrections = corrections;
+            return Ok(run);
+        }
+
+        if stuck >= budget {
+            // Giving up on *correcting* is not giving up on the *program*. A
+            // truncated candidate is the worst outcome — broken and incomplete —
+            // and it teaches a model that programs end mid-expression. Drop the
+            // guard and let it run to the end: what comes back is a finished
+            // program with a few bad tokens in it, which is overwhelmingly
+            // correct Stitch by token and perfectly good training data.
+            let finished = model.complete(&system, &user, &prefix, &mut |chunk| {
+                tokens += 1;
+                on_chunk(chunk);
+                true
+            })?;
+            // A `Correction` is a *completed* rewind — discarded text plus what
+            // replaced it. This last refusal never got one; `abandoned` records
+            // that correction ran out, not that the program did.
+            let mut run = assemble(format!("{prefix}{finished}"), tokens, true);
+            run.corrections = corrections;
+            return Ok(run);
+        }
+
+        // Everything this round except the fatal chunk is still good.
+        kept.extend(round.drain(..));
+        // Did the program actually get longer than it has ever been? Only that
+        // is progress. A new high-water mark means a *new* failure further on,
+        // so the deeper rewind is not warranted and both counters reset.
+        let reached = kept.iter().map(String::len).sum::<usize>();
+        if reached > high_water {
+            high_water = reached;
+            depth = 1;
+            stuck = 0;
+        } else {
+            stuck += 1;
+        }
+        // Drop the fatal chunk, then `depth - 1` more.
+        let mut discarded = String::new();
+        let requested = depth;
+        for _ in 0..depth {
+            match kept.pop() {
+                Some(chunk) => discarded.insert_str(0, &chunk),
+                None => break,
+            }
+        }
+        depth = depth.saturating_mul(2);
+        // The discarded text is already on the terminal from the stream, so the
+        // display no longer matches what will be saved. Say so.
+        on_rewind(&discarded);
+        pending = Some((tail(&kept.concat()), discarded, requested));
+    }
+}
+
+/// The last `CORRECTION_CONTEXT` bytes, on a character boundary.
+fn tail(text: &str) -> String {
+    let start = text.len().saturating_sub(CORRECTION_CONTEXT);
+    let start = (start..=text.len()).find(|at| text.is_char_boundary(*at)).unwrap_or(text.len());
+    text[start..].to_string()
+}
+
 fn assemble(raw: String, tokens: usize, abandoned: bool) -> Run {
     let Extracted { program, extra_blocks } = extract(&raw);
     let reasoned = raw.contains("<think>");
     let outcome = gate::run(&program);
-    Run { raw, program, extra_blocks, reasoned, tokens, abandoned, outcome }
+    Run { raw, program, extra_blocks, reasoned, tokens, abandoned, corrections: Vec::new(), outcome }
 }
 
 /// Per-stage counts for a batch.
@@ -370,14 +558,21 @@ impl Model for LmStudio {
         &self,
         system: &str,
         user: &str,
+        prefill: &str,
         on_chunk: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, String> {
+        let mut messages = vec![
+            serde_json::json!({ "role": "system", "content": system }),
+            serde_json::json!({ "role": "user", "content": user }),
+        ];
+        // A trailing assistant message is a prefill: the server continues it
+        // rather than answering it. This is how a rewind resumes mid-program.
+        if !prefill.is_empty() {
+            messages.push(serde_json::json!({ "role": "assistant", "content": prefill }));
+        }
         let body = serde_json::json!({
             "model": self.model,
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": user },
-            ],
+            "messages": messages,
             "temperature": self.sampling.temperature,
             "top_p": self.sampling.top_p,
             "top_k": self.sampling.top_k,

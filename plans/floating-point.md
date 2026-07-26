@@ -277,22 +277,79 @@ canonical NaN generation, NaN boxing, sNaN handling, `fmin`/`fmax` NaN rules,
 `fcvt` saturation edges, `fclass`. Parity against QEMU arrives with increment 4, via
 an FP-authorised *user* program.
 
-## Increment 4 — kernel opt-in FP, derived from the ELF, enabled lazily
+**Update, increment 4 having landed:** that parity now exists —
+`stitch-float-evaluates-on-target` executes real FP arithmetic on both engines and
+agrees, so the differential oracle the design leaned on is finally available for FP.
 
-- The loader reads `EF_RISCV_FLOAT_ABI_*` out of the ELF's `e_flags` and records
-  FP authority on the process. Pure ELF-header work → `kernel-proc/src/elf.rs`,
-  host-tested.
-- On an illegal instruction from U-mode: if the process is FP-authorised and
-  `sstatus.FS` is Off, enable FS, snitch, and retry the instruction (do *not*
-  advance `sepc`). Otherwise fall through to increment 1's terminate path. This
-  replaces increment 1's arm for `scause=2` specifically; every other unhandled
-  exception still terminates.
-- `TaskContext` grows the 32 FP registers, saved/restored **only** for tasks
-  whose FS is not Off — the whole point of the opt-in is that integer-only tasks
-  do not pay the 256 bytes.
-- Snitch it: an event on first enable (which process, on what authority), a
-  structured refusal before killing an unauthorised process,
-  `snitchos.fp.processes_enabled` and `snitchos.sched.fp_saves_total`.
+## Increment 4 — kernel opt-in FP, derived from the ELF, enabled lazily — **DONE**
+
+**Userspace floating point works.** `1.5 + 1.75` at the Stitch REPL evaluates to
+`3.25` on the metal, on both engines.
+
+- `kernel_proc::elf::FloatAbi`, read from `e_flags[2:1]` (host-tested, including that
+  the RVC bit sharing the byte must be masked off). Recorded on the `Process` after
+  load — the process is built before its image is parsed, so a failed load never gains
+  FP.
+- `kernel_proc::fp::enable_decision(authorised, fs_off, other_holders)` — the pure
+  policy. **Ordering matters:** `fs_off` is checked *first*, so an illegal instruction
+  arriving with FP already on is a genuine fault. Checking authorisation first would
+  re-enable FP on every real illegal instruction and retry it forever — a livelock
+  instead of a dead process.
+- `kernel::trap::fp` supplies the facts, sets `FS = Initial` in the **saved** `sstatus`
+  (so the `sret` returns to the faulting instruction with FP live), and does *not*
+  advance `sepc` — the instruction re-executes, now legally.
+- Snitched: `snitchos.fp.processes_enabled`, `snitchos.fp.refused_total`, and a `Log`
+  naming the process and its authority. An authority grant should be as observable as
+  a capability grant.
+
+### Two findings that change how this should be read
+
+**The ELF flag authorises everything today.** Measured (`xxd -s 48 -l 4` on a built
+binary): `e_flags = 0x5` = `RVC | FLOAT_ABI_DOUBLE`. `riscv64gc-unknown-none-elf` is
+`lp64d`, so *every* binary in this tree claims hard float — `init` and `hello`
+included, neither of which contains a float. So as a **gate** this refuses nothing, and
+the design doc's cost-attribution argument ("it is wrong to tax integer-only programs")
+is delivered by the **lazy enable**, not by the flag: a program that never executes an
+FP instruction never traps, so never gets `FS` on and never pays. The flag only starts
+refusing anything if some program is deliberately built soft-float. The
+`RefuseUnauthorised` path is therefore test-covered rather than demonstrated.
+
+**FP registers are still shared, so there is an interim guard.** The kernel cannot yet
+save/restore the 32 FP registers across a context switch, so a second FP process would
+silently share the first's register file. `FpEnableDecision::RefuseBusy` converts that
+into an observable refusal — one FP process at a time, snitched. This is the trade this
+codebase makes everywhere else (refusals snitch, never silent), but it **is** interim:
+the real fix is FP context switching, at which point the variant, the `FP_HOLDERS`
+counter and the `release` hooks on both death paths all disappear. Today only the REPL
+uses FP, so nothing hits it.
+
+## Increment 4b — FP context switching (NOT DONE)
+
+Needed before two processes can use FP simultaneously. `TaskContext` grows the 32 FP
+registers, saved/restored **only** for tasks whose `FS` is not Off — which is what
+`sstatus.FS`'s Clean/Dirty tracking (increment 3b step 5) exists to make cheap. Touches
+the asm `switch` primitive, so it is a real piece of work rather than a follow-up.
+Removes the `RefuseBusy` guard above.
+
+## Increment 5 — Stitch floats work on target — **DONE for arithmetic**
+
+Gated by `stitch-float-evaluates-on-target`, which is increment 4's gate: it asserts
+the enable metric, the authority `Log`, the *correct answer* on the UART, and a
+surviving heartbeat. `1.5 + 1.75` → `3.25`, both engines.
+
+It is the rewrite of `stitch-float-does-not-kill-the-kernel`, which was written as a
+deliberate tripwire and duly failed on the first run after increment 4 — that failure is
+the evidence the enable path genuinely reaches the REPL, rather than the assertion
+having been written to match whatever the code did.
+
+**`stitch-kvetch-completes` is still not registered — but FP is no longer why.** Tried
+2026-07-26: the guest no longer wedges or faults, and the run reaches the scenario's own
+bisect diagnostic, which reports *"the REPL never reached the call"* —
+`snitchos.stitch.completions_asked` never appears and the console shows the grammar-only
+menu. So the completion path has a **second, independent gap**, and the scenario body
+still carries an unconditional `return Err("DIAGNOSTIC: …")` from that bisect, so it
+cannot pass as written. FP was necessary, not sufficient. Out of scope here; see
+[repl-completion.md](repl-completion.md).
 
 ## Increment 5 — Stitch floats work on target
 

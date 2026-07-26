@@ -175,6 +175,24 @@ wordBackCol(line, c) = {
     start < 0 => 0 | scanWordStartBack(line, start)
 }
 
+// The three word motions against one line, at the boundaries that distinguish
+// them: `w` is exclusive (next word *start*), `e` is inclusive (this word's last
+// char), `b` goes back to a start. "foo bar baz" puts word starts at 0/4/8 and
+// word ends at 2/6/10, so an off-by-one in either scan shows up here.
+test "word motions move by words within the line" {
+    let line = initialState("foo bar baz")
+    // Word motions are intra-line: the row must not move.
+    expect step(line, "w").state.row == 0
+    expect step(line, "w").state.col == 4
+    expect step(Editor(..line, col: 4), "w").state.col == 8
+    expect step(line, "e").state.col == 2
+    expect step(Editor(..line, col: 2), "e").state.col == 6
+    expect step(Editor(..line, col: 8), "b").state.col == 4
+    expect step(Editor(..line, col: 4), "b").state.col == 0
+    // A count rides the existing machinery: 2w moves two words.
+    expect step(Editor(..line, pending: Pending(op: OpNone, count: 2, object: NoObj)), "w").state.col == 8
+}
+
 // A motion's target position + wiseness, or `None` for a non-motion key. THE single
 // motion definition — consumed both bare (`moveTo`, wiseness ignored) and as an
 // operator's range endpoint (Phase 2.3+). One `motionTarget` powers `l` and `dl`.
@@ -192,6 +210,28 @@ motionTarget(state, key) = match {
     _ => None
 }
 
+// `motionTarget` is the single definition the bare move and the operator both
+// consume, so its target *and* its wiseness are what the rest of the motion
+// machinery is built on. A non-motion key must yield `None` rather than a target
+// that happens to sit under the cursor — the difference between "no motion" and
+// "a motion that goes nowhere" is what tells `step` whether the key was handled.
+test "motion target carries position and wiseness" {
+    // `$` is a charwise target at the last char (col 4 of "hello").
+    expect match motionTarget(initialState("hello"), "$") {
+        Some(t) => t.col == 4 and t.wise == Charwise
+        None => false
+    }
+    // `j` is a linewise target on the next row, carrying the column across.
+    expect match motionTarget(Editor(..initialState("ab\ncd"), col: 1), "j") {
+        Some(t) => t.row == 1 and t.col == 1 and t.wise == Linewise
+        None => false
+    }
+    expect match motionTarget(initialState("hello"), "z") {
+        Some(_) => false
+        None => true
+    }
+}
+
 // Move the cursor to `target`, clamping the column onto the target row's `[0, len]`.
 // A vertical move re-clamps onto a shorter line; `h` past column 0 clamps back up.
 moveTo(state, target) = {
@@ -207,6 +247,58 @@ moveByKey(state, key) = moveTo(state, unwrapOr(motionTarget(state, key), Target(
 // `k` / `j` — named wrappers over the shared motion machinery.
 moveUp(state) = moveByKey(state, "k")
 moveDown(state) = moveByKey(state, "j")
+
+test "j moves down a line and k moves up" {
+    expect moveDown(initialState("a\nb\nc")).row == 1
+    expect moveUp(moveDown(initialState("a\nb\nc"))).row == 0
+}
+
+test "j at the last line and k at the top are no-ops" {
+    expect moveUp(initialState("a\nb")).row == 0
+    expect moveDown(moveDown(initialState("a\nb"))).row == 1
+}
+
+// A vertical move re-clamps onto the target line's length, so the column is not
+// simply carried across.
+test "moving onto a shorter line reclamps the column" {
+    expect moveDown(Editor(..initialState("aaa\nb"), col: 2)).col == 1
+    // A full-width target leaves the column alone.
+    expect moveDown(Editor(..initialState("aaa\nccc"), col: 2)).col == 2
+}
+
+test "h and l move the cursor within the line" {
+    let mid = Editor(..initialState("abc"), col: 1)
+    expect step(mid, "l").state.col == 2
+    expect step(mid, "h").state.col == 0
+    // `h` at column 0 and `l` at the line's end are both no-ops (clamped).
+    expect step(initialState("abc"), "h").state.col == 0
+    expect step(Editor(..initialState("abc"), col: 3), "l").state.col == 3
+    // They are handled keys, so they redraw — even the clamped no-op.
+    expect step(mid, "h").effect == Redraw
+}
+
+test "zero and dollar jump to the line ends" {
+    let mid = Editor(..initialState("hello"), col: 2)
+    expect step(mid, "0").state.col == 0
+    // `$` lands *on* the last character (len - 1), unlike `A` which appends at len.
+    expect step(mid, "$").state.col == 4
+    // On an empty line `$` clamps to col 0 — max(len - 1, 0), never -1.
+    expect step(initialState(""), "$").state.col == 0
+    // Pure motions redraw rather than reporting an edit: nothing in the buffer
+    // changed, and a caller that flushes on `Edit` must not be told to.
+    expect step(mid, "0").effect == Redraw
+    expect step(mid, "$").effect == Redraw
+}
+
+test "caret jumps to the first non-blank column" {
+    // "  hi" → `^` lands on col 2 (the 'h'), skipping the leading spaces.
+    expect step(Editor(..initialState("  hi"), col: 3), "^").state.col == 2
+    // A line with no content (all spaces) clamps `^` to col 0.
+    expect step(Editor(..initialState("   "), col: 2), "^").state.col == 0
+    // No leading blanks → `^` is column 0, same as `0`.
+    expect step(Editor(..initialState("hi"), col: 1), "^").state.col == 0
+    expect step(Editor(..initialState("  hi"), col: 3), "^").effect == Redraw
+}
 
 // `x` — delete the character under the cursor. No-op at end of line (nothing under
 // the cursor). Cuts into the register and re-clamps the cursor.
@@ -334,6 +426,18 @@ pasteBefore(state) = doPaste(state, state.col, state.row)
 // `Esc` — return to Normal mode. The inverse of `enterInsert`; buffer/cursor kept.
 enterNormal(state) = Editor(..state, mode: Normal)
 
+// `i` then `Esc` must return to *exactly* the starting state — a round-trip that
+// proves the mode switch alone changed, and nothing else came along with it.
+test "i enters insert and esc returns to normal" {
+    let start = initialState("ab")
+    expect enterInsert(start).mode == Insert
+    let round = enterNormal(enterInsert(start))
+    expect round.mode == Normal
+    expect round.lines == start.lines
+    expect round.row == start.row
+    expect round.col == start.col
+}
+
 // `r` — enter Replace mode: the next key becomes the replacement char.
 enterReplace(state) = Editor(..state, mode: Replace)
 
@@ -407,13 +511,91 @@ splitLine(state) = {
     )
 }
 
+test "insert a printable char splits the line and advances the column" {
+    expect insertChar(at("ac", 1), "b").lines == ["abc"]
+    expect insertChar(at("ac", 1), "b").col == 2
+    // At end of line, and at the start — the two boundaries a slice gets wrong.
+    expect insertChar(at("ab", 2), "c").lines == ["abc"]
+    expect insertChar(initialState("bc"), "a").lines == ["abc"]
+    expect insertChar(initialState("bc"), "a").col == 1
+}
+
+// The edit must land on the *cursor's* row, not row 0 — an easy thing to get
+// right by accident with a single-line fixture.
+test "insert edits only the cursor row and leaves other lines" {
+    let edited = insertChar(Editor(..initialState("xx\nyy"), row: 1, col: 1), "Z")
+    expect edited.lines == ["xx", "yZy"]
+    expect edited.col == 2
+}
+
+test "backspace deletes the char before the cursor" {
+    expect backspace(at("abc", 2)).lines == ["ac"]
+    expect backspace(at("abc", 2)).col == 1
+}
+
+// The join has to target row - 1 and remove row, rather than hardcoded indices,
+// which a two-line fixture cannot distinguish.
+test "backspace at col 0 joins onto the previous line" {
+    let joined = backspace(Editor(..initialState("a\nb\nc"), row: 2, col: 0))
+    expect joined.lines == ["a", "bc"]
+    expect joined.row == 1
+    expect joined.col == 1
+}
+
+test "backspace at the top left is a no-op" {
+    expect backspace(initialState("ab")).lines == ["ab"]
+    expect backspace(initialState("ab")).row == 0
+    expect backspace(initialState("ab")).col == 0
+}
+
+test "enter splits the line at the cursor into two" {
+    let mid = splitLine(at("abc", 1))
+    expect mid.lines == ["a", "bc"]
+    expect mid.row == 1
+    expect mid.col == 0
+    // At the end: a fresh empty line below. At the start: content pushed down.
+    expect splitLine(at("abc", 3)).lines == ["abc", ""]
+    expect splitLine(initialState("abc")).lines == ["", "abc"]
+}
+
+test "enter splits only the cursor line and keeps the rest" {
+    let split = splitLine(Editor(..initialState("x\nabc\ny"), row: 1, col: 1))
+    expect split.lines == ["x", "a", "bc", "y"]
+    expect split.row == 2
+}
+
+// `splitLine` leaves the cursor at col 0 of the new line, exactly where
+// `backspace` joins back — so the two compose to the original. A round-trip that
+// catches an off-by-one in *either* transition, which asserting them separately
+// does not.
+test "enter then backspace is the identity" {
+    let start = at("abc", 1)
+    let round = backspace(splitLine(start))
+    expect round.lines == start.lines
+    expect round.row == start.row
+    expect round.col == start.col
+}
+
 // The buffer serialized for saving: the lines joined back with newlines — the
 // inverse of `initialState`'s split.
 serialize(state) = Str.join(state.lines, "\n")
 
+test "serialize joins the line buffer with newlines" {
+    expect serialize(initialState("a\nb\nc")) == "a\nb\nc"
+    // A single empty line serializes to the empty string, so "" round-trips.
+    expect serialize(initialState("")) == ""
+}
+
 // `:w` — a `Save` effect carrying the whole serialized buffer. The state is
 // unchanged (saving doesn't edit).
 save(state) = Step(state: state, effect: Save(serialize(state)))
+
+test "save yields a save effect carrying the serialized buffer" {
+    expect savedText(save(initialState("a\nb")).effect) == "a\nb"
+    // Saving does not edit: the Step carries the state through unchanged.
+    expect save(initialState("a\nb")).state.lines == ["a", "b"]
+    expect save(initialState("a\nb")).state.col == 0
+}
 
 // Render a full-screen frame: clear + home (`\e[2J\e[H`), the buffer's lines
 // (CRLF-separated so each starts in column 0 on a raw terminal), then an absolute
@@ -493,6 +675,31 @@ isCountDigit(state, key) = match {
 
 // Fold a digit key into the count accumulator.
 foldDigit(state, key) = setPending(state, state.pending.op, state.pending.count * 10 + digitVal(key), state.pending.object)
+
+// The whole point of `isCountDigit` taking `state`: "0" is two different keys
+// depending on whether a count is already accumulating. Getting this wrong makes
+// `0` silently a no-op mid-count, or breaks line-start entirely.
+test "digits accumulate a count and zero is a motion when the count is empty" {
+    expect step(step(initialState("x"), "1").state, "2").state.pending.count == 12
+    // A leading 0 is the line-start motion, not a count digit.
+    let mid = Editor(..initialState("abc"), col: 2)
+    expect step(mid, "0").state.pending.count == 0
+    expect step(mid, "0").state.col == 0
+    // But 0 *after* a digit folds in: 1 then 0 is 10.
+    expect step(step(initialState("x"), "1").state, "0").state.pending.count == 10
+}
+
+test "a count repeats motions and clears afterward" {
+    // 3j descends three lines; a count past the last line clamps rather than faulting.
+    let down3 = step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpNone, count: 3, object: NoObj)), "j").state
+    expect down3.row == 3
+    // A vertical move carries the column, so it is asserted alongside the row.
+    expect down3.col == 0
+    expect step(Editor(..initialState("a\nb"), pending: Pending(op: OpNone, count: 9, object: NoObj)), "j").state.row == 1
+    expect step(Editor(..initialState("abcd"), pending: Pending(op: OpNone, count: 2, object: NoObj)), "l").state.col == 2
+    // The count is consumed by the motion, so the next key starts clean.
+    expect step(Editor(..initialState("a\nb\nc"), pending: Pending(op: OpNone, count: 2, object: NoObj)), "j").state.pending.count == 0
+}
 
 // Reset the count in a completed `Step`'s state (top-level commands consume it).
 clearCountStep(step) = Step(state: clearCount(step.state), effect: step.effect)
@@ -595,6 +802,176 @@ applyMotionOp(state, target) = match state.pending.op {
     _ => state
 }
 
+// An operator-pending `Editor` at `col` of "abcd", awaiting a motion.
+pendingDelete(text, col) = Editor(..initialState(text), col: col, pending: Pending(op: OpDelete, count: 0, object: NoObj))
+
+// Whether an effect reports a buffer edit. `Edit` carries the serialized buffer,
+// so it is matched rather than compared — the tag is what these tests assert.
+isEdit(effect) = match effect { Edit(_) => true  _ => false }
+
+// `d` alone must not act. The operator is a *mode within Normal*: it records what
+// to do and waits for the motion that says where, so the key that sets it changes
+// nothing but `pending`.
+test "operators enter operator-pending within normal mode" {
+    expect initialState("abc").pending.op == OpNone
+    expect step(initialState("abc"), "d").state.mode == Normal
+    expect step(initialState("abc"), "d").effect == Redraw
+    expect step(initialState("abc"), "d").state.pending.op == OpDelete
+    expect step(initialState("abc"), "c").state.pending.op == OpChange
+    expect step(initialState("abc"), "y").state.pending.op == OpYank
+}
+
+// The charwise operators, each against the motion that defines its span. `dl` and
+// `dh` are the interesting pair: same one-character span, opposite directions, and
+// only `dh` moves the cursor.
+test "d plus a charwise motion deletes the intra-line range" {
+    // d$ deletes through end-of-line, inclusive — the same result as D.
+    expect step(pendingDelete("abcd", 1), "$").state.lines == ["a"]
+    // dl deletes the char under the cursor (exclusive, forward), like x.
+    expect step(pendingDelete("abcd", 1), "l").state.lines == ["acd"]
+    // dh deletes the char before it (backward), like X — and the cursor follows.
+    expect step(pendingDelete("abcd", 1), "h").state.lines == ["bcd"]
+    expect step(pendingDelete("abcd", 1), "h").state.col == 0
+    // d0 deletes from line-start up to the cursor, exclusive of the char under it.
+    expect step(pendingDelete("abcd", 2), "0").state.lines == ["cd"]
+    // The operator clears after applying, and a real delete is an observable Edit.
+    expect step(pendingDelete("abcd", 1), "l").state.pending.op == OpNone
+    expect isEdit(step(pendingDelete("abcd", 1), "l").effect)
+    // dl at end of line deletes nothing — a Redraw, and pending still clears, or the
+    // next keystroke would be swallowed by a stale operator.
+    expect step(pendingDelete("ab", 2), "l").effect == Redraw
+    expect step(pendingDelete("ab", 2), "l").state.pending.op == OpNone
+}
+
+// The doubled operator is the linewise self: `dd` removes the current line.
+test "dd deletes the whole current line" {
+    let mid = Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj))
+    expect step(mid, "d").state.lines == ["a", "c"]
+    // The cursor stays on the row — now the line that was below.
+    expect step(mid, "d").state.row == 1
+    // dd on the last line clamps the cursor up to the new last line.
+    let last = Editor(..initialState("a\nb\nc"), row: 2, pending: Pending(op: OpDelete, count: 0, object: NoObj))
+    expect step(last, "d").state.lines == ["a", "b"]
+    expect step(last, "d").state.row == 1
+    // dd on the only line leaves one empty line: the buffer never reaches zero lines.
+    expect step(pendingDelete("abc", 0), "d").state.lines == [""]
+    expect isEdit(step(pendingDelete("a\nb", 0), "d").effect)
+    expect step(pendingDelete("a\nb", 0), "d").state.pending.op == OpNone
+}
+
+test "d plus a linewise motion deletes a range of lines" {
+    // dj takes the current line and the one below — the range [row, row + 1].
+    let top = Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete, count: 0, object: NoObj))
+    expect step(top, "j").state.lines == ["c"]
+    // dk takes the current line and the one above.
+    let bottom = Editor(..initialState("a\nb\nc"), row: 2, pending: Pending(op: OpDelete, count: 0, object: NoObj))
+    expect step(bottom, "k").state.lines == ["a"]
+    expect isEdit(step(top, "j").effect)
+    // dj on the last line: `j` cannot move, so the range is one unmoved line, which
+    // is a no-op rather than a line delete — `dd` is how you delete one line.
+    let lastRow = Editor(..initialState("a\nb"), row: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj))
+    expect step(lastRow, "j").effect == Redraw
+    expect step(lastRow, "j").state.pending.op == OpNone
+}
+
+// `c` is `d` plus Insert, with one deliberate asymmetry: `cc` keeps the line.
+test "c changes a range and enters insert" {
+    let cDollar = Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange, count: 0, object: NoObj))
+    expect step(cDollar, "$").state.lines == ["a"]
+    expect step(cDollar, "$").state.mode == Insert
+    expect isEdit(step(cDollar, "$").effect)
+    // cc blanks the line and enters Insert — it KEEPS the line, unlike dd.
+    let cc = Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpChange, count: 0, object: NoObj))
+    expect step(cc, "c").state.lines == ["a", "", "c"]
+    expect step(cc, "c").state.row == 1
+    expect step(cc, "c").state.mode == Insert
+}
+
+test "y yanks a range into the clipboard without deleting" {
+    let yy = step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpYank, count: 0, object: NoObj)), "y").state
+    // The buffer is untouched — that is the whole difference from `d`.
+    expect yy.lines == ["a", "b", "c"]
+    expect yy.clipboard.text == "b"
+    expect yy.clipboard.wise == Linewise
+    let yDollar = step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpYank, count: 0, object: NoObj)), "$").state
+    expect yDollar.clipboard.text == "bcd"
+    expect yDollar.clipboard.wise == Charwise
+}
+
+test "capital Y yanks the current line" {
+    let yanked = step(Editor(..initialState("a\nb"), row: 0), "Y").state
+    expect yanked.clipboard.text == "a"
+    expect yanked.clipboard.wise == Linewise
+    expect yanked.lines == ["a", "b"]
+}
+
+// The register's wiseness decides *where* a paste lands, not just what it holds:
+// charwise goes inline, linewise opens a line. Same key, two behaviours.
+test "p and capital P paste charwise from the clipboard" {
+    let clip = Editor(..initialState("ac"), col: 0, clipboard: Register(text: "X", wise: Charwise))
+    // p inserts after the cursor; the cursor lands on the pasted char.
+    expect step(clip, "p").state.lines == ["aXc"]
+    expect step(clip, "p").state.col == 1
+    // P inserts before it.
+    expect step(clip, "P").state.lines == ["Xac"]
+    expect step(clip, "P").state.col == 0
+    expect isEdit(step(clip, "p").effect)
+    // An empty (never-yanked) register pastes nothing.
+    expect step(initialState("ac"), "p").effect == Redraw
+}
+
+test "p and capital P paste linewise opening a line" {
+    let clip = Editor(..initialState("a\nb"), row: 0, clipboard: Register(text: "X", wise: Linewise))
+    expect step(clip, "p").state.lines == ["a", "X", "b"]
+    expect step(clip, "p").state.row == 1
+    expect step(clip, "P").state.lines == ["X", "a", "b"]
+    expect step(clip, "P").state.row == 0
+    // A multi-line register pastes all of its lines.
+    let multi = Editor(..initialState("a"), row: 0, clipboard: Register(text: "X\nY", wise: Linewise))
+    expect step(multi, "p").state.lines == ["a", "X", "Y"]
+}
+
+// Cut-and-paste only works if a delete populates the register, and only stays
+// usable if a *no-op* delete leaves it alone.
+test "a delete populates the clipboard so paste can move it" {
+    let afterDd = step(pendingDelete("a\nb\nc", 0), "d").state
+    expect afterDd.clipboard.text == "a"
+    expect afterDd.clipboard.wise == Linewise
+    let afterX = step(initialState("abc"), "x").state
+    expect afterX.clipboard.text == "a"
+    expect afterX.clipboard.wise == Charwise
+    // x at end of line deletes nothing and must not clobber the register.
+    let noop = Editor(..initialState("ab"), col: 2, clipboard: Register(text: "keep", wise: Charwise))
+    expect step(noop, "x").state.clipboard.text == "keep"
+}
+
+// A pending operator must be abandonable, and abandoning it must leave the editor
+// *clean* — the key that cancels is swallowed rather than run as a Normal command,
+// or `dz` would delete nothing and then do whatever `z` does.
+test "esc and unknown keys cancel operator-pending" {
+    let pend = pendingDelete("abc", 1)
+    expect step(pend, "Esc").state.mode == Normal
+    expect step(pend, "Esc").effect == Redraw
+    expect step(pend, "Esc").state.pending.op == OpNone
+    expect step(pend, "Esc").state.lines == ["abc"]
+    // An unknown key cancels the same way, and is not then executed.
+    expect step(pend, "z").effect == Redraw
+    expect step(pend, "z").state.pending.op == OpNone
+    expect step(pend, "z").state.lines == ["abc"]
+    // After cancelling, the next key acts normally.
+    expect step(step(pend, "z").state, "x").state.lines == ["ac"]
+}
+
+// A count scales whatever follows it, whether that is a bare command or an
+// operator's motion — one accumulator, three consumers.
+test "a count repeats x and scales operators" {
+    expect step(Editor(..initialState("abcdef"), pending: Pending(op: OpNone, count: 3, object: NoObj)), "x").state.lines == ["def"]
+    // 2dd takes two whole lines (count on the doubled operator).
+    expect step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete, count: 2, object: NoObj)), "d").state.lines == ["c", "d"]
+    // d2j takes the current line plus two below (count on the linewise motion).
+    expect step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete, count: 2, object: NoObj)), "j").state.lines == ["d"]
+}
+
 // Remove `n` whole lines starting at `lo` from `lines` (tail-recursive).
 removeLinesFrom(lines, lo, n) =
     n <= 0 => lines | removeLinesFrom(List.removeAt(lines, lo), lo, n - 1)
@@ -689,6 +1066,68 @@ wordObject(state) = match state.pending.object {
     _ => innerWordRange(state)
 }
 
+// An `Editor` mid-way through an operator + text-object sequence, awaiting the
+// object key. The operator tests build this by hand a dozen times over.
+pendingObject(text, col, op, object) = Editor(..initialState(text), col: col, pending: Pending(op: op, count: 0, object: object))
+
+// A word motion under an operator selects the motion's span, which is what makes
+// `dw` and `w` share one definition rather than two that drift.
+test "operators consume word motions" {
+    expect step(pendingDelete("foo bar", 0), "w").state.lines == ["bar"]
+    // dw on the last word deletes to end of line — the motion clamps within it.
+    expect step(pendingDelete("foo bar", 4), "w").state.lines == ["foo "]
+    // cw changes over the same range and enters Insert.
+    expect step(pendingObject("foo bar", 0, OpChange, NoObj), "w").state.mode == Insert
+}
+
+// `i`/`a` after an operator are not motions — they extend the pending state a
+// second time, so the operator survives and the editor is still waiting.
+test "i or a after an operator enters text-object pending" {
+    let d = pendingDelete("foo bar", 0)
+    expect step(d, "i").state.pending.object == Inner
+    expect step(d, "a").state.pending.object == Around
+    expect step(d, "i").state.pending.op == OpDelete
+    expect step(d, "i").effect == Redraw
+}
+
+// The hallmark of a text object: the range does not depend on where in the word
+// the cursor sits. "foo bar baz" has "bar" at cols 4..6, so mid-word and
+// start-of-word must give the same result.
+test "diw deletes the inner word from anywhere in it" {
+    let mid = pendingObject("foo bar baz", 5, OpDelete, Inner)
+    let start = pendingObject("foo bar baz", 4, OpDelete, Inner)
+    expect step(mid, "w").state.lines == ["foo  baz"]
+    expect step(start, "w").state.lines == ["foo  baz"]
+    expect isEdit(step(mid, "w").effect)
+    // The whole accumulator clears, object as well as operator.
+    expect step(mid, "w").state.pending.object == NoObj
+    expect step(mid, "w").state.pending.op == OpNone
+}
+
+test "ciw changes and yiw yanks the inner word" {
+    let ci = pendingObject("foo bar", 5, OpChange, Inner)
+    expect step(ci, "w").state.lines == ["foo "]
+    expect step(ci, "w").state.mode == Insert
+    // yiw copies without touching the buffer.
+    let yi = pendingObject("foo bar", 5, OpYank, Inner)
+    expect step(yi, "w").state.clipboard.text == "bar"
+    expect step(yi, "w").state.lines == ["foo bar"]
+}
+
+// `aw` takes the trailing whitespace, or the leading whitespace when there is no
+// trailing — vim's rule, and the reason `aw` is not just `iw` plus one space.
+test "daw deletes a word with its surrounding whitespace" {
+    expect step(pendingObject("foo bar baz", 5, OpDelete, Around), "w").state.lines == ["foo baz"]
+    expect step(pendingObject("foo bar", 5, OpDelete, Around), "w").state.lines == ["foo"]
+}
+
+// The dispatch wiring end to end: three separate keystrokes, one edit.
+test "the full d i w key sequence deletes the inner word" {
+    let after = step(step(step(Editor(..initialState("foo bar"), col: 5), "d").state, "i").state, "w").state
+    expect after.lines == ["foo "]
+    expect after.col == 4
+}
+
 // Forward: the first index at/after `i` holding `ch` (or `len` if none).
 nextCharAt(line, i, len, ch) = match {
     i >= len => len
@@ -724,6 +1163,38 @@ delimObjectRange(state, ch) = {
     let len = Str.length(line)
     let o = findDelimOpen(line, 0, len, state.col, ch)
     o < 0 => None | Some(delimRange(state, o, nextCharAt(line, o + 1, len, ch)))
+}
+
+// A quote object is found by scanning the *line* for a pair, so unlike a word
+// object it works from outside the quotes as well as inside — the cursor picks
+// which pair, not whether there is one.
+test "quote objects target the text in quotes" {
+    // foo "bar" baz — quotes at cols 4 and 8, "bar" at 5..7.
+    expect step(pendingObject("foo \"bar\" baz", 6, OpDelete, Inner), "\"").state.lines == ["foo \"\" baz"]
+    // The same, with the cursor *before* the string on that line.
+    expect step(pendingObject("foo \"bar\" baz", 1, OpDelete, Inner), "\"").state.lines == ["foo \"\" baz"]
+    // da" takes the quotes too, leaving the surrounding spaces.
+    expect step(pendingObject("foo \"bar\" baz", 6, OpDelete, Around), "\"").state.lines == ["foo  baz"]
+}
+
+test "ci quote changes and yi quote yanks the quoted text" {
+    let ci = pendingObject("say \"hi\" now", 5, OpChange, Inner)
+    expect step(ci, "\"").state.lines == ["say \"\" now"]
+    expect step(ci, "\"").state.mode == Insert
+    let yi = pendingObject("say \"hi\" now", 5, OpYank, Inner)
+    expect step(yi, "\"").state.clipboard.text == "hi"
+}
+
+// No pair on the line means the object resolves to nothing, which must cancel
+// rather than delete a degenerate range.
+test "a quote object with no quotes on the line cancels" {
+    let di = pendingObject("no quotes here", 0, OpDelete, Inner)
+    expect step(di, "\"").effect == Redraw
+    expect step(di, "\"").state.lines == ["no quotes here"]
+}
+
+test "single quote object targets apostrophe-delimited text" {
+    expect step(pendingObject("a 'x' b", 3, OpDelete, Inner), "'").state.lines == ["a '' b"]
 }
 
 // The `Range` for a text-object char, or `None` if the key isn't an object. v1: word
@@ -887,4 +1358,165 @@ step(state, key) = match state.mode {
     Insert => stepInsert(state, key)
     Command => stepCommand(state, key)
     Replace => stepReplace(state, key)
+}
+
+// An `Editor` at `col` of `text`, in Normal mode — the setup nearly every
+// single-key command test needs.
+at(text, col) = Editor(..initialState(text), col: col)
+
+// The text a `Save` effect carries, or "?" for any other effect.
+savedText(effect) = match effect { Save(t) => t  _ => "?" }
+
+// `step` is the only entry point, so mode dispatch is the first thing that can be
+// wrong: an unbound key must be a `Noop` that changes nothing, not a silent
+// fall-through into another mode's table.
+test "step dispatches normal-mode keys" {
+    let start = initialState("a\nb")
+    expect step(start, "j").effect == Redraw
+    expect step(start, "j").state.row == 1
+    expect step(start, "i").state.mode == Insert
+    expect step(start, ":").state.mode == Command
+    expect step(start, "z").effect == Noop
+    expect step(start, "z").state.lines == start.lines
+    expect step(start, "z").state.col == start.col
+}
+
+test "x deletes the character under the cursor" {
+    expect step(at("abc", 1), "x").state.lines == ["ac"]
+    expect step(at("abc", 1), "x").state.col == 1
+    // At end of line there is nothing under the cursor, so nothing happens.
+    expect step(at("abc", 3), "x").state.lines == ["abc"]
+    // Deleting the last char re-clamps the cursor onto the shortened line.
+    expect step(at("ab", 1), "x").state.lines == ["a"]
+    expect step(at("ab", 1), "x").state.col == 1
+}
+
+// `X` is `x`'s mirror, and the pair is where the Edit-vs-Redraw distinction earns
+// its keep: telemetry should span real edits only, so a no-op must not report one.
+test "capital X deletes the char before the cursor as an observable edit" {
+    expect step(at("abc", 2), "X").state.lines == ["ac"]
+    expect step(at("abc", 2), "X").state.col == 1
+    // At col 0 there is nothing before the cursor.
+    expect step(at("abc", 0), "X").state.lines == ["abc"]
+    expect isEdit(step(at("abc", 2), "X").effect)
+    expect step(at("abc", 0), "X").effect == Redraw
+}
+
+test "o opens a line below and enters insert" {
+    expect step(initialState("ab"), "o").state.lines == ["ab", ""]
+    expect step(initialState("ab"), "o").state.row == 1
+    expect step(initialState("ab"), "o").state.mode == Insert
+}
+
+test "capital O opens a line above and enters insert" {
+    let second = Editor(..initialState("x\ny"), row: 1)
+    expect step(second, "O").state.lines == ["x", "", "y"]
+    expect step(second, "O").state.row == 1
+    expect step(initialState("ab"), "O").state.mode == Insert
+    expect isEdit(step(initialState("ab"), "O").effect)
+}
+
+// The three cursor-positioning entries into Insert. None of them edits, which is
+// what separates them from `o`/`O`.
+test "a capital A and capital I position the cursor and enter insert" {
+    expect step(initialState("ab"), "a").state.col == 1
+    expect step(initialState("ab"), "a").state.mode == Insert
+    // `a` at end of line clamps at len — it cannot advance past the buffer.
+    expect step(at("ab", 2), "a").state.col == 2
+    // `A` jumps to end-of-line; `I` to the first non-blank column.
+    expect step(initialState("ab"), "A").state.col == 2
+    expect step(at("  ab", 3), "I").state.col == 2
+    expect step(initialState("ab"), "a").effect == Redraw
+    expect step(initialState("ab"), "A").effect == Redraw
+    expect step(at("  ab", 3), "I").effect == Redraw
+}
+
+test "tilde toggles the case under the cursor and advances" {
+    expect step(initialState("aBc"), "~").state.lines == ["ABc"]
+    expect step(initialState("aBc"), "~").state.col == 1
+    // On an uppercase char it flips the other way.
+    expect step(at("aBc", 1), "~").state.lines == ["abc"]
+    expect step(at("aBc", 1), "~").state.col == 2
+    // At end of line there is nothing to toggle.
+    expect step(at("aBc", 3), "~").effect == Redraw
+    expect isEdit(step(initialState("aBc"), "~").effect)
+}
+
+test "capital J joins the next line onto the current one" {
+    expect step(initialState("ab\ncd"), "J").state.lines == ["ab cd"]
+    // The cursor lands at the seam.
+    expect step(initialState("ab\ncd"), "J").state.col == 2
+    // The next line's leading blanks are collapsed to the single seam space.
+    expect step(initialState("ab\n   cd"), "J").state.lines == ["ab cd"]
+    // On the last line there is nothing to join.
+    expect step(Editor(..initialState("ab\ncd"), row: 1), "J").effect == Redraw
+    expect isEdit(step(initialState("ab\ncd"), "J").effect)
+}
+
+test "capital D deletes from the cursor to the end of line" {
+    expect step(at("abcd", 1), "D").state.lines == ["a"]
+    expect step(at("ab", 2), "D").effect == Redraw
+    expect isEdit(step(at("abcd", 1), "D").effect)
+    // `D` stays in Normal — it is `C` that continues into Insert.
+    expect step(at("abcd", 1), "D").state.mode == Normal
+}
+
+test "capital C changes to end of line and enters insert" {
+    expect step(at("abcd", 1), "C").state.lines == ["a"]
+    expect step(at("abcd", 1), "C").state.col == 1
+    expect step(at("abcd", 1), "C").state.mode == Insert
+    expect isEdit(step(at("abcd", 1), "C").effect)
+}
+
+test "s substitutes the char under the cursor and enters insert" {
+    expect step(at("abc", 1), "s").state.lines == ["ac"]
+    expect step(at("abc", 1), "s").state.col == 1
+    expect step(at("abc", 1), "s").state.mode == Insert
+    expect isEdit(step(at("abc", 1), "s").effect)
+}
+
+// `r` is the one two-keystroke command that gets its own *mode* rather than a
+// pending field — a mini accumulator, so it has the same abandon/no-op duties as
+// operator-pending does.
+test "r replaces the char under the cursor via a two-key sequence" {
+    expect step(initialState("abc"), "r").state.mode == Replace
+    expect step(initialState("abc"), "r").effect == Redraw
+    let pend = Editor(..initialState("abc"), col: 1, mode: Replace)
+    expect step(pend, "Z").state.lines == ["aZc"]
+    expect step(pend, "Z").state.col == 1
+    expect step(pend, "Z").state.mode == Normal
+    expect isEdit(step(pend, "Z").effect)
+    // Esc cancels with no edit.
+    expect step(pend, "Esc").state.mode == Normal
+    expect step(pend, "Esc").effect == Redraw
+    // At end of line there is nothing to replace, but the mode still resets.
+    let atEnd = Editor(..initialState("abc"), col: 3, mode: Replace)
+    expect step(atEnd, "Z").effect == Redraw
+    expect step(atEnd, "Z").state.mode == Normal
+}
+
+test "step dispatches insert-mode keys" {
+    let ins = Editor(..initialState("ac"), col: 1, mode: Insert)
+    expect step(ins, "b").effect == Redraw
+    expect step(ins, "b").state.lines == ["abc"]
+    expect step(ins, "b").state.col == 2
+    expect step(ins, "Esc").state.mode == Normal
+    // A split keeps Insert mode.
+    expect step(ins, "Enter").state.mode == Insert
+    expect step(ins, "Backspace").state.lines == ["c"]
+    expect step(ins, "Backspace").state.col == 0
+}
+
+// `:w` is the only path that produces a value the driver must act on, so the
+// effect's *payload* is asserted, not just its tag.
+test "step colon w saves the buffer and returns to normal" {
+    let cmd = step(initialState("hi\nthere"), ":").state
+    expect savedText(step(cmd, "w").effect) == "hi\nthere"
+    expect step(cmd, "w").state.mode == Normal
+    // `:q` quits; the driver breaks its loop on it.
+    expect step(cmd, "q").effect == Quit
+    expect step(cmd, "q").state.mode == Normal
+    // Any other command key cancels harmlessly.
+    expect step(cmd, "z").effect == Redraw
+    expect step(cmd, "z").state.mode == Normal
 }

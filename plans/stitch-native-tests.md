@@ -186,11 +186,30 @@ Each tranche is green in Stitch before its Rust file goes.
    `pending_op_of` went with them — all five string-projection helpers are now
    gone, which was the file's whole reason for existing.
 
-   Running total: 1746 lines across both files, from 1911 at the start, with 32
-   of the original 61 tests moved.
+   **Modes / editing / save tranche DONE — `stim.st` migration complete.** All
+   57 native tests now live in `stim.st`; `stim_fsm.rs` is **61 lines holding 5
+   `insta` snapshot tests** and nothing else, down from 1021 lines / 61 tests.
 
-   Modes / insert-editing / render tranche next.
-3. `prelude.st` gets tests, which it has never had.
+   Both files together: **1583 lines, from 1911** — the port removed ~330 lines
+   while *adding* assertions (the Rust tests often checked one coordinate where
+   the native ones check both).
+
+   **What deliberately stayed in Rust**: the snapshots. An `expect` compares two
+   values someone wrote down; a snapshot records a whole structure nobody wants
+   to write down — right for "the initial state is *this*, in full" and for the
+   ANSI byte soup `renderFrame` emits, where being exhaustive-and-unwritten is
+   the point. Native snapshot assertions remain deferred (they need a file
+   convention + accept workflow), and that is now the *only* reason any stim test
+   is in Rust.
+
+   Gotcha for future renames: `insta` keys snapshots by test name, so renaming a
+   snapshot test orphans its `.snap` file — `git mv` the snapshot alongside.
+
+   Test-only helpers now in `stim.st`: `pendingDelete`, `pendingObject`, `at`,
+   `isEdit`, `savedText`. The first three are constructions the tests repeat a
+   dozen times; the last two exist because `Edit(Str)`/`Save(Str)` carry payloads
+   and so are matched rather than compared.
+3. `prelude.st` gets tests, which it has never had. (Next.)
 
 `tests/{print,memory_churn,expressions}.rs` **stay in Rust**: their subject is
 the runtime, not a Stitch program.

@@ -288,6 +288,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stitch",
+ "toml",
  "ureq",
 ]
 

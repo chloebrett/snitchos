@@ -16,32 +16,19 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use cram_gen::{CandidateRecord, LmStudio, Sampling, Tally, describe, run_once, run_once_guarded};
-
-/// The task, until the recipe axes in `plans/corpus-recipe-axes.md` are wired
-/// in. One recipe is enough to measure a yield; the axes earn their way in once
-/// the loop runs at all.
-const TASK: &str = "\
-Write a sauna booking module: rooms are booked for exclusive use over a time
-window, so the core of the problem is detecting when two bookings overlap.
-
-Shape: a module — `ext` items, no `main`.
-Size: a small module — 1 to 4 types and 2 to 6 functions. Tests are extra and do
-not count toward that. This is a rough guide, not a limit: never delete working
-code or drop a test to hit it, and if the program naturally wants to be bigger,
-let it be.
-Use these constructs: prod, Maybe, |>
-Name things for what they do.";
+use cram_gen::{
+    CandidateRecord, LmStudio, Sampling, Tally, describe, run_once, run_once_corrected,
+};
 
 pub struct GenOptions {
     pub model: String,
     pub count: usize,
     pub out: Option<PathBuf>,
     pub endpoint: Option<String>,
-    /// Stop a candidate the instant the continuation oracle says no token can
-    /// rescue it. Saves the doomed tail — in `corpora/batch1` every failure was
-    /// one fatal token followed by hundreds of wasted ones.
-    pub guard: bool,
+    /// Rewinds allowed per candidate. When the continuation oracle says no
+    /// token can rescue the program, generation goes back to just before the
+    /// fatal text and resumes. 0 disables it entirely.
+    pub corrections: usize,
     pub sampling: Sampling,
 }
 
@@ -71,7 +58,14 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
     let batch_started = Instant::now();
 
     for index in 1..=options.count {
-        println!("── {index:03}/{} ──────────────", options.count);
+        // Cycle the axes: `--count 500` is five passes over all hundred domains,
+        // not five hundred copies of the first one.
+        let recipe = cram_gen::recipe::nth(index - 1);
+        let task = recipe.render();
+        println!(
+            "── {index:03}/{}  {} · {} · {} ──────────────",
+            options.count, recipe.domain, recipe.size, recipe.shape
+        );
         // Stream the model's output as it arrives. A candidate takes tens of
         // seconds; a silent terminal for that long is indistinguishable from a
         // hang, and the text itself is the most useful progress there is — a
@@ -80,11 +74,18 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
             print!("{chunk}");
             let _ = std::io::stdout().flush();
         };
+        // A rewind throws away text the stream has already printed, so the
+        // terminal stops matching the program that will be saved. Announce it,
+        // with control characters escaped so it is unambiguous which bytes went.
+        let mut on_rewind = |discarded: &str| {
+            print!("\n\x1b[2m⟲ rewound: \"{}\"\x1b[0m\n", cram_gen::escape(discarded));
+            let _ = std::io::stdout().flush();
+        };
         let started = Instant::now();
-        let outcome = if options.guard {
-            run_once_guarded(&model, TASK, &mut on_chunk)
+        let outcome = if options.corrections > 0 {
+            run_once_corrected(&model, &task, options.corrections, &mut on_chunk, &mut on_rewind)
         } else {
-            run_once(&model, TASK, &mut on_chunk)
+            run_once(&model, &task, &mut on_chunk)
         };
         let seconds = started.elapsed().as_secs_f64();
 
@@ -115,7 +116,11 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
                 };
                 tally.extra_blocks += run.extra_blocks;
 
-                let guarded = if run.abandoned { " [abandoned early]" } else { "" };
+                let guarded = match (run.corrections.len(), run.abandoned) {
+                    (0, false) => String::new(),
+                    (n, false) => format!(" [{n} rewind(s)]"),
+                    (n, true) => format!(" [{n} rewind(s), then abandoned]"),
+                };
                 println!(
                     "\n{index:03}: {detail}{}{guarded} — {}",
                     extra_note(run.extra_blocks),
@@ -128,12 +133,14 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
 
                 records.push(CandidateRecord {
                     index,
+                    domain: recipe.domain.clone(),
                     stage,
                     detail,
                     tokens: run.tokens,
                     seconds,
                     reasoned: run.reasoned,
                     extra_blocks: run.extra_blocks,
+                    corrections: run.corrections.clone(),
                 });
                 // Everything is kept, salvageable or not: model-produced broken
                 // code plus its diagnostic is the scarcest input the RL branch

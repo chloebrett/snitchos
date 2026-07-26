@@ -16,6 +16,8 @@ stitch = { path = "../stitch" }
 # ordinary JSON and there is no reason to write that by hand.
 ureq = { version = "2", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
+# The recipe axes are data, and TOML is the format a human will actually edit.
+toml = "0.8"
 serde_json = "1"
 
 [lints]

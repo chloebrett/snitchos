@@ -151,8 +151,9 @@ corpus generation (talks to a local OpenAI-compatible server, e.g. LM Studio):
   --top-p <f>         nucleus sampling                           (default 0.8)
   --max-tokens <n>    hard cap per candidate                     (default 1200)
   --endpoint <url>    server base URL              (default http://localhost:1234/v1)
-  --guard             stop a candidate the moment the continuation oracle
-                      says no token can rescue it (saves the doomed tail)";
+  --correct <n>       rewinds per candidate: when the continuation oracle
+                      says no token can rescue the program, go back to just
+                      before the fatal text and resume        (default 0, off)";
 
 fn parse(args: &[String]) -> Result<Options, String> {
     // `Printed` by default: it re-prints each program from its AST, so the
@@ -175,7 +176,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         count: 10,
         out: None,
         endpoint: None,
-        guard: false,
+        corrections: 0,
         sampling: cram_gen::Sampling::default(),
     };
     let mut evaluating = false;
@@ -225,7 +226,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--count" => gen_options.count = number(&value()?)?,
             "--out" => gen_options.out = Some(PathBuf::from(value()?)),
             "--endpoint" => gen_options.endpoint = Some(value()?),
-            "--guard" => gen_options.guard = true,
+            "--correct" => gen_options.corrections = number(&value()?)?,
             "--max-tokens" => gen_options.sampling.max_tokens = number(&value()?)? as u32,
             "--temp" | "--top-p" => {
                 let text = value()?;

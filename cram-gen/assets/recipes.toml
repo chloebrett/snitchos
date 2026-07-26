@@ -1,0 +1,711 @@
+# Recipe axes for corpus generation — the diversity dimensions, as data.
+#
+# Generated from plans/corpus-recipe-axes.md, which stays the source of truth
+# for *why* these are the axes. Edit there and regenerate, or edit here and
+# keep the doc in step — but do not let them drift.
+#
+# `clause` is the load-bearing field. A bare domain name lets a weak model
+# default to the same records-plus-filter program every time; the clause names
+# the actual computation, which is what makes `sauna booking` (interval
+# overlap) and `library hold queue` (FIFO per title with expiry) diverge into
+# genuinely different programs.
+
+[[recipe]]
+domain     = "warehouse bin allocation"
+clause     = "smallest bin that fits; fragmentation matters"
+constructs = "prod, Map, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "bakery inventory"
+clause     = "daily bake against sell-through; staleness expires stock"
+constructs = "prod, Maybe"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "seed catalogue"
+clause     = "germination rates and sowing windows per variety"
+constructs = "prod, sum, Result+?"
+size       = "medium"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "spare-parts bin"
+clause     = "reorder points triggered by consumption rate"
+constructs = "prod, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "tool crib checkout"
+clause     = "who holds what, and overdue detection"
+constructs = "prod, Maybe, Map"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "lost-property office"
+clause     = "match found items against claims by description"
+constructs = "sum, prod, recursion"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "pharmacy stock rotation"
+clause     = "first-expiring-first-out, not first-in-first-out"
+constructs = "prod, Result+?, uses Telemetry, |>"
+size       = "large"
+shape      = "script"
+
+[[recipe]]
+domain     = "cold-chain shipment log"
+clause     = "temperature excursions invalidate a shipment"
+constructs = "prod, sum, uses Telemetry"
+size       = "medium"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "shipping container stowage"
+clause     = "weight distribution and stacking constraints"
+constructs = "prod, recursion, Result+?, Map"
+size       = "large"
+shape      = "module"
+
+[[recipe]]
+domain     = "museum exhibit rotation"
+clause     = "light exposure budgets limit display time"
+constructs = "prod, Maybe, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "library hold queue"
+clause     = "one FIFO queue per title; holds expire if not collected"
+constructs = "prod, Result+?, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "kitchen order queue"
+clause     = "courses fire at different times so a table lands together"
+constructs = "sum, contract+on, |>"
+size       = "large"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "barber shop appointments"
+clause     = "variable service durations against chair availability"
+constructs = "prod, Maybe"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "court docket"
+clause     = "priority and continuance push cases down the list"
+constructs = "sum, prod, recursion"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "classroom timetable"
+clause     = "no room, teacher, or class double-booked"
+constructs = "prod, Map, Result+?, recursion"
+size       = "large"
+shape      = "module"
+
+[[recipe]]
+domain     = "on-call rotation"
+clause     = "fair distribution with rest periods between shifts"
+constructs = "prod, contract+on, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "ice rink session booking"
+clause     = "capacity per recurring slot, many skaters per session"
+constructs = "prod, Maybe, Map"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "allotment plot waiting list"
+clause     = "seniority ordering with plot-size preferences"
+constructs = "prod, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "community hall bookings"
+clause     = "recurring bookings collide with one-offs"
+constructs = "prod, sum, Result+?"
+size       = "medium"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "telescope observing queue"
+clause     = "targets ranked by visibility window and priority"
+constructs = "prod, contract+on, |>, uses Telemetry"
+size       = "large"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "subway turnstile"
+clause     = "fare deduction with entry/exit pairing and stuck-open faults"
+constructs = "sum, prod, uses Telemetry"
+size       = "medium"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "ferry schedule"
+clause     = "tide-dependent sailings and vehicle deck capacity"
+constructs = "prod, Maybe, Map"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "flight manifest"
+clause     = "seat assignment with weight-and-balance limits"
+constructs = "prod, Result+?, recursion, |>"
+size       = "large"
+shape      = "module"
+
+[[recipe]]
+domain     = "parking garage occupancy"
+clause     = "counts per level with oversize-vehicle rules"
+constructs = "prod, Map, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "bus stop departure board"
+clause     = "predicted vs scheduled times, with cancellations"
+constructs = "sum, prod, uses Telemetry"
+size       = "medium"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "bike share dock"
+clause     = "rebalancing when docks are full or empty"
+constructs = "prod, Maybe"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "level crossing barrier"
+clause     = "a safety interlock state machine"
+constructs = "sum, contract+on, uses Telemetry"
+size       = "medium"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "taxi meter"
+clause     = "a state machine over distance and waiting time, with tariff changes"
+constructs = "sum, prod, uses Telemetry"
+size       = "small"
+shape      = "script"
+
+[[recipe]]
+domain     = "toll booth"
+clause     = "class-based tariffs and unpaid-toll accumulation"
+constructs = "prod, sum, Result+?"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "elevator dispatch"
+clause     = "assign cars to calls to minimise waiting"
+constructs = "sum, contract+on, recursion, Map"
+size       = "large"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "weather station"
+clause     = "rolling aggregates with gap handling in the series"
+constructs = "prod, Result+?, use <-"
+size       = "medium"
+shape      = "script"
+
+[[recipe]]
+domain     = "tide table"
+clause     = "harmonic prediction and high/low extraction"
+constructs = "prod, recursion, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "seismograph log"
+clause     = "event detection above a noise floor"
+constructs = "prod, sum, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "water meter readings"
+clause     = "deltas between cumulative readings, including rollover"
+constructs = "prod, Maybe, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "air quality monitor"
+clause     = "index bands with threshold-crossing alerts"
+constructs = "sum, prod, uses Telemetry"
+size       = "medium"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "soil moisture probe"
+clause     = "irrigation decisions from depth-layered readings"
+constructs = "prod, Map"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "beehive scale"
+clause     = "nectar flow inferred from daily weight change"
+constructs = "prod, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "river gauge"
+clause     = "flood stage thresholds and rate-of-rise warnings"
+constructs = "sum, prod, uses Telemetry, |>"
+size       = "large"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "street light fault log"
+clause     = "fault clustering suggests a common circuit"
+constructs = "prod, Map, recursion"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "whale sighting log"
+clause     = "sightings grouped into encounters by time and place"
+constructs = "prod, recursion, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "household ledger"
+clause     = "double-entry balancing; categories roll up"
+constructs = "prod, Result+?, recursion, Map"
+size       = "large"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "tip pooling"
+clause     = "hours-weighted distribution with rounding remainder"
+constructs = "prod, Result+?, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "market stall takings"
+clause     = "cash reconciliation against recorded sales"
+constructs = "prod, Maybe"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "subscription billing"
+clause     = "proration on mid-cycle plan changes"
+constructs = "prod, sum, Result+?"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "currency exchange board"
+clause     = "cross-rate derivation with spread"
+constructs = "prod, Map, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "petty cash box"
+clause     = "receipts must reconcile the float"
+constructs = "prod, Result+?"
+size       = "small"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "invoice aging"
+clause     = "bucketing by days overdue with escalation"
+constructs = "prod, sum, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "vending float reconciliation"
+clause     = "coin denominations against sales"
+constructs = "prod, recursion, Map"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "locker rental"
+clause     = "periods, deposits and abandonment"
+constructs = "prod, sum, Maybe"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "library fine amnesty"
+clause     = "recompute balances under a retroactive policy"
+constructs = "prod, contract+on, |>"
+size       = "medium"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "chess clock"
+clause     = "increment and delay modes, flag detection"
+constructs = "prod, Maybe, recursion"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "darts scoring"
+clause     = "checkout paths from a remaining score"
+constructs = "sum, recursion, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "cribbage board"
+clause     = "hand scoring combinatorics (fifteens, runs, pairs)"
+constructs = "sum, recursion, Map, |>"
+size       = "large"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "bowling scorecard"
+clause     = "strikes and spares pull forward later frames"
+constructs = "sum, recursion"
+size       = "medium"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "sudoku grid"
+clause     = "constraint propagation on candidate sets"
+constructs = "prod, recursion, Map, Result+?"
+size       = "large"
+shape      = "module"
+
+[[recipe]]
+domain     = "crossword grid"
+clause     = "slot extraction and intersection consistency"
+constructs = "prod, Map, recursion"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "dominoes train"
+clause     = "matching ends: constrained graph traversal"
+constructs = "sum, recursion, contract+on"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "go territory scoring"
+clause     = "flood-fill regions; distinguish alive groups from dead"
+constructs = "sum, recursion, Map, |>"
+size       = "large"
+shape      = "module"
+
+[[recipe]]
+domain     = "pinball high scores"
+clause     = "initials table with tie-breaking rules"
+constructs = "prod, Maybe"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "tournament bracket"
+clause     = "seeding, byes and advancement"
+constructs = "sum, recursion, prod"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "swim lane assignment"
+clause     = "seed times into lanes, fastest in the middle"
+constructs = "prod, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "marathon split times"
+clause     = "pace projection from partial splits"
+constructs = "prod, Maybe, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "rowing crew seating"
+clause     = "balance port and starboard by side preference"
+constructs = "prod, sum, recursion"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "referee assignment"
+clause     = "avoid conflicts of interest and travel clashes"
+constructs = "prod, Map, Result+?, recursion"
+size       = "large"
+shape      = "module"
+
+[[recipe]]
+domain     = "ski patrol incidents"
+clause     = "triage ordering and resource dispatch"
+constructs = "sum, contract+on, uses Telemetry"
+size       = "medium"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "climbing route grading"
+clause     = "consensus grade from a set of opinions"
+constructs = "prod, sum, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "campsite pitch allocation"
+clause     = "pitch size and hookup requirements"
+constructs = "prod, Maybe, Map"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "orienteering control points"
+clause     = "validate a punched course in order"
+constructs = "prod, recursion, Result+?"
+size       = "medium"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "sauna booking"
+clause     = "exclusive occupancy, so overlapping intervals must be detected"
+constructs = "prod, Maybe, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "hiking trail register"
+clause     = "sign-in/sign-out pairing to find overdue parties"
+constructs = "prod, sum, Maybe"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "greenhouse watering"
+clause     = "zone schedules adjusted by recent rainfall"
+constructs = "prod, contract+on, uses Telemetry, Map"
+size       = "large"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "bird feeder log"
+clause     = "species counts with seasonal comparison"
+constructs = "prod, Map, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "orchard harvest"
+clause     = "per-tree yields and picking-window scheduling"
+constructs = "prod, Maybe, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "sheep flock register"
+clause     = "lineage tracking and lambing records"
+constructs = "prod, recursion, Map"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "mushroom cultivation"
+clause     = "substrate batches through contamination checks"
+constructs = "sum, prod, Result+?"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "compost turning"
+clause     = "carbon-nitrogen ratio and turn scheduling"
+constructs = "prod, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "apiary inspection"
+clause     = "queen status and disease signs per hive over time"
+constructs = "prod, sum, uses FsWrite, Map"
+size       = "large"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "fish hatchery tank"
+clause     = "stocking density against growth rates"
+constructs = "prod, Result+?"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "tree ring measurement"
+clause     = "series cross-dating between cores"
+constructs = "prod, recursion, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "seed bank vault"
+clause     = "viability testing intervals per accession"
+constructs = "prod, Maybe, Map"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "knitting pattern rows"
+clause     = "stitch-count arithmetic across shaping rows"
+constructs = "prod, recursion, Result+?"
+size       = "medium"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "pottery kiln firing"
+clause     = "ramp, soak and cooling schedules per clay body"
+constructs = "sum, contract+on, uses Telemetry"
+size       = "medium"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "loom warp threading"
+clause     = "threading and treadling from a draft"
+constructs = "prod, Map, recursion"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "woodworking cut list"
+clause     = "cutting plan minimising offcut waste"
+constructs = "prod, recursion, |>, Result+?"
+size       = "large"
+shape      = "module"
+
+[[recipe]]
+domain     = "bookbinding signatures"
+clause     = "folding and nesting arithmetic; page order is non-obvious"
+constructs = "prod, recursion"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "dyeing lot tracking"
+clause     = "batch consistency across dye lots"
+constructs = "prod, Maybe"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "model railway layout"
+clause     = "block occupancy and route setting"
+constructs = "sum, Map, contract+on, recursion"
+size       = "large"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "brewery fermentation"
+clause     = "a time series against target curves, with alerts"
+constructs = "prod, contract+on, uses Telemetry"
+size       = "large"
+shape      = "script"
+
+[[recipe]]
+domain     = "coffee roast profiles"
+clause     = "first-crack timing and development ratio"
+constructs = "prod, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "cheese ageing cave"
+clause     = "turn and wash schedules by wheel age"
+constructs = "prod, uses Telemetry, Result+?"
+size       = "medium"
+shape      = "script"
+
+[[recipe]]
+domain     = "playlist shuffling"
+clause     = "avoid repeating artists too closely"
+constructs = "prod, recursion, |>"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "podcast feed"
+clause     = "episode ordering with seasons and specials"
+constructs = "prod, sum, Maybe"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "subtitle timing"
+clause     = "interval arithmetic with shift and stretch"
+constructs = "prod, Result+?, |>"
+size       = "medium"
+shape      = "library-with-heavy-tests"
+
+[[recipe]]
+domain     = "photo album tagging"
+clause     = "tag hierarchies and set queries"
+constructs = "prod, Map, recursion, |>"
+size       = "large"
+shape      = "module"
+
+[[recipe]]
+domain     = "radio station rotation"
+clause     = "rotation categories with separation rules"
+constructs = "prod, contract+on, Map"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "e-reader bookmarks"
+clause     = "position sync across devices with conflicts"
+constructs = "prod, sum, Result+?"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "thermostat schedule"
+clause     = "setpoints with hold and override precedence"
+constructs = "sum, prod, Maybe"
+size       = "medium"
+shape      = "module"
+
+[[recipe]]
+domain     = "laundromat machine status"
+clause     = "cycle timing and queue notification"
+constructs = "sum, prod, uses Telemetry"
+size       = "medium"
+shape      = "server loop"
+
+[[recipe]]
+domain     = "dog licence register"
+clause     = "renewal windows and lapse handling"
+constructs = "prod, Maybe, |>"
+size       = "small"
+shape      = "module"
+
+[[recipe]]
+domain     = "lost pet register"
+clause     = "match reports to sightings by area and description"
+constructs = "prod, recursion, Map, Maybe"
+size       = "large"
+shape      = "module"

@@ -23,6 +23,13 @@ ext padLeft(s: Str, width: Int) -> Str = {
     short <= 0 => s | spaces(short) + s
 }
 
+test "pad widens to the column and never truncates" {
+    expect pad("ok", 5) == "ok   "
+    expect padLeft("7", 3) == "  7"
+    // A value wider than its column must look wrong, not be cut.
+    expect pad("overlong", 3) == "overlong"
+}
+
 // `n` spaces. Built by folding rather than recursing so a wide pad costs one
 // pass and no stack.
 ext spaces(n: Int) -> Str = repeatStr(" ", n)
@@ -32,6 +39,11 @@ ext spaces(n: Int) -> Str = repeatStr(" ", n)
 ext repeatStr(s: Str, n: Int) -> Str =
     fold(1..=n, "", (acc, _) -> acc + s)
 
+test "repeat of a non-positive count is empty rather than an error" {
+    expect repeatStr("ab", 0) == ""
+    expect repeatStr("ab", -3) == ""
+}
+
 // Split `s` into lines of at most `width` characters, breaking at spaces.
 // A word longer than `width` gets its own line rather than being cut in half —
 // truncating a token is how log output starts lying about identifiers.
@@ -40,12 +52,26 @@ ext wrap(s: Str, width: Int) -> List<Str> =
         |> fold([], (lines, word) -> addWord(lines, word, width))
         |> reverse
 
+test "wrap breaks at spaces and keeps every word" {
+    expect Str.join(wrap("the quick brown fox", 9), "|") == "the quick|brown fox"
+}
+
+// The case a naive `wrap` gets wrong: a single word longer than the width has
+// nowhere to break, and cutting it would corrupt an identifier.
+test "wrap gives an overlong word its own line intact" {
+    expect Str.join(wrap("a supercalifragilistic b", 5), "|") == "a|supercalifragilistic|b"
+}
+
 // Prefix every line of `s` with `n` spaces. Blank lines stay blank — trailing
 // whitespace on an empty line is invisible in a diff and noisy in a corpus.
 ext indent(s: Str, n: Int) -> Str =
     Str.split(s, "\n")
         |> map(line -> line == "" => line | spaces(n) + line)
         |> Str.join("\n")
+
+test "indent prefixes content lines and leaves blank ones alone" {
+    expect indent("one\n\ntwo", 2) == "  one\n\n  two"
+}
 
 // Capitalise the first character, lowercase the rest: `"BOOT" -> "Boot"`.
 ext titleCase(s: Str) -> Str = {
@@ -54,6 +80,11 @@ ext titleCase(s: Str) -> Str = {
         let tail = Str.lower(Str.slice(s, 1, Str.length(s)))
         head + tail
     }
+}
+
+test "title case normalises the whole word" {
+    expect titleCase("BOOT") == "Boot"
+    expect titleCase("") == ""
 }
 
 // One step of `wrap`: put `word` on the current line if it fits, else start a
