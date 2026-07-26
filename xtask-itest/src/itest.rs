@@ -270,6 +270,7 @@ catalog! {
     wfi "manifest-satisfy-attenuates"     scenarios::manifest_satisfy_attenuates     [userspace, fs] {"manifest-satisfy"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
+    wfi "stitch-float-does-not-kill-the-kernel" scenarios::stitch_float_does_not_kill_the_kernel [userspace, stitch] {"stitch-repl"};
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};
     wfi "stitch-view-reads-a-file"        scenarios::stitch_view_reads_a_file       [userspace, stitch, fs] {"stitch-fs"};
     wfi "stitch-cross-pipe-runs-a-stage"  scenarios::stitch_cross_pipe_runs_a_stage [userspace, stitch, fs] {"stitch-fs"};

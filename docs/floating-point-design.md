@@ -1,6 +1,18 @@
 # Floating point on SnitchOS
 
-**Status:** 📐 **DESIGN — prompted by a live bug.** `sstatus.FS` is never set,
+**Status:** 🚧 **IN PROGRESS** — increments 1 (unhandled U-mode trap kills the
+process) and 2 (snemu delivers a guest illegal-instruction trap) are shipped; FP
+itself is not. Sequence, per-increment tests and the corrections below live in
+[../plans/floating-point.md](../plans/floating-point.md).
+
+Two premises in this doc turned out to be wrong once the code was read, and are
+corrected in the plan rather than silently here: problem (2)'s "as other user
+faults do" — other user faults *parked the hart*, they didn't kill anything — and
+problem (3), since snemu does print a guest kernel panic in the console tail of a
+failing scenario. The original debug was blind because the scenario was
+*unregistered*, so nothing failed and nothing dumped that tail.
+
+**Prompted by a live bug.** `sstatus.FS` is never set,
 so every floating-point instruction traps as illegal (`scause=2`) — and the
 `UnknownException` arm panics the kernel regardless of privilege. Typing
 `1.5 + 1.5` at the Stitch REPL takes down the machine. Found 2026-07-26 while

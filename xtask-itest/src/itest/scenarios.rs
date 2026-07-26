@@ -368,6 +368,50 @@ pub fn stitch_reads_a_line(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=stitch-repl`: **the bug this whole FP arc came from.** Typing a float
+/// at the REPL used to take the machine down — `1.5 + 1.5` compiles to an `f64`
+/// add, `sstatus.FS` is never set, so the FP instruction trapped as illegal and the
+/// trap dispatcher's catch-all `panic!` killed the kernel.
+///
+/// Asserts the machine *survives* it. That is the honest intermediate state: the
+/// REPL process itself is still killed, because userspace FP genuinely does not
+/// work yet (increments 3–5 of `plans/floating-point.md`). What changed is the
+/// blast radius — one process instead of the whole kernel.
+///
+/// This scenario is a **tripwire for increment 4**, and is meant to be rewritten
+/// then: once FP authority is derived from the ELF and enabled lazily at this very
+/// trap, `1.5 + 1.5` should print `3` and the fault Log should stop appearing. If
+/// that lands and this scenario still passes unchanged, the lazy enable isn't
+/// reaching the REPL.
+///
+/// Note the two engines only agree here because snemu models the FS gate
+/// (increment 3a): before that, snemu had no illegal-instruction cause at all and
+/// halted the run host-side instead of trapping the guest.
+pub fn stitch_float_does_not_kill_the_kernel(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    h.send_input(b"1.5 + 1.5\n").map_err(|e| format!("inject REPL input: {e}"))?;
+
+    // The FP instruction traps, and the kernel attributes the death to the REPL
+    // rather than dying with it.
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("user fault") && msg.contains("illegal instruction"))
+    })
+    .ok_or(
+        "no 'user fault … illegal instruction' Log within 30s after typing a float. Either the \
+         float never reached an FP instruction (constant-folded? integer path?), or the kernel \
+         panicked instead of terminating the REPL",
+    )?;
+
+    // The point of the whole increment: the kernel is alive on the far side.
+    h.wait_for(SEC * 30, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat after the REPL's float — the kernel died with the REPL process")?;
+
+    Ok(())
+}
+
 /// `workload=stitch-repl`: a Stitch program's `print` reaches the **UART terminal**
 /// on the metal — the `RuntimePlatform` *write* side + the `ConsoleOut` cap. Unlike
 /// `emit`/`span` (which become telemetry frames), `print` output goes to the UART,

@@ -7,7 +7,8 @@ use crate::block::{self, Block, BlockCache, Compiled};
 use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
 use crate::decode::{
-    Instr, amo_op, expand, funct3, funct7, is_compressed, is_guest_illegal, opcode, priv12, system,
+    Instr, amo_op, expand, funct3, funct7, is_compressed, is_fp_instruction, is_guest_illegal,
+    opcode, priv12, system,
 };
 use crate::fetch_cache::{FetchCache, Fetched};
 use crate::mem::{BusError, Memory, RAM_BASE};
@@ -1013,6 +1014,16 @@ impl Hart {
     }
 
     fn execute(&mut self, raw: u32, bus: &mut Bus) -> Result<(), StepError> {
+        // `sstatus.FS == Off` ⇒ every FP instruction and FP CSR access is illegal
+        // for the guest. Checked here rather than in the fetch path so it covers the
+        // decode-cache hit and the compressed expansion (`c.fld` expands to `fld`)
+        // from one site, and checked *before* dispatch so an FP opcode snemu has no
+        // unit for is refused as hardware would refuse it — its host-side gap report
+        // is only the honest answer once FS is on.
+        if self.csr_read(addr::SSTATUS) & sstatus::FS == 0 && is_fp_instruction(raw) {
+            self.take_trap(cause::ILLEGAL_INSTRUCTION, u64::from(raw));
+            return Ok(());
+        }
         let instr = Instr(raw);
         match instr.opcode() {
             opcode::LUI => {
@@ -3317,19 +3328,23 @@ mod tests {
     /// hardware refusing the instruction, which sends you debugging the kernel:
     /// the failure mode `docs/floating-point-design.md` opens with.
     ///
-    /// The witness is `fadd.d f0, f0, f0` (OP-FP, opcode 0x53) — legal RV64D that
-    /// snemu has no FP unit for. Distinct path from
-    /// `spec_guaranteed_illegal_encodings_trap_the_guest` below; both must stay
-    /// covered, since the whole point is that snemu tells them apart.
+    /// The witness is `mret` — legal RV64 that snemu doesn't model (it plays
+    /// firmware, so the guest never returns from M-mode). Deliberately **not** an
+    /// FP instruction: FP has its own `sstatus.FS` gate, so an FP witness here
+    /// would prove the gate rather than this rule. Distinct path from
+    /// `spec_guaranteed_illegal_encodings_trap_the_guest` and from
+    /// `fp_instruction_with_fs_enabled_reports_the_gap_rather_than_trapping`; all
+    /// three must stay covered, since the whole point is that snemu tells the three
+    /// cases apart.
     #[test]
     fn legal_but_unmodelled_instruction_halts_the_host() {
-        const FADD_D: u32 = 0x0200_0053; // fadd.d f0, f0, f0
-        let mut cpu = cpu_with(&[FADD_D]);
+        const MRET: u32 = 0x3020_0073;
+        let mut cpu = cpu_with(&[MRET]);
         assert_eq!(
             cpu.step(),
             Err(StepError::Unimplemented {
                 pc: RAM_BASE,
-                instr: FADD_D,
+                instr: MRET,
             })
         );
     }
@@ -3398,6 +3413,74 @@ mod tests {
         stval: u64,
         instret: u64,
         marker: u64,
+    }
+
+    /// A floating-point instruction while `sstatus.FS == Off` is illegal **for the
+    /// guest** — that is the architectural mechanism the kernel's lazy-FP enable
+    /// will hang off (trap → authorised? → set FS and retry → else kill), and it is
+    /// exactly what a float at the Stitch REPL hits today, since nothing in the
+    /// kernel ever sets FS. Every FP opcode family must be gated, not just the one
+    /// that happened to get tested.
+    #[test]
+    fn fp_instruction_with_fs_off_traps_the_guest_as_illegal() {
+        const HANDLER: u64 = RAM_BASE + 0x200;
+        // One minimal encoding per FP opcode family: rd/rs/funct bits are
+        // irrelevant — with FS Off the instruction is refused before decode.
+        for (name, word) in [
+            ("fadd.d (OP-FP)", 0x0200_0053_u32),
+            ("fld (LOAD-FP)", 0x0000_3007),
+            ("fsd (STORE-FP)", 0x0000_3027),
+            ("fmadd.d (MADD)", 0x0200_0043),
+            ("fmsub.d (MSUB)", 0x0200_0047),
+            ("fnmsub.d (NMSUB)", 0x0200_004b),
+            ("fnmadd.d (NMADD)", 0x0200_004f),
+        ] {
+            let mut cpu = cpu_with(&[word]);
+            cpu.hart.csr.write(addr::STVEC, HANDLER).unwrap();
+            // FS left at its reset value, Off.
+
+            assert_eq!(cpu.step(), Ok(()), "{name} should trap the guest, not halt the host");
+            assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), 2, "{name}: illegal instruction");
+            assert_eq!(cpu.hart.csr.read(addr::STVAL).unwrap(), u64::from(word), "{name}: stval");
+            assert_eq!(cpu.hart.csr.read(addr::SEPC).unwrap(), RAM_BASE, "{name}: sepc un-advanced");
+        }
+    }
+
+    /// The FP **CSRs** are gated by FS too — `fflags`, `frm` and `fcsr` are FP
+    /// state, so touching them with FS Off is illegal rather than snemu's
+    /// unknown-CSR gap. Without this the kernel's first `csrr fcsr` would look like
+    /// a hole in snemu's CSR coverage instead of the architectural refusal it is.
+    #[test]
+    fn fp_csr_access_with_fs_off_traps_the_guest_as_illegal() {
+        const HANDLER: u64 = RAM_BASE + 0x200;
+        for (name, csr) in [("fflags", 0x001_u32), ("frm", 0x002), ("fcsr", 0x003)] {
+            // csrrs x1, <csr>, x0 — a plain read.
+            let word = (csr << 20) | (0b010 << 12) | (1 << 7) | opcode::SYSTEM;
+            let mut cpu = cpu_with(&[word]);
+            cpu.hart.csr.write(addr::STVEC, HANDLER).unwrap();
+
+            assert_eq!(cpu.step(), Ok(()), "reading {name} with FS Off should trap the guest");
+            assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), 2, "{name}: illegal instruction");
+        }
+    }
+
+    /// The other half of the rule, and the one that keeps snemu honest: with FS
+    /// **enabled**, an FP instruction snemu has no unit for is snemu's *gap*, so it
+    /// must halt the host naming pc + instr — never trap the guest. A guest trap
+    /// here would be indistinguishable from hardware refusing FP, sending you
+    /// debugging the kernel's FP authority logic when the real answer is "snemu
+    /// hasn't implemented fadd.d yet".
+    #[test]
+    fn fp_instruction_with_fs_enabled_reports_the_gap_rather_than_trapping() {
+        const FADD_D: u32 = 0x0200_0053;
+        let mut cpu = cpu_with(&[FADD_D]);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+
+        assert_eq!(
+            cpu.step(),
+            Err(StepError::Unimplemented { pc: RAM_BASE, instr: FADD_D }),
+            "FS enabled → snemu's gap, which must name itself host-side",
+        );
     }
 
     /// The RISC-V spec **guarantees** the all-zero and all-ones instruction words

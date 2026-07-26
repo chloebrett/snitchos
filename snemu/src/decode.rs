@@ -18,6 +18,28 @@ pub(crate) mod opcode {
     pub const SYSTEM: u32 = 0x73;
     pub const MISC_MEM: u32 = 0x0f;
     pub const AMO: u32 = 0x2f;
+    /// `flw` / `fld` — FP loads.
+    pub const LOAD_FP: u32 = 0x07;
+    /// `fsw` / `fsd` — FP stores.
+    pub const STORE_FP: u32 = 0x27;
+    /// The four fused multiply-add families, `fmadd` / `fmsub` / `fnmsub` / `fnmadd`.
+    pub const MADD: u32 = 0x43;
+    pub const MSUB: u32 = 0x47;
+    pub const NMSUB: u32 = 0x4b;
+    pub const NMADD: u32 = 0x4f;
+    /// FP register-register ops: arithmetic, compares, converts, moves, sign
+    /// injection, classify.
+    pub const OP_FP: u32 = 0x53;
+}
+
+/// The FP control CSRs, gated by `sstatus.FS` exactly like the FP instructions.
+pub(crate) mod fp_csr {
+    /// Accrued exception flags (`fcsr[4:0]`).
+    pub const FFLAGS: u16 = 0x001;
+    /// Dynamic rounding mode (`fcsr[7:5]`).
+    pub const FRM: u16 = 0x002;
+    /// The whole control/status register.
+    pub const FCSR: u16 = 0x003;
 }
 
 /// funct3 ALU-op selectors, `instr[14:12]` — shared by OP and OP-IMM.
@@ -262,6 +284,40 @@ pub(crate) fn is_compressed(half: u16) -> bool {
 /// classified at the FS check, not here.
 pub(crate) fn is_guest_illegal(encoded: u32) -> bool {
     encoded == 0 || encoded == u32::MAX
+}
+
+/// Does `raw` (a full 32-bit instruction, post-[`expand`]) touch floating-point
+/// state? Every FP opcode family, plus a `csr*` naming one of the [`fp_csr`]
+/// registers.
+///
+/// This is the `sstatus.FS` gate's predicate: with `FS == Off` all of these are
+/// illegal for the guest — the architectural hook the kernel's lazy-FP enable will
+/// hang off, and the reason `1.5 + 1.5` at the Stitch REPL faults today.
+///
+/// Classified by *opcode family* rather than by "instructions snemu implements",
+/// deliberately: the gate must refuse an FP instruction snemu has no unit for
+/// just as hardware would, and the FS check runs before any decode, so an
+/// unimplemented FP opcode reaches its host-side gap report only when FS is on
+/// (where the gap is the honest answer). Getting that order backwards is the
+/// failure mode `docs/floating-point-design.md` is built around.
+pub(crate) fn is_fp_instruction(raw: u32) -> bool {
+    let instr = Instr(raw);
+    match instr.opcode() {
+        opcode::LOAD_FP
+        | opcode::STORE_FP
+        | opcode::MADD
+        | opcode::MSUB
+        | opcode::NMSUB
+        | opcode::NMADD
+        | opcode::OP_FP => true,
+        // A `csr*` instruction (SYSTEM with a non-zero funct3 — funct3 0 is
+        // ecall/ebreak/sret/wfi/sfence) naming fflags, frm or fcsr.
+        opcode::SYSTEM if instr.funct3() != 0 => matches!(
+            instr.csr(),
+            fp_csr::FFLAGS | fp_csr::FRM | fp_csr::FCSR
+        ),
+        _ => false,
+    }
 }
 
 /// Expand a 16-bit compressed instruction to its canonical 32-bit form, or

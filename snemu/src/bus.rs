@@ -121,9 +121,6 @@ impl Bus {
     /// Telemetry payload the virtio-net device extracted from its TX datagrams
     /// (Ethernet/IP/UDP + virtio-net headers stripped) — the same COBS stream as
     /// [`Self::virtio_tx_output`], for the `net=` boot path.
-    // Consumed by the `net=` itest path (the harness selects the net stream when
-    // the workload boots with `net=`); wired in the follow-on increment.
-    #[allow(dead_code)]
     pub(crate) fn net_tx_output(&self) -> &[u8] {
         self.virtio.net_tx_output()
     }

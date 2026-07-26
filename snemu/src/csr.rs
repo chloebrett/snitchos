@@ -35,6 +35,21 @@ pub(crate) mod sstatus {
     /// Permit Supervisor User Memory access — S-mode may load/store U-pages only
     /// when this is set (never fetch from them).
     pub const SUM: u64 = 1 << 18;
+    /// Floating-point unit state, `sstatus[14:13]`: 0 = Off, 1 = Initial,
+    /// 2 = Clean, 3 = Dirty. **Off means every FP instruction and every FP CSR
+    /// access traps as illegal** — that is the gate the kernel's lazy-FP enable
+    /// hangs off, and the reason a float at the Stitch REPL faults today (nothing
+    /// in the kernel ever sets this).
+    ///
+    /// snemu distinguishes Off from not-Off; it does not yet track the
+    /// Clean/Dirty transitions that let a kernel skip saving unmodified FP state,
+    /// because nothing reads them until the kernel actually enables FP.
+    pub const FS: u64 = 0b11 << 13;
+    /// `FS = Initial` — FP on, registers at their reset values. Test-only until
+    /// snemu grows the FP unit (plans/floating-point.md 3b): production code only
+    /// ever asks whether FS is Off, and nothing in snemu *sets* FS — the guest does.
+    #[cfg(test)]
+    pub const FS_INITIAL: u64 = 0b01 << 13;
 }
 
 /// The CSR addresses snemu currently models (the S-mode trap set + satp).
