@@ -66,6 +66,55 @@ fn an_unterminated_reasoning_block_yields_no_program() {
     assert!(got.program.trim().is_empty(), "got {:?}", got.program);
 }
 
+/// Throughput is the number that decides whether a 500k-token corpus is hours
+/// or days, so it has to come off the run rather than be estimated afterwards.
+/// One SSE frame is one token, so counting frames counts tokens.
+#[test]
+fn a_run_counts_the_tokens_it_streamed() {
+    let raw = "one\ntwo\nthree\n";
+    let run = run_once(&Fake(raw.into()), "anything", &mut |_| {}).expect("fake succeeds");
+    assert_eq!(run.tokens, 3, "one chunk per line from the fake");
+}
+
+/// The batch record has to survive the terminal. A funnel scrolled past is not
+/// evidence, and the whole point of keeping failures is that they are the
+/// scarcest input the RL branch has.
+#[test]
+fn a_candidate_record_serialises_the_whole_funnel_state() {
+    let record = cram_gen::CandidateRecord {
+        index: 7,
+        stage: "parse".into(),
+        detail: "unexpected character `&`".into(),
+        tokens: 412,
+        seconds: 9.5,
+        reasoned: true,
+        extra_blocks: 1,
+    };
+    let json = serde_json::to_string(&record).expect("serialises");
+    for expected in
+        ["\"index\":7", "\"stage\":\"parse\"", "\"tokens\":412", "\"reasoned\":true"]
+    {
+        assert!(json.contains(expected), "{expected} missing from {json}");
+    }
+}
+
+/// Whether the server actually honoured "no thinking" is a fact about the run,
+/// not something the operator should have to infer from a wall of prose.
+#[test]
+fn a_run_records_whether_the_response_contained_reasoning() {
+    let thought = run_once(
+        &Fake(format!("<think>\nplanning\n</think>\n\n```stitch\n{GOOD}```")),
+        "anything",
+        &mut |_| {},
+    )
+    .expect("fake succeeds");
+    assert!(thought.reasoned, "a <think> block should be recorded");
+
+    let direct = run_once(&Fake(format!("```stitch\n{GOOD}```")), "anything", &mut |_| {})
+        .expect("fake succeeds");
+    assert!(!direct.reasoned);
+}
+
 /// A response with no fence at all is still a candidate — the fence is how the
 /// model was *asked* to reply, not a precondition for the program being real.
 #[test]

@@ -2540,6 +2540,7 @@ dependencies = [
  "cram-gen",
  "kvetch-model",
  "kvetch-vocab",
+ "serde_json",
  "stitch",
 ]
 

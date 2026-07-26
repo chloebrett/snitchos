@@ -133,7 +133,33 @@ pub struct Run {
     pub raw: String,
     pub program: String,
     pub extra_blocks: usize,
+    /// The response carried a `<think>` block, i.e. the server did **not**
+    /// honour the request to disable reasoning. Recorded rather than inferred:
+    /// it is the difference between "the prompt is wrong" and "the server
+    /// ignored a setting", and those have different fixes.
+    pub reasoned: bool,
+    /// Streamed fragments, which is one per token — the basis for tok/s, and so
+    /// for whether a 500k-token corpus is an afternoon or a week.
+    pub tokens: usize,
     pub outcome: Outcome,
+}
+
+/// One row of a batch manifest.
+///
+/// The terminal scrolls; the funnel has to survive it. Kept beside the saved
+/// `.st`/`.raw.md` pair so a batch can be re-read months later without
+/// re-deriving what happened to each candidate.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CandidateRecord {
+    pub index: usize,
+    /// `empty` | `parse` | `type` | `tests` | `ok`.
+    pub stage: String,
+    /// The gate's own message — the raw material for a repair trace.
+    pub detail: String,
+    pub tokens: usize,
+    pub seconds: f64,
+    pub reasoned: bool,
+    pub extra_blocks: usize,
 }
 
 /// Ask `model` for a program and take it all the way to a gate verdict.
@@ -145,10 +171,15 @@ pub fn run_once<M: Model + ?Sized>(
     task: &str,
     on_chunk: &mut dyn FnMut(&str),
 ) -> Result<Run, String> {
-    let raw = model.complete(&prompt::system(), &prompt::user(task), on_chunk)?;
+    let mut tokens = 0usize;
+    let raw = model.complete(&prompt::system(), &prompt::user(task), &mut |chunk| {
+        tokens += 1;
+        on_chunk(chunk);
+    })?;
     let Extracted { program, extra_blocks } = extract(&raw);
+    let reasoned = raw.contains("<think>");
     let outcome = gate::run(&program);
-    Ok(Run { raw, program, extra_blocks, outcome })
+    Ok(Run { raw, program, extra_blocks, reasoned, tokens, outcome })
 }
 
 /// Per-stage counts for a batch.
@@ -160,6 +191,10 @@ pub fn run_once<M: Model + ?Sized>(
 /// yield percentage collapses four different actions into one shrug.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
+    /// The response contained no program at all — almost always a reasoning
+    /// block that ran into the token cap. A prompt/config problem, not a Stitch
+    /// one, so it is counted before the gate rather than as a parse death.
+    pub empty: usize,
     pub parse: usize,
     pub type_errors: usize,
     pub tests: usize,
@@ -169,6 +204,10 @@ pub struct Tally {
 }
 
 impl Tally {
+    pub fn record_empty(&mut self) {
+        self.empty += 1;
+    }
+
     pub fn record(&mut self, outcome: &Outcome) {
         match outcome {
             Outcome::Parse(_) => self.parse += 1,
@@ -186,8 +225,8 @@ impl Tally {
     #[must_use]
     pub fn funnel(&self, attempted: usize) -> String {
         format!(
-            "{attempted} attempted → model errors {} → parse {} → type {} → tests {} → ok {}",
-            self.errors, self.parse, self.type_errors, self.tests, self.ok
+            "{attempted} attempted → model errors {} → no program {} → parse {} → type {} → tests {} → ok {}",
+            self.errors, self.empty, self.parse, self.type_errors, self.tests, self.ok
         )
     }
 }
@@ -210,12 +249,27 @@ pub fn describe(outcome: &Outcome) -> String {
 pub struct Sampling {
     pub temperature: f64,
     pub top_p: f64,
+    pub top_k: u32,
+    /// Qwen recommends 1.5 alongside non-thinking mode for *general* tasks.
+    /// Left at 0 here on purpose: code legitimately repeats `let`, `ext`, `@`
+    /// and closing parens, and penalising that degrades programs in a way that
+    /// is hard to attribute later. Raise it only with a measurement.
+    pub presence_penalty: f64,
     pub max_tokens: u32,
 }
 
 impl Default for Sampling {
     fn default() -> Self {
-        Self { temperature: 0.7, top_p: 0.8, max_tokens: 1200 }
+        Self {
+            temperature: 0.7,
+            top_p: 0.8,
+            top_k: 20,
+            presence_penalty: 0.0,
+            // Generous, because a hybrid-reasoning model that ignores the
+            // no-thinking request spends most of its budget before the program
+            // starts — and a truncated response is not a verdict about Stitch.
+            max_tokens: 4096,
+        }
     }
 }
 
@@ -252,8 +306,16 @@ impl Model for LmStudio {
             ],
             "temperature": self.sampling.temperature,
             "top_p": self.sampling.top_p,
+            "top_k": self.sampling.top_k,
+            "presence_penalty": self.sampling.presence_penalty,
             "max_tokens": self.sampling.max_tokens,
             "stream": true,
+            // Hybrid-reasoning models default to thinking, which here is pure
+            // cost — the tokens are discarded and they routinely consume the
+            // whole budget before a program appears. Not part of the OpenAI
+            // schema, so a server that does not understand it ignores it; the
+            // ones that do pass it to the chat template.
+            "chat_template_kwargs": { "enable_thinking": false },
         });
 
         let response = ureq::post(&format!("{}/chat/completions", self.base_url))

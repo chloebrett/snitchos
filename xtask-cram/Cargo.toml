@@ -20,6 +20,8 @@ cram-eval = { path = "../cram-eval" }
 # rather than in lean `xtask` so an edit to it does not recompile the tool that
 # runs `cargo xtask test`.
 cram-gen = { path = "../cram-gen" }
+# The batch manifest — a funnel scrolled past is not evidence.
+serde_json = "1"
 kvetch-model = { path = "../kvetch-model" }
 kvetch-vocab = { path = "../kvetch-vocab" }
 # The parser that judges whether sampled output is legal Stitch.
