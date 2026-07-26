@@ -192,6 +192,7 @@ pub fn run(metrics: Metrics) -> ! {
             crate::ramfb::present();
             emit_core(&metrics, count);
             crate::counter::drain_all();
+            crate::pwmdac::drain_pending_xruns();
             emit_frame_metrics(&metrics);
             emit_heap_metrics(&metrics);
             emit_sched_metrics(&metrics);

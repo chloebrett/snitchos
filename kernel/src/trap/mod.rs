@@ -25,6 +25,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use kernel_obs::clock::Clock;
 use kernel_boot::trap::{FaultDisposition, TrapCause, decode_scause, exception_name};
+use kernel_boot::timer::{Due, TimerWheel};
 
 use crate::percpu::PerCpu;
 
@@ -81,6 +82,15 @@ pub static TICK_COUNT: PerCpu<AtomicU64> =
 /// `Relaxed`: same-CPU IRQ handoff — trap return sequences memory.
 pub static TICK_PENDING: PerCpu<AtomicBool> =
     PerCpu::new([const { AtomicBool::new(false) }; crate::percpu::MAX_HARTS]);
+
+/// Per-hart soonest-deadline timer wheel multiplexing this hart's one timer between
+/// the scheduler tick and (when a stream plays) the audio feed. `None` until the
+/// hart's first timer fire, which self-initialises it (capturing the sched interval)
+/// and counts as a sched tick. Behind a `Mutex` because v2 Increment 5 enables audio
+/// from another context; today only [`handle_timer`] touches it, per hart, with SIE
+/// masked — no contention. With audio disabled it reduces to today's fixed cadence.
+static AUDIO_WHEEL: PerCpu<crate::sync::Mutex<Option<TimerWheel>>> =
+    PerCpu::new([const { crate::sync::Mutex::new(None) }; crate::percpu::MAX_HARTS]);
 
 /// Duration of the most recent timer IRQ in ticks. The IRQ handler
 /// measures `rdtime` at entry and exit; the main thread reads this
@@ -327,41 +337,70 @@ fn terminate_faulting_process(code: u64) -> ! {
 fn handle_timer(frame: &TrapFrame) {
     let start = CLOCK.now();
     let interval = TIMER_INTERVAL_TICKS.load(Ordering::Relaxed);
-    CLOCK.arm(start + interval);
-    // The timer fires fast for responsive RX drain + preemption, but the
-    // heartbeat runs only every `TICKS_PER_HEARTBEAT`-th tick (its wall-clock
-    // cadence unchanged) — so the typing-latency win doesn't flood telemetry.
-    let ticks = TICK_COUNT.this_cpu().fetch_add(1, Ordering::Relaxed) + 1;
-    if ticks.is_multiple_of(TICKS_PER_HEARTBEAT) {
-        TICK_PENDING.this_cpu().store(true, Ordering::Relaxed);
+
+    // Multiplex this hart's single timer between the scheduler tick and the audio
+    // feed via the soonest-deadline wheel. The wheel self-initialises on the first
+    // fire — which IS a sched tick — capturing the interval; thereafter `poll`
+    // decides which deadline(s) are due. Arm the next deadline (acking the current
+    // pending bit) before doing any work. With audio disabled the wheel yields the
+    // same fixed cadence as before, so nothing below changes for the scheduler.
+    let (due, deadline) = {
+        let mut wheel = AUDIO_WHEEL.this_cpu().lock();
+        let due = match wheel.as_mut() {
+            None => {
+                *wheel = Some(TimerWheel::new(start, interval));
+                Due { audio: false, sched: true }
+            }
+            Some(w) => w.poll(start),
+        };
+        let deadline = wheel.as_ref().map_or(start + interval, TimerWheel::deadline);
+        (due, deadline)
+    };
+    CLOCK.arm(deadline);
+
+    // Feed one DAC sample per audio deadline (dormant until v2 Increment 5 enables
+    // audio; the drain is a leaf lock like CONSOLE_RX, safe in the IRQ).
+    if due.audio {
+        crate::pwmdac::drain_one();
     }
+
+    if due.sched {
+        // The timer fires fast for responsive RX drain + preemption, but the
+        // heartbeat runs only every `TICKS_PER_HEARTBEAT`-th tick (its wall-clock
+        // cadence unchanged) — so the typing-latency win doesn't flood telemetry.
+        let ticks = TICK_COUNT.this_cpu().fetch_add(1, Ordering::Relaxed) + 1;
+        if ticks.is_multiple_of(TICKS_PER_HEARTBEAT) {
+            TICK_PENDING.this_cpu().store(true, Ordering::Relaxed);
+        }
+
+        // Drain the UART RX FIFO into the console ring — hart 0 only (single
+        // producer). Locking CONSOLE_RX here is the *exception* to "no locks in the
+        // timer handler": it's a leaf lock taken only by this drain and ConsoleRead,
+        // both run with SIE==0 (can't nest on one hart), and neither allocates nor
+        // emits — unlike the virtio/println locks. Must precede maybe_preempt, which
+        // may switch away and not return on this pass.
+        if crate::percpu::current_hartid() == 0 {
+            crate::console::drain_rx();
+        }
+
+        // v2b timed waits: wake any task on this hart whose timeout deadline has
+        // passed, so its wait loop re-checks and returns `TimedOut`. Before
+        // `maybe_preempt`, which may switch away and not return this pass.
+        crate::sched::wake_expired_timeouts(start);
+
+        // v0.8 preemption: if this timer interrupted a *userspace* task that has
+        // overrun its quantum, deschedule it now. `SPP == 0` means the trap came
+        // from U-mode; kernel code (`SPP == 1`) is never preempted, keeping the
+        // cooperative "exclusive until I yield" invariant. When the descheduled
+        // task is next picked, it resumes here, returns, and `trap_entry` restores
+        // its full `TrapFrame` and `sret`s to the exact user PC it was running.
+        crate::sched::maybe_preempt(frame.sstatus & SSTATUS_SPP == 0);
+    }
+
     let end = CLOCK.now();
     LAST_IRQ_DURATION
         .this_cpu()
         .store(end.wrapping_sub(start), Ordering::Relaxed);
-
-    // Drain the UART RX FIFO into the console ring — hart 0 only (single
-    // producer). Locking CONSOLE_RX here is the *exception* to "no locks in the
-    // timer handler": it's a leaf lock taken only by this drain and ConsoleRead,
-    // both run with SIE==0 (can't nest on one hart), and neither allocates nor
-    // emits — unlike the virtio/println locks. Must precede maybe_preempt, which
-    // may switch away and not return on this pass.
-    if crate::percpu::current_hartid() == 0 {
-        crate::console::drain_rx();
-    }
-
-    // v2b timed waits: wake any task on this hart whose timeout deadline has passed,
-    // so its wait loop re-checks and returns `TimedOut`. Before `maybe_preempt`, which
-    // may switch away and not return this pass — the drain must run every tick.
-    crate::sched::wake_expired_timeouts(start);
-
-    // v0.8 preemption: if this timer interrupted a *userspace* task that has
-    // overrun its quantum, deschedule it now. `SPP == 0` means the trap came
-    // from U-mode; kernel code (`SPP == 1`) is never preempted, keeping the
-    // cooperative "exclusive until I yield" invariant. When the descheduled
-    // task is next picked, it resumes here, returns, and `trap_entry` restores
-    // its full `TrapFrame` and `sret`s to the exact user PC it was running.
-    crate::sched::maybe_preempt(frame.sstatus & SSTATUS_SPP == 0);
 }
 
 /// Handle a supervisor external (PLIC) interrupt: claim the top pending source,

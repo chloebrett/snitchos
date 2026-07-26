@@ -187,6 +187,19 @@ pub fn emit_log(msg: &str) {
     });
 }
 
+/// Snitch `count` **audio under-runs** (missed DAC feed deadlines) as a single
+/// `AudioXRun` frame — the first hard real-time deadline the OS can miss, made
+/// visible on the wire. Called from the heartbeat (never the timer IRQ that detects
+/// the under-run — no frame emission from IRQ context), draining the count the drain
+/// accrued. The running total also rides `snitchos.audio.xruns_total`.
+pub fn emit_audio_xrun(count: u32) {
+    emit_frame(&Frame::AudioXRun {
+        count,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
 /// Intern `name` (a runtime string copied from U-mode) and open a span on the
 /// calling task's cursor, returning the `{id, parent}` close token (which
 /// userspace holds, just as the kernel's `Span` guard does). Non-RAII twin of

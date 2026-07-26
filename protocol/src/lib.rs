@@ -244,6 +244,15 @@ pub enum Frame<'a> {
   /// half of the async edge. New variants go at the END — postcard encodes
   /// discriminants positionally.
   NotifyWait { notification: u32, bits: u64, to_task: u32, t: u64, hart_id: u8 },
+  /// An **audio feed deadline was missed** (v2): the timer-driven DAC drain found the
+  /// sample ring empty while a stream was still active — an `XRun`, the first hard
+  /// real-time deadline the OS can miss, and one you can *hear* as a gap. `count` is
+  /// how many underruns the heartbeat drained this emit (deferred + counted like
+  /// [`Dropped`](Self::Dropped), since a frame can't be emitted from the IRQ that
+  /// detects it); `t`/`hart_id` locate the drain. The running total also rides the
+  /// `snitchos.audio.xruns_total` metric. New variants go at the END — postcard
+  /// encodes discriminants positionally.
+  AudioXRun { count: u32, t: u64, hart_id: u8 },
 }
 
 /// Encode `frame` as one self-delimited wire unit: postcard, then COBS, then a

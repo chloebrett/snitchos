@@ -51,6 +51,7 @@ pub enum OwnedFrame {
     Message { endpoint: u32, from: u32, to: u32, parent_span: SpanId, t: u64, hart_id: u8 },
     NotifySignal { notification: u32, mask: u64, from_task: u32, t: u64, hart_id: u8 },
     NotifyWait { notification: u32, bits: u64, to_task: u32, t: u64, hart_id: u8 },
+    AudioXRun { count: u32, t: u64, hart_id: u8 },
 }
 
 impl OwnedFrame {
@@ -102,6 +103,9 @@ impl OwnedFrame {
             }
             Frame::NotifyWait { notification, bits, to_task, t, hart_id } => {
                 OwnedFrame::NotifyWait { notification, bits, to_task, t, hart_id }
+            }
+            Frame::AudioXRun { count, t, hart_id } => {
+                OwnedFrame::AudioXRun { count, t, hart_id }
             }
         }
     }
@@ -321,6 +325,17 @@ mod tests {
         decode_stream(&mut Cursor::new(bytes), OnDecodeError::Fail, |f| got = Some(OwnedFrame::from_borrowed(f)))
             .expect("clean stream decodes");
         assert_eq!(got, Some(OwnedFrame::from_borrowed(&frame)));
+    }
+
+    #[test]
+    fn audio_xrun_round_trips_through_the_stream_decoder() {
+        let frame = Frame::AudioXRun { count: 3, t: 9_000, hart_id: 0 };
+        let mut buf = [0u8; 64];
+        let bytes = crate::wire_encode(&frame, &mut buf).expect("encode fits").to_vec();
+        let mut got = None;
+        decode_stream(&mut Cursor::new(bytes), OnDecodeError::Fail, |f| got = Some(OwnedFrame::from_borrowed(f)))
+            .expect("clean stream decodes");
+        assert_eq!(got, Some(OwnedFrame::AudioXRun { count: 3, t: 9_000, hart_id: 0 }));
     }
 
     #[test]

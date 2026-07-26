@@ -17,8 +17,10 @@ use kernel_devices::pwmdac::{
     plan_rate, sample_interval_ticks, Ctrl, DataMode, DataShift, DutyCycle, Resolution, CTRL_OFFSET,
     WDATA_OFFSET,
 };
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
 use kernel_devices::iomux::{self, FieldWrite};
-use kernel_devices::samplering::SampleRing;
+use kernel_devices::samplering::{DrainOutcome, SampleRing};
 use kernel_devices::syscrg::{self, Op};
 
 use crate::obs::counter::DeferredCounter;
@@ -32,7 +34,7 @@ pub static SAMPLES_EMITTED: DeferredCounter =
 /// producer (the `glitch` server) and the timer-driven drain. At 8 kHz, 4096 samples
 /// is ~0.5 s of slack, comfortably covering the gap between glitch's refills. A full
 /// ring back-pressures (`push_slice` accepts fewer); an empty one *while a stream is
-/// active* is the XRun the drain reports (v2 Increment 4). See `kernel_devices::samplering`.
+/// active* is the `XRun` the drain reports (v2 Increment 4). See `kernel_devices::samplering`.
 const AUDIO_RING_CAP: usize = 4096;
 
 /// The async DAC ring. Producer: [`enqueue`] (the `AudioEnqueue` syscall). Consumer:
@@ -47,6 +49,51 @@ static AUDIO_RING: crate::sync::Mutex<SampleRing<AUDIO_RING_CAP>> =
 /// paces or touches MMIO, unlike [`play_samples`]. The timer drain feeds the DAC.
 pub fn enqueue(samples: &[i16]) -> usize {
     AUDIO_RING.lock().push_slice(samples)
+}
+
+/// Cumulative audio under-runs — a missed DAC feed deadline (the ring was empty while
+/// a stream was active). Inc'd in the timer drain, emitted as a metric by the
+/// heartbeat's `counter::drain_all`. The marquee real-time observable.
+pub static XRUNS: DeferredCounter = DeferredCounter::new("snitchos.audio.xruns_total");
+
+/// Under-runs seen since the last heartbeat, drained by [`drain_pending_xruns`] into a
+/// single `AudioXRun` frame. Separate from [`XRUNS`] because the frame carries the
+/// per-heartbeat delta while the metric carries the running total, and neither can be
+/// emitted from the IRQ that detects the under-run.
+static XRUNS_PENDING: AtomicU32 = AtomicU32::new(0);
+
+/// Whether a stream is currently playing — set true while glitch is feeding (v2
+/// Increment 5), so the drain can tell a genuine under-run (empty *and active*) from
+/// idle silence (empty, no stream). Read by [`drain_one`]; the drain never infers it.
+static AUDIO_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Feed one sample to the DAC for this audio deadline — the consumer half of the async
+/// ring, called from the timer wheel's audio tick. Dequeues the oldest sample and
+/// writes it to `WDATA`; an empty ring while a stream is active is an under-run
+/// (`XRUN`), counted for the metric and queued for the heartbeat's frame. No frame is
+/// emitted here — this runs in IRQ context.
+pub fn drain_one() {
+    match AUDIO_RING.lock().drain_tick(AUDIO_ACTIVE.load(Ordering::Relaxed)) {
+        DrainOutcome::Fed(sample) => {
+            ensure_up();
+            write_sample(sample);
+            SAMPLES_EMITTED.inc();
+        }
+        DrainOutcome::Underrun => {
+            XRUNS.inc();
+            XRUNS_PENDING.fetch_add(1, Ordering::Relaxed);
+        }
+        DrainOutcome::Idle => {}
+    }
+}
+
+/// Emit an `AudioXRun` frame if any under-runs accrued since the last call. Called from
+/// the heartbeat (not the IRQ) — the safe place to touch the virtio TX path.
+pub fn drain_pending_xruns() {
+    let count = XRUNS_PENDING.swap(0, Ordering::Relaxed);
+    if count > 0 {
+        crate::tracing::emit_audio_xrun(count);
+    }
 }
 
 /// PWMDAC block base (in the UART's mapped megapage). MMIO is reached through the
