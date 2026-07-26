@@ -37,6 +37,49 @@ gradient-boosted trees or hand rules over those features may embarrass a 1M
 LM. It shares the manifest/recency machinery below and nothing else. A model
 whose entire output is one judgment, named accordingly.
 
+### The ladder is a matrix, not a vector (2026-07-26)
+
+The table above reads as a line of six models. It isn't. A rung fixes
+*capacity*; a checkpoint is a rung **times a set of variant axes**, and the
+cell is what a number can be attributed to:
+
+| Axis | Values today | Fixed by |
+|---|---|---|
+| **rung** | babble, drivel, quip, cliché, ballad, saga | `ModelConfig` |
+| **corpus** | babble-generated, real, mixed | corpus manifest + mix ratios |
+| **comments** | absent, input-only (loss-masked), full | tokenizer + loss mask at train time |
+| **objective** | next-token, FIM, mixture | training loop |
+
+**Most cells are empty, and some are uninhabitable.** babble emits no comments,
+so *(babble-corpus × input-only)* and *(babble-corpus × full)* do not exist.
+FIM is a training-time objective, so *(any rung × FIM)* cannot be evaluated on
+a checkpoint trained next-token-only — which is exactly why the plan's FIM
+metrics have no rung to run against yet. Naming that as an empty cell is more
+honest than calling it a deferred metric: the metric is ready, the cell is not.
+
+**Why this is worth the formalism.** The ladder already learned the hard way
+that *loss is not comparable across corpora* — run 1 reached 1.93 and run 2
+reached 2.26, and run 2 was the far better model, because 15% of run 1's tokens
+were a separator. That finding generalizes: **a number is comparable only within
+a variant column.** The scaling curve {1,3,10,30}M is a claim about one column,
+not about the ladder. Two checkpoints differing on a variant axis are two
+experiments, and putting their scores in one table is the same category error as
+scoring drivel's `unconstrained-parse%` against babble's 100%.
+
+Consequences that land in already-planned work:
+
+- **The checkpoint manifest (increment 7) records the cell, not the rung** —
+  `corpus_source`, `comment_policy` and `objective` join `{name, params,
+  vocab_version, grammar_hash, corpus_version, eval_scores, trained_at}`.
+  Staleness is then per-axis: a grammar change staleness-flags every cell, a
+  corpus change only its column.
+- **An eval report carries its cell**, so two rows cannot be silently compared
+  across a variant boundary.
+- **The vocab freeze is the one axis that must stay scalar.** It spans the whole
+  matrix, which is what makes speculative decoding sound — a draft and a target
+  in different *columns* still share a token distribution's support; in
+  different *vocabs* they share nothing.
+
 ### babble is two components in one
 
 Full design: [babble-design.md](babble-design.md) (oracle API, bias
