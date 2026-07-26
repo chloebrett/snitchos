@@ -57,6 +57,7 @@ graph LR
     kvetch_vocab["kvetch-vocab"]
     synth["synth"]
     xtask_cmds["xtask-cmds"]
+    xtask_cram["xtask-cram"]
     xtask_itest["xtask-itest"]
     xtask_qemu["xtask-qemu"]
     xtask_snemu["xtask-snemu"]
@@ -133,6 +134,11 @@ graph LR
     xtask_cmds --> protocol
     xtask_cmds --> snip
     xtask_cmds --> xtask_qemu
+    xtask_cram --> cram
+    xtask_cram --> cram_corpus
+    xtask_cram --> kvetch_model
+    xtask_cram --> kvetch_vocab
+    xtask_cram --> stitch
     xtask_itest --> babble
     xtask_itest --> diagram
     xtask_itest --> fs_proto

@@ -48,10 +48,35 @@ Scope, so the corners are known up front:
   upper-all-ones; reading an improperly-boxed value yields canonical NaN.
 - **Canonical NaN.** RISC-V produces a canonical NaN rather than propagating
   the operand payload — host hardware does not.
-- **Rounding modes and `fflags`.** Compiled Rust emits round-to-nearest-even
-  only and never reads accrued flags, so these are effectively unexercised.
-  Implement the common path and **trap loudly on the rest**: an unimplemented
-  rounding mode must be a snemu panic, never a quietly wrong answer.
+- **Rounding modes and `fflags`** — decided, see below.
+
+### How much of `fcsr` to implement — and the rule behind it
+
+**A gap in snemu must never become guest-visible behaviour.** This week's bug
+cost an hour precisely because snemu turned "I do not implement this" into
+silence the guest experienced — and a gap that surfaces *as a guest trap* is
+indistinguishable from a real hardware trap, so it sends you debugging the
+kernel. A gap that surfaces as a **host-side panic naming the gap** costs
+thirty seconds. That principle generalises past `fcsr` to every unimplemented
+instruction, CSR and device.
+
+Concretely:
+
+- **Round-to-nearest-even is implemented fully.** Accept `rm = RNE (000)` and
+  `rm = DYN (111)` while `fcsr.frm == 0` — which covers everything a Rust
+  compiler emits (it emits DYN, and `frm` resets to 0).
+- **Any other rounding mode panics on the host**, naming the mode, the PC and
+  the instruction. Never a guest trap, never a rounded-anyway answer.
+- **`fcsr` reads and writes work** as a plain register, so guest save/restore
+  round-trips — but **accrued `fflags` are not computed**.
+
+The asymmetry is deliberate, and it is about what the differential oracle can
+see. A wrong *rounding mode* produces a plausible number that flows downstream,
+so `snemu diff` would report a distant symptom long after the cause — those
+gaps must be loud. A missing *flag* is different: if a guest ever reads and
+branches on `fflags`, QEMU has them and snemu does not, so the divergence is
+immediate and attributable. Gaps the oracle can catch may be lazy; gaps it
+cannot must shout.
 
 Two non-optional pieces:
 
@@ -157,11 +182,6 @@ robustness hole, the other is an observability gap that hid it.
   wholesale — check `snitchos-user`, `snitchos-std`, `stitch`, `hitch`.
 - Does the soft-float target change binary size enough to matter for the
   embedded ELFs (libcalls pull in compiler-builtins float routines)?
-- How much of `fcsr` to implement versus trap on. Compiled Rust exercises only
-  round-to-nearest-even and never reads `fflags`, so the rest can be a loud
-  `unimplemented` — but that choice should be deliberate and recorded, since a
-  silent wrong answer here is exactly what the differential oracle would take
-  longest to notice.
 - Does the LLM runner's int8/fixed-point choice
   ([generative-ladder.md](generative-ladder.md)) relax once userspace FP
   exists? Its other reasons (memory bandwidth, no FP state on the hot path)
