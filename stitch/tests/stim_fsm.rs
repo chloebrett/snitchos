@@ -41,32 +41,11 @@ fn pending_op(setup: &str, key: &str) -> Value {
     ))
 }
 
-/// The `[row, col]` of `motionTarget(setup, key)`, or `[0, 0]` if the key is not a
-/// motion. Binding `rc` keeps the trailing `[…]` off the match (maximal munch).
-fn motion_rowcol(setup: &str, key: &str) -> Value {
-    fsm(&format!(
-        r#"{{ match motionTarget({setup}, "{key}") {{ Some(t) => {{ let rc = [t.row, t.col]  rc }}  None => {{ let z = [0, 0]  z }} }} }}"#
-    ))
-}
-
-/// The wiseness name of `motionTarget(setup, key)` — "Charwise"/"Linewise", or
-/// "None" if the key is not a motion.
-fn motion_wise(setup: &str, key: &str) -> Value {
-    fsm(&format!(
-        r#"{{ match motionTarget({setup}, "{key}") {{ Some(t) => (match t.wise {{ Charwise => "Charwise"  Linewise => "Linewise" }})  None => "None" }} }}"#
-    ))
-}
-
 /// The text-object prefix name ("NoObj"/"Inner"/"Around") of `setup`'s `Editor`.
 fn object_of(setup: &str) -> Value {
     fsm(&format!(
         r#"{{ let s = {setup}  match s.pending.object {{ NoObj => "NoObj"  Inner => "Inner"  Around => "Around" }} }}"#
     ))
-}
-
-/// The accumulated count of the `Editor` that `setup` evaluates to.
-fn count_of(setup: &str) -> Value {
-    fsm(&format!("{{ let s = {setup}  let c = s.pending.count  c }}"))
 }
 
 /// The unnamed register's text of the `Editor` that `setup` evaluates to.
@@ -99,19 +78,6 @@ fn step_dispatches_normal_mode_keys() {
     // An unbound key (`z`) is a Noop — nothing changes.
     assert_eq!(step_effect(start, "z"), s("Noop"));
     assert_eq!(fsm(&format!(r#"step({start}, "z").state"#)), fsm(start));
-}
-
-#[test]
-fn h_and_l_move_the_cursor_within_the_line() {
-    // "abc" cursor at col 1: `l` → col 2, `h` → col 0.
-    let mid = r#"Editor(..initialState("abc"), col: 1)"#;
-    assert_eq!(row_col(&format!(r#"step({mid}, "l").state"#)), ints(0, 2));
-    assert_eq!(row_col(&format!(r#"step({mid}, "h").state"#)), ints(0, 0));
-    // `h` at column 0 and `l` at the line's end are both no-ops (clamped).
-    assert_eq!(row_col(r#"step(initialState("abc"), "h").state"#), ints(0, 0));
-    assert_eq!(row_col(r#"step(Editor(..initialState("abc"), col: 3), "l").state"#), ints(0, 3));
-    // They're handled keys, so they redraw (even the clamped no-op).
-    assert_eq!(step_effect(mid, "h"), s("Redraw"));
 }
 
 #[test]
@@ -391,19 +357,6 @@ fn operators_enter_operator_pending_within_normal_mode() {
 }
 
 #[test]
-fn motion_target_carries_position_and_wiseness() {
-    // `$` yields a charwise target at the last char (col 4 of "hello") — motionTarget
-    // is the single definition the bare move and the operator both consume.
-    assert_eq!(motion_rowcol(r#"initialState("hello")"#, "$"), ints(0, 4));
-    assert_eq!(motion_wise(r#"initialState("hello")"#, "$"), s("Charwise"));
-    // `j` yields a linewise target on the next row, carrying the column.
-    assert_eq!(motion_rowcol(r#"Editor(..initialState("ab\ncd"), col: 1)"#, "j"), ints(1, 1));
-    assert_eq!(motion_wise(r#"Editor(..initialState("ab\ncd"), col: 1)"#, "j"), s("Linewise"));
-    // A non-motion key has no target.
-    assert_eq!(motion_wise(r#"initialState("hello")"#, "z"), s("None"));
-}
-
-#[test]
 fn d_plus_a_charwise_motion_deletes_the_intra_line_range() {
     // Drive operator-pending directly: `pending.op = OpDelete`, then a charwise motion.
     // d$ deletes from the cursor through end-of-line (inclusive) — same result as D.
@@ -629,28 +582,6 @@ fn esc_and_unknown_keys_cancel_operator_pending() {
 }
 
 #[test]
-fn digits_accumulate_a_count_and_zero_is_a_motion_when_the_count_is_empty() {
-    // 1 then 2 builds the count 12.
-    assert_eq!(count_of(r#"step(step(initialState("x"), "1").state, "2").state"#), Value::Int(12));
-    // A leading 0 is the line-start motion, not a count digit.
-    assert_eq!(count_of(r#"step(Editor(..initialState("abc"), col: 2), "0").state"#), Value::Int(0));
-    assert_eq!(row_col(r#"step(Editor(..initialState("abc"), col: 2), "0").state"#), ints(0, 0));
-    // But 0 *after* a digit folds in: 1 then 0 = 10.
-    assert_eq!(count_of(r#"step(step(initialState("x"), "1").state, "0").state"#), Value::Int(10));
-}
-
-#[test]
-fn a_count_repeats_motions_and_clears_afterward() {
-    // 3j moves down three lines; the count clamps at the last line.
-    assert_eq!(row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpNone, count: 3, object: NoObj)), "j").state"#), ints(3, 0));
-    assert_eq!(row_col(r#"step(Editor(..initialState("a\nb"), pending: Pending(op: OpNone, count: 9, object: NoObj)), "j").state"#), ints(1, 0));
-    // 2l moves right twice.
-    assert_eq!(row_col(r#"step(Editor(..initialState("abcd"), pending: Pending(op: OpNone, count: 2, object: NoObj)), "l").state"#), ints(0, 2));
-    // The count is consumed after the motion.
-    assert_eq!(count_of(r#"step(Editor(..initialState("a\nb\nc"), pending: Pending(op: OpNone, count: 2, object: NoObj)), "j").state"#), Value::Int(0));
-}
-
-#[test]
 fn a_count_repeats_x_and_scales_operators() {
     // 3x deletes three characters.
     assert_eq!(lines_col(r#"step(Editor(..initialState("abcdef"), pending: Pending(op: OpNone, count: 3, object: NoObj)), "x").state"#), line_and_col("def", 0));
@@ -664,22 +595,6 @@ fn a_count_repeats_x_and_scales_operators() {
         lines_row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete, count: 2, object: NoObj)), "j").state"#),
         buffer(&["d"], 0, 0)
     );
-}
-
-#[test]
-fn word_motions_move_by_words_within_the_line() {
-    let line = r#"initialState("foo bar baz")"#;
-    // w advances to the next word start.
-    assert_eq!(row_col(&format!(r#"step({line}, "w").state"#)), ints(0, 4));
-    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 4), "w").state"#)), ints(0, 8));
-    // e advances to the end of the current/next word.
-    assert_eq!(row_col(&format!(r#"step({line}, "e").state"#)), ints(0, 2));
-    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 2), "e").state"#)), ints(0, 6));
-    // b goes back to the previous word start.
-    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 8), "b").state"#)), ints(0, 4));
-    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 4), "b").state"#)), ints(0, 0));
-    // 2w moves two words (count rides the existing machinery).
-    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, pending: Pending(op: OpNone, count: 2, object: NoObj)), "w").state"#)), ints(0, 8));
 }
 
 #[test]
@@ -807,39 +722,6 @@ fn single_quote_object_targets_apostrophe_delimited_text() {
     // a 'x' b — single quotes at 2 and 4, "x" at 3.
     let di = r#"Editor(..initialState("a 'x' b"), col: 3, pending: Pending(op: OpDelete, count: 0, object: Inner))"#;
     assert_eq!(lines_col(&format!(r#"step({di}, "'").state"#)), line_and_col("a '' b", 3));
-}
-
-#[test]
-fn zero_and_dollar_jump_to_the_line_ends() {
-    // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
-    // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.
-    let mid = r#"Editor(..initialState("hello"), col: 2)"#;
-    assert_eq!(row_col(&format!(r#"step({mid}, "0").state"#)), ints(0, 0));
-    assert_eq!(row_col(&format!(r#"step({mid}, "$").state"#)), ints(0, 4));
-    // On an empty line `$` clamps to col 0 (max(len−1, 0)), never −1.
-    assert_eq!(row_col(r#"step(initialState(""), "$").state"#), ints(0, 0));
-    // Pure motions — a handled key that only moves the cursor is a Redraw, not an
-    // Edit (nothing in the buffer changed).
-    assert_eq!(step_effect(mid, "0"), s("Redraw"));
-    assert_eq!(step_effect(mid, "$"), s("Redraw"));
-}
-
-#[test]
-fn caret_jumps_to_the_first_non_blank_column() {
-    // "  hi" → `^` lands on col 2 (the 'h'), skipping the two leading spaces.
-    assert_eq!(row_col(r#"step(Editor(..initialState("  hi"), col: 3), "^").state"#), ints(0, 2));
-    // A line with no content (all spaces) clamps `^` to col 0.
-    assert_eq!(row_col(r#"step(Editor(..initialState("   "), col: 2), "^").state"#), ints(0, 0));
-    // No leading blanks → `^` is column 0, same as `0`.
-    assert_eq!(row_col(r#"step(Editor(..initialState("hi"), col: 1), "^").state"#), ints(0, 0));
-    assert_eq!(step_effect(r#"Editor(..initialState("  hi"), col: 3)"#, "^"), s("Redraw"));
-}
-
-#[test]
-fn j_moves_down_a_line_and_k_moves_up() {
-    // Three lines; j descends 0→1, k climbs back 1→0.
-    assert_eq!(row_col(r#"moveDown(initialState("a\nb\nc"))"#), ints(1, 0));
-    assert_eq!(row_col(r#"moveUp(moveDown(initialState("a\nb\nc")))"#), ints(0, 0));
 }
 
 #[test]

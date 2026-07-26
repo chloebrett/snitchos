@@ -30,6 +30,7 @@ pub mod check;
 pub mod complete;
 pub mod core_ir;
 pub mod env;
+pub mod gate;
 pub mod interp;
 pub mod lexer;
 pub mod line_edit;

@@ -102,6 +102,43 @@ fn a_test_that_declares_authority_may_perform_that_effect() {
     assert!(matches!(results[0].verdict, Verdict::Passed), "{:?}", results[0].verdict);
 }
 
+/// The migration of `stim_fsm.rs` turns on this: its Rust helpers project a
+/// variant down to a string tag (`match st.state.mode { Normal => "Normal" … }`)
+/// because Rust could not name a Stitch variant. Natively the variant can be
+/// compared directly — nullary variants are singleton values, so `==` is
+/// structural and means what it looks like.
+#[test]
+fn a_nullary_variant_compares_by_equality() {
+    let results = results(
+        r#"
+        sum Mode = Normal | Insert
+        current() -> Mode = Normal
+        test "variant equality" {
+            expect current() == Normal
+            expect not (current() == Insert)
+        }
+        "#,
+    );
+    assert!(matches!(results[0].verdict, Verdict::Passed), "{:?}", results[0].verdict);
+}
+
+/// The other half, and the reason the port is not a blanket rewrite: a variant
+/// *carrying* a payload is a constructor when named bare, so "is it a `Save`,
+/// whatever it holds" is still a `match` rather than an `==`.
+#[test]
+fn a_payload_carrying_variant_is_matched_not_compared() {
+    let results = results(
+        r#"
+        sum Effect = Save(Str) | Noop
+        act() -> Effect = Save("buffer")
+        test "variant tag" {
+            expect match act() { Save(_) => true  Noop => false }
+        }
+        "#,
+    );
+    assert!(matches!(results[0].verdict, Verdict::Passed), "{:?}", results[0].verdict);
+}
+
 /// A program with no tests is not a failure — it is a program with no tests.
 /// The funnel is what decides that an untested candidate is worthless; the
 /// runner just reports what it found.
