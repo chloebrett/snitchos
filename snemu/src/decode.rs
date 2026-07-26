@@ -425,6 +425,8 @@ pub(crate) fn expand(half: u16) -> Option<u32> {
     let funct3 = (half >> 13) & 0b111;
     match (quadrant, funct3) {
         (0b00, 0b000) => Some(expand_c_addi4spn(half)),
+        (0b00, 0b001) => Some(expand_c_fld(half)),
+        (0b00, 0b101) => Some(expand_c_fsd(half)),
         (0b00, 0b010) => Some(expand_c_lw(half)),
         (0b00, 0b011) => Some(expand_c_ld(half)),
         (0b00, 0b110) => Some(expand_c_sw(half)),
@@ -438,6 +440,8 @@ pub(crate) fn expand(half: u16) -> Option<u32> {
         (0b01, 0b110) => Some(expand_c_beqz(half)),
         (0b01, 0b111) => Some(expand_c_bnez(half)),
         (0b10, 0b000) => Some(expand_c_slli(half)),
+        (0b10, 0b001) => Some(expand_c_fldsp(half)),
+        (0b10, 0b101) => Some(expand_c_fsdsp(half)),
         (0b10, 0b010) => Some(expand_c_lwsp(half)),
         (0b10, 0b011) => Some(expand_c_ldsp(half)),
         (0b10, 0b100) => Some(expand_cr(half)),
@@ -607,6 +611,66 @@ fn expand_c_ldsp(half: u16) -> u32 {
 /// Encode an I-type load `funct3 rd, imm(base)`.
 fn load_word(funct3: u32, rd: u32, base: u32, imm: u32) -> u32 {
     ((imm & 0xfff) << 20) | (base << 15) | (funct3 << 12) | (rd << 7) | opcode::LOAD
+}
+
+/// `c.fld fd', uimm(rs1')` -> `fld fd', uimm(rs1')`. Same CL immediate layout as
+/// [`expand_c_ld`] — `uimm[5:3]`=inst[12:10], `uimm[7:6]`=inst[6:5] — since the two
+/// differ only in which register file the destination names.
+///
+/// Expanding to the full `fld` rather than handling the compressed form directly means
+/// NaN boxing, width and the `sstatus.FS` gate are all inherited, not reimplemented.
+fn expand_c_fld(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rs1 = creg(h >> 7);
+    let fd = creg(h >> 2);
+    let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 5) & 0x3) << 6);
+    load_fp(fp_width::D, fd, rs1, uimm)
+}
+
+/// `c.fsd fs2', uimm(rs1')` -> `fsd fs2', uimm(rs1')`.
+fn expand_c_fsd(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rs1 = creg(h >> 7);
+    let fs2 = creg(h >> 2);
+    let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 5) & 0x3) << 6);
+    store_fp(fp_width::D, rs1, fs2, uimm)
+}
+
+/// `c.fldsp fd, uimm(sp)` -> `fld fd, uimm(x2)`. CI layout, as [`expand_c_ldsp`]:
+/// `uimm[5]`=inst[12], `uimm[4:3]`=inst[6:5], `uimm[8:6]`=inst[4:2]. **The workhorse**
+/// — a compiler spills doubles to the stack constantly, so this and `c.fsdsp` are what
+/// real optimised FP code is mostly made of.
+fn expand_c_fldsp(half: u16) -> u32 {
+    let h = u32::from(half);
+    let fd = (h >> 7) & 0x1f;
+    let uimm = (((h >> 12) & 1) << 5) | (((h >> 5) & 3) << 3) | (((h >> 2) & 7) << 6);
+    load_fp(fp_width::D, fd, 2, uimm)
+}
+
+/// `c.fsdsp fs2, uimm(sp)` -> `fsd fs2, uimm(x2)`. CSS layout, as [`expand_c_sdsp`]:
+/// `uimm[5:3]`=inst[12:10], `uimm[8:6]`=inst[9:7].
+fn expand_c_fsdsp(half: u16) -> u32 {
+    let h = u32::from(half);
+    let fs2 = (h >> 2) & 0x1f;
+    let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 7) & 0x7) << 6);
+    store_fp(fp_width::D, 2, fs2, uimm)
+}
+
+/// Encode an FP load `flw`/`fld fd, imm(base)` — the I-type shape with the LOAD-FP
+/// opcode.
+fn load_fp(width: u32, fd: u32, base: u32, imm: u32) -> u32 {
+    ((imm & 0xfff) << 20) | (base << 15) | (width << 12) | (fd << 7) | opcode::LOAD_FP
+}
+
+/// Encode an FP store `fsw`/`fsd fs2, imm(base)` — the S-type shape with the STORE-FP
+/// opcode.
+fn store_fp(width: u32, base: u32, src: u32, imm: u32) -> u32 {
+    (((imm >> 5) & 0x7f) << 25)
+        | (src << 20)
+        | (base << 15)
+        | (width << 12)
+        | ((imm & 0x1f) << 7)
+        | opcode::STORE_FP
 }
 
 /// `c.lw rd', uimm(rs1')` -> `lw rd', uimm(rs1')`. CL word offset:

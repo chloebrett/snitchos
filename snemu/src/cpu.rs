@@ -778,8 +778,24 @@ impl Hart {
     /// Write an FP register's raw bits. **No index-0 special case** — `f0` is an
     /// ordinary register, unlike `x0`. Reusing [`set_reg`]'s shape here would
     /// silently discard every write to `f0`.
+    ///
+    /// Also marks `sstatus.FS` Dirty, since this is FP state changing. Done here rather
+    /// than at each call site so no future FP instruction can forget: an instruction
+    /// that writes an FP register dirties FP state by definition. (Instructions that
+    /// only *read* the FP file — stores, compares, `fclass`, `fmv.x.*` — don't come
+    /// through here, which is exactly the distinction `FS` exists to express.)
     fn set_freg(&mut self, i: usize, bits: u64) {
         self.f[i] = bits;
+        self.mark_fp_dirty();
+    }
+
+    /// Promote `sstatus.FS` to Dirty. Never called when FS is Off — the gate in
+    /// `execute` refuses every FP instruction before it could be.
+    fn mark_fp_dirty(&mut self) {
+        let status = self.csr_read(addr::SSTATUS);
+        if status & sstatus::FS != sstatus::FS_DIRTY {
+            self.csr_write(addr::SSTATUS, status | sstatus::FS_DIRTY);
+        }
     }
 
     /// Read an FP register's raw bits.
@@ -1138,6 +1154,9 @@ impl Hart {
             opcode::LOAD_FP => self.load_fp(instr, bus),
             opcode::STORE_FP => self.store_fp(instr, bus),
             opcode::OP_FP => self.op_fp(instr),
+            op @ (opcode::MADD | opcode::MSUB | opcode::NMSUB | opcode::NMADD) => {
+                self.fma(instr, op)
+            }
             opcode::AMO => self.amo(instr, bus),
             opcode::SYSTEM => self.system(instr),
             opcode::MISC_MEM => {
@@ -1551,6 +1570,59 @@ impl Hart {
         Ok(())
     }
 
+    /// The fused multiply-add family: `fmadd` / `fmsub` / `fnmsub` / `fnmadd`, one
+    /// opcode each, all R4-type (a third source register in `instr[31:27]`).
+    ///
+    /// Computed with `mul_add` — **not** `a * b + c`, which rounds the product and then
+    /// the sum and is wrong by an ulp on inputs where the product isn't representable.
+    ///
+    /// The sign conventions are a documented trap: `fnmsub` negates the *product* and
+    /// **adds** `rs3`; `fnmadd` negates the product and subtracts it. So `fnmsub` is not
+    /// "the negation of `fmsub`", and reading the mnemonics as English gets two of the
+    /// four backwards.
+    fn fma(&mut self, instr: Instr, op: u32) -> Result<(), StepError> {
+        let frm = self.csr_read(addr::FCSR) >> fcsr::FRM_SHIFT;
+        if let Err(mode) = fp::arithmetic_rounding(instr.funct3(), frm) {
+            return Err(StepError::UnsupportedRoundingMode {
+                pc: self.pc,
+                instr: instr.0,
+                mode,
+            });
+        }
+        // rs3 shares its field with OP-FP's funct5.
+        let rs3 = instr.funct5() as usize;
+        let bits = match instr.funct7() & 0b11 {
+            fp_fmt::D => {
+                let a = f64::from_bits(self.freg(instr.rs1()));
+                let b = f64::from_bits(self.freg(instr.rs2()));
+                let c = f64::from_bits(self.freg(rs3));
+                fp::canonicalise_d(match op {
+                    opcode::MADD => a.mul_add(b, c),
+                    opcode::MSUB => a.mul_add(b, -c),
+                    opcode::NMSUB => (-a).mul_add(b, c),
+                    opcode::NMADD => (-a).mul_add(b, -c),
+                    _ => return Err(self.unimplemented(instr.0)),
+                })
+            }
+            fp_fmt::S => {
+                let a = fp::unbox_single(self.freg(instr.rs1()));
+                let b = fp::unbox_single(self.freg(instr.rs2()));
+                let c = fp::unbox_single(self.freg(rs3));
+                fp::box_single(match op {
+                    opcode::MADD => a.mul_add(b, c),
+                    opcode::MSUB => a.mul_add(b, -c),
+                    opcode::NMSUB => (-a).mul_add(b, c),
+                    opcode::NMADD => (-a).mul_add(b, -c),
+                    _ => return Err(self.unimplemented(instr.0)),
+                })
+            }
+            _ => return Err(self.unimplemented(instr.0)),
+        };
+        self.set_freg(instr.rd(), bits);
+        self.advance();
+        Ok(())
+    }
+
     /// OP-FP operations that write the FP file but read from somewhere other than two
     /// same-width FP registers: `fmv.{w,d}.x` (an integer register), `fcvt.{s,d}.*`
     /// (an integer register), and `fcvt.s.d`/`fcvt.d.s` (the *other* float width).
@@ -1809,6 +1881,9 @@ impl Hart {
             self.csr
                 .write(addr::FCSR, window.splice(stored, new))
                 .map_err(|e| csr_step_error(pc, e))?;
+            // The rounding mode is FP state a context switch must preserve, so a write
+            // through either window dirties FP just as a register write does.
+            self.mark_fp_dirty();
             self.set_reg(instr.rd(), old);
             self.advance();
             return Ok(());
@@ -1821,6 +1896,9 @@ impl Hart {
         };
         if do_write {
             self.csr.write(csr, new).map_err(|e| csr_step_error(pc, e))?;
+            if csr == addr::FCSR {
+                self.mark_fp_dirty();
+            }
             // Writing `satp` switches the address space, so every cached
             // (translated) fetch is now stale. This is the coherence hook
             // that lets the fast path skip re-reading satp per instruction.
@@ -3905,6 +3983,8 @@ mod tests {
 
     const FP_SRC: u64 = RAM_BASE + 0x100;
     const FP_SRC2: u64 = RAM_BASE + 0x110;
+    /// A third operand slot, for the fused multiply-adds.
+    const FP_SRC3: u64 = RAM_BASE + 0x118;
     const FP_DST: u64 = RAM_BASE + 0x120;
 
     /// Run an FP `program` with FP enabled, then read the result back **the way the
@@ -4539,6 +4619,278 @@ mod tests {
         assert_eq!(f64::from_bits(widen), 1.5, "widening is exact");
     }
 
+    /// The `FS` field of a hart's `sstatus`, as a bare 0..3 value.
+    fn fs_field(cpu: &Cpu) -> u64 {
+        (cpu.hart.csr.read(addr::SSTATUS).unwrap() & sstatus::FS) >> 13
+    }
+
+    /// **Writing FP state sets `sstatus.FS` to Dirty.** This is the whole point of the
+    /// Clean/Dirty distinction: it's how a context switch knows whether the outgoing
+    /// task's 32 FP registers actually need saving. Without the transition a kernel
+    /// reading `FS` sees it stuck at Initial and skips the save — silently losing FP
+    /// state across a switch, which is the expensive-to-debug kind of wrong.
+    #[test]
+    fn writing_an_fp_register_marks_sstatus_dirty() {
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, fp_load(FUNCT3_D, 1, 1, 0)).unwrap(); // fld f1, 0(x1)
+        mem.write_u64(FP_SRC, 1.5f64.to_bits()).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+        cpu.set_reg(1, FP_SRC);
+        assert_eq!(fs_field(&cpu), 1, "precondition: Initial");
+
+        cpu.step().unwrap();
+
+        assert_eq!(fs_field(&cpu), 3, "an FP register write leaves FS Dirty");
+    }
+
+    /// ...but merely *reading* FP state does not. An `fsd` copies a register to memory
+    /// without changing it, so a task that only stores its FP registers stays Clean and
+    /// a kernel may still skip the save. Dirtying on every FP instruction would make the
+    /// distinction useless — everything would always look dirty.
+    #[test]
+    fn storing_from_an_fp_register_leaves_sstatus_clean() {
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, fp_store(FUNCT3_D, 1, 2, 0)).unwrap(); // fsd f1, 0(x2)
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_CLEAN).unwrap();
+        cpu.set_reg(2, FP_DST);
+        cpu.step().unwrap();
+        assert_eq!(fs_field(&cpu), 2, "still Clean — nothing was modified");
+    }
+
+    /// Writing `fcsr` (or one of its windows) is an FP-state change too: the rounding
+    /// mode is part of what a context switch has to preserve.
+    #[test]
+    fn writing_fcsr_marks_sstatus_dirty() {
+        let mut cpu = cpu_with(&[csrrw(0, 1, fp_csr::FRM)]);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_CLEAN).unwrap();
+        cpu.set_reg(1, 0b001);
+        cpu.step().unwrap();
+        assert_eq!(fs_field(&cpu), 3, "an fcsr write leaves FS Dirty");
+    }
+
+    /// Encode `c.fld fd', uimm(rs1')` — quadrant 00, funct3 001. Compressed operands
+    /// name registers 8..15, so `fd`/`rs1` here are the *full* numbers and the low
+    /// three bits go into the encoding.
+    fn c_fld(fd: u32, rs1: u32, uimm: u32) -> u16 {
+        let half = (0b001 << 13)
+            | (((uimm >> 3) & 0x7) << 10)
+            | (((uimm >> 6) & 0x3) << 5)
+            | ((rs1 & 0x7) << 7)
+            | ((fd & 0x7) << 2);
+        half as u16
+    }
+
+    /// Encode `c.fsd fs2', uimm(rs1')` — quadrant 00, funct3 101. Same immediate
+    /// layout as `c.fld`.
+    fn c_fsd(fs2: u32, rs1: u32, uimm: u32) -> u16 {
+        let half = (0b101 << 13)
+            | (((uimm >> 3) & 0x7) << 10)
+            | (((uimm >> 6) & 0x3) << 5)
+            | ((rs1 & 0x7) << 7)
+            | ((fs2 & 0x7) << 2);
+        half as u16
+    }
+
+    /// Encode `c.fldsp fd, uimm(sp)` — quadrant 10, funct3 001. `fd` is a full 5-bit
+    /// register number here (the stack-relative forms aren't restricted to 8..15).
+    fn c_fldsp(fd: u32, uimm: u32) -> u16 {
+        let half = (0b001 << 13)
+            | (((uimm >> 5) & 1) << 12)
+            | ((fd & 0x1f) << 7)
+            | (((uimm >> 3) & 0x3) << 5)
+            | (((uimm >> 6) & 0x7) << 2)
+            | 0b10;
+        half as u16
+    }
+
+    /// Encode `c.fsdsp fs2, uimm(sp)` — quadrant 10, funct3 101.
+    fn c_fsdsp(fs2: u32, uimm: u32) -> u16 {
+        let half = (0b101 << 13)
+            | (((uimm >> 3) & 0x7) << 10)
+            | (((uimm >> 6) & 0x7) << 7)
+            | ((fs2 & 0x1f) << 2)
+            | 0b10;
+        half as u16
+    }
+
+    /// The **compressed** FP loads and stores. Not an optional corner: a compiler
+    /// spills doubles to the stack constantly, so `c.fldsp`/`c.fsdsp` appear all over
+    /// real code with `-O`. Without them a guest that merely *has* a double in a
+    /// non-trivial function reports a snemu gap — correct behaviour, but it would block
+    /// every real FP program.
+    ///
+    /// `c.fld`/`c.fsd` expand to `fld`/`fsd`, so the NaN-boxing and width rules are
+    /// inherited rather than reimplemented; what these tests pin is the *immediate
+    /// layout*, which differs per format and is the easy thing to get wrong.
+    #[test]
+    fn compressed_fp_load_and_store_round_trip() {
+        const PAYLOAD: u64 = 0x0123_4567_89ab_cdef;
+        let mut mem = Memory::new(0x2000);
+        // c.fld f8, 8(x8) ; c.fsd f8, 16(x9) — non-zero offsets, so a dropped
+        // immediate can't pass by landing on the right address anyway.
+        mem.write_u16(RAM_BASE, c_fld(8, 8, 8)).unwrap();
+        mem.write_u16(RAM_BASE + 2, c_fsd(8, 9, 16)).unwrap();
+        mem.write_u32(RAM_BASE + 4, ld(5, 9, 16)).unwrap();
+        mem.write_u64(FP_SRC + 8, PAYLOAD).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+        cpu.set_reg(8, FP_SRC);
+        cpu.set_reg(9, FP_DST);
+        cpu.step().unwrap();
+        cpu.step().unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(5), PAYLOAD);
+        assert_eq!(cpu.pc(), RAM_BASE + 8, "two 2-byte instructions, then a 4-byte one");
+    }
+
+    /// The stack-relative pair — the forms real compiled code actually leans on, and
+    /// the ones whose immediate layout differs most from their `c.fld` cousins.
+    #[test]
+    fn compressed_stack_relative_fp_load_and_store_round_trip() {
+        const PAYLOAD: u64 = 0x7ff0_0000_dead_beef; // a payload NaN: a move must not touch it
+        let mut mem = Memory::new(0x2000);
+        // c.fldsp f31, 24(sp) ; c.fsdsp f31, 40(sp) — f31 exercises the full 5-bit
+        // register field, which the 8..15-restricted forms can't reach.
+        mem.write_u16(RAM_BASE, c_fldsp(31, 24)).unwrap();
+        mem.write_u16(RAM_BASE + 2, c_fsdsp(31, 40)).unwrap();
+        mem.write_u32(RAM_BASE + 4, ld(5, 2, 40)).unwrap();
+        mem.write_u64(FP_SRC + 24, PAYLOAD).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+        cpu.set_reg(2, FP_SRC); // sp
+        cpu.step().unwrap();
+        cpu.step().unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(5), PAYLOAD);
+    }
+
+    /// A compressed FP instruction is gated by `sstatus.FS` like any other. It has to
+    /// be checked on the *expanded* word, which is exactly why the gate lives in
+    /// `execute` rather than the fetch path — a check placed before expansion would
+    /// see a 16-bit half whose opcode field means something else entirely.
+    #[test]
+    fn a_compressed_fp_load_with_fs_off_traps_the_guest() {
+        const HANDLER: u64 = RAM_BASE + 0x200;
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, c_fld(8, 8, 8)).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::STVEC, HANDLER).unwrap();
+        cpu.set_reg(8, FP_SRC);
+        // FS left Off.
+        assert_eq!(cpu.step(), Ok(()), "traps the guest rather than halting the host");
+        assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), 2);
+        assert_eq!(cpu.pc(), HANDLER);
+    }
+
+    /// Encode a fused multiply-add (an R4-type: `rs3` occupies `instr[31:27]`).
+    /// `op` is the opcode — MADD / MSUB / NMSUB / NMADD.
+    fn fma(op: u32, fmt: u32, rm: u32, rd: u32, rs1: u32, rs2: u32, rs3: u32) -> u32 {
+        (rs3 << 27) | (fmt << 25) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | op
+    }
+
+    /// Run a double-precision FMA over three operands, returning the result's bits.
+    fn run_fma_d(op: u32, a: f64, b: f64, c: f64) -> u64 {
+        let mut mem = Memory::new(0x2000);
+        let program = [
+            fp_load(FUNCT3_D, 1, 1, 0),                     // fld f1, 0(x1)  — a
+            fp_load(FUNCT3_D, 2, 6, 0),                     // fld f2, 0(x6)  — b
+            fp_load(FUNCT3_D, 3, 7, 0),                     // fld f3, 0(x7)  — c
+            fma(op, FMT_D, fp::rm::DYN, 4, 1, 2, 3),        // f4 = f1 × f2 ± f3
+            fp_store(FUNCT3_D, 4, 2, 0),                    // fsd f4, 0(x2)
+            ld(5, 2, 0),
+        ];
+        for (i, &word) in program.iter().enumerate() {
+            mem.write_u32(RAM_BASE + i as u64 * 4, word).unwrap();
+        }
+        mem.write_u64(FP_SRC, a.to_bits()).unwrap();
+        mem.write_u64(FP_SRC2, b.to_bits()).unwrap();
+        mem.write_u64(FP_SRC3, c.to_bits()).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+        cpu.set_reg(1, FP_SRC);
+        cpu.set_reg(6, FP_SRC2);
+        cpu.set_reg(7, FP_SRC3);
+        cpu.set_reg(2, FP_DST);
+        for _ in 0..program.len() {
+            cpu.step().unwrap();
+        }
+        cpu.reg(5)
+    }
+
+    /// **The FMA must be genuinely fused** — one rounding over `a × b + c`, not a
+    /// multiply that rounds and then an add that rounds again. `a * b + c` in Rust
+    /// double-rounds and gives a *different* answer, so an unfused implementation is
+    /// wrong by one ulp on inputs like these rather than obviously broken.
+    ///
+    /// Construction: `a = b = 2²⁷ + 1` are exact, but their product needs 55
+    /// significand bits, so it rounds and loses the trailing 1. Subtracting `2⁵⁴`
+    /// then exposes exactly that lost bit: fused keeps it, unfused doesn't.
+    #[test]
+    fn fused_multiply_add_rounds_only_once() {
+        let a = 134_217_729.0_f64; // 2^27 + 1
+        let c = -18_014_398_509_481_984.0_f64; // -(2^54)
+        let fused = f64::from_bits(run_fma_d(opcode::MADD, a, a, c));
+
+        assert_eq!(fused, a.mul_add(a, c), "matches a genuine fused multiply-add");
+        assert_eq!(fused, 268_435_457.0, "2^28 + 1 — the low bit survived");
+        assert_ne!(
+            fused,
+            a * a + c,
+            "a double-rounded multiply-then-add gives 2^28; if these are equal the \
+             implementation is not fused",
+        );
+    }
+
+    /// The four FMA opcodes and their sign conventions. The naming is a classic trap:
+    /// `fnmsub` negates the **product** and *adds* `rs3`, while `fnmadd` negates the
+    /// product and *subtracts* it — so "nmsub" is not "the negation of fmsub".
+    #[test]
+    fn the_four_fma_variants_apply_their_documented_signs() {
+        let (a, b, c) = (3.0, 5.0, 2.0); // a×b = 15
+        let run = |op| f64::from_bits(run_fma_d(op, a, b, c));
+        assert_eq!(run(opcode::MADD), 17.0, "fmadd: +(a×b) + c");
+        assert_eq!(run(opcode::MSUB), 13.0, "fmsub: +(a×b) − c");
+        assert_eq!(run(opcode::NMSUB), -13.0, "fnmsub: −(a×b) + c");
+        assert_eq!(run(opcode::NMADD), -17.0, "fnmadd: −(a×b) − c");
+    }
+
+    /// A NaN out of an FMA is canonicalised like any other generated NaN, and the
+    /// single-precision path unboxes all three operands and reboxes the result.
+    #[test]
+    fn fma_canonicalises_nan_and_handles_singles() {
+        let nan_result = run_fma_d(opcode::MADD, f64::from_bits(0x7ff0_0000_dead_beef), 1.0, 1.0);
+        assert_eq!(nan_result, fp::CANONICAL_NAN_D);
+
+        // Single precision: 1.5 × 2.0 + 0.25 = 3.25, boxed.
+        let mut mem = Memory::new(0x2000);
+        let program = [
+            fp_load(FUNCT3_W, 1, 1, 0),
+            fp_load(FUNCT3_W, 2, 6, 0),
+            fp_load(FUNCT3_W, 3, 7, 0),
+            fma(opcode::MADD, FMT_S, fp::rm::DYN, 4, 1, 2, 3),
+            fp_store(FUNCT3_D, 4, 2, 0),
+            ld(5, 2, 0),
+        ];
+        for (i, &word) in program.iter().enumerate() {
+            mem.write_u32(RAM_BASE + i as u64 * 4, word).unwrap();
+        }
+        mem.write_u64(FP_SRC, u64::from(1.5f32.to_bits())).unwrap();
+        mem.write_u64(FP_SRC2, u64::from(2.0f32.to_bits())).unwrap();
+        mem.write_u64(FP_SRC3, u64::from(0.25f32.to_bits())).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+        cpu.set_reg(1, FP_SRC);
+        cpu.set_reg(6, FP_SRC2);
+        cpu.set_reg(7, FP_SRC3);
+        cpu.set_reg(2, FP_DST);
+        for _ in 0..program.len() {
+            cpu.step().unwrap();
+        }
+        assert_eq!(cpu.reg(5), nan_box(3.25f32.to_bits()));
+    }
+
     /// FP loads/stores inside a **hot block** must behave identically with the block
     /// JIT on and off. `compile_op` rejects FP opcodes via its catch-all, so a block
     /// ends before one and the interpreter runs it — but that's an invariant worth
@@ -4668,31 +5020,19 @@ mod tests {
         }
     }
 
-    /// The other half of the rule, and the one that keeps snemu honest: with FS
-    /// **enabled**, an FP instruction snemu has no unit for is snemu's *gap*, so it
-    /// must halt the host naming pc + instr — never trap the guest. A guest trap
-    /// here would be indistinguishable from hardware refusing FP, sending you
-    /// debugging the kernel's FP authority logic when the real answer is "snemu
-    /// hasn't implemented fadd.d yet".
-    /// The witness has to be an FP instruction snemu genuinely doesn't implement
-    /// yet — currently `fmadd.d` (the fused multiply-add family). It has already
-    /// moved once, from `fadd.d`, when arithmetic landed, and it will need moving
-    /// again as FP grows. When the FP unit is *complete* this test's premise
-    /// disappears and it should be **deleted**, not weakened: its general-rule
-    /// sibling `legal_but_unmodelled_instruction_halts_the_host` (witness `mret`)
-    /// keeps covering the rule itself.
-    #[test]
-    fn fp_instruction_with_fs_enabled_reports_the_gap_rather_than_trapping() {
-        const FMADD_D: u32 = 0x0200_0043; // fmadd.d f0, f0, f0, f0
-        let mut cpu = cpu_with(&[FMADD_D]);
-        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
-
-        assert_eq!(
-            cpu.step(),
-            Err(StepError::Unimplemented { pc: RAM_BASE, instr: FMADD_D }),
-            "FS enabled → snemu's gap, which must name itself host-side",
-        );
-    }
+    // `fp_instruction_with_fs_enabled_reports_the_gap_rather_than_trapping` lived
+    // here. Its witness had to be an FP instruction snemu didn't implement, and it
+    // moved twice as the unit grew (`fadd.d` → `fmadd.d`) before running out of
+    // candidates entirely — RV64FD is now covered, so the premise no longer exists.
+    // Deleted per the note it carried, rather than weakened into something vacuous.
+    //
+    // Its two distinct behaviours are still covered elsewhere:
+    //   - "a legal-but-unmodelled instruction halts the host" — by
+    //     `legal_but_unmodelled_instruction_halts_the_host`, whose `mret` witness is
+    //     not FP and so can't be invalidated by FP work.
+    //   - "the FS gate does *not* fire when FS is enabled" — by every FP test above,
+    //     all of which run with `FS_INITIAL` and would fail on a gate that fired
+    //     regardless of FS.
 
     /// The RISC-V spec **guarantees** the all-zero and all-ones instruction words
     /// are illegal, permanently and on every implementation — so no judgement

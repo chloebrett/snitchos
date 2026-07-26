@@ -58,15 +58,20 @@ pub(crate) mod sstatus {
     /// hangs off, and the reason a float at the Stitch REPL faults today (nothing
     /// in the kernel ever sets this).
     ///
-    /// snemu distinguishes Off from not-Off; it does not yet track the
-    /// Clean/Dirty transitions that let a kernel skip saving unmodified FP state,
-    /// because nothing reads them until the kernel actually enables FP.
+    /// The guest turns FP *on*; snemu never does that by itself. What snemu does
+    /// maintain is the **Dirty** transition — any write to an FP register or to `fcsr`
+    /// promotes the field — because that is how a context switch decides whether the
+    /// outgoing task's 32 FP registers need saving at all. A kernel that saw `FS` stuck
+    /// at Initial would skip the save and silently lose FP state across a switch.
     pub const FS: u64 = 0b11 << 13;
-    /// `FS = Initial` — FP on, registers at their reset values. Test-only until
-    /// snemu grows the FP unit (plans/floating-point.md 3b): production code only
-    /// ever asks whether FS is Off, and nothing in snemu *sets* FS — the guest does.
+    /// `FS = Dirty` — FP state modified since it was last saved.
+    pub const FS_DIRTY: u64 = 0b11 << 13;
+    /// `FS = Initial` — FP on, registers at their reset values.
     #[cfg(test)]
     pub const FS_INITIAL: u64 = 0b01 << 13;
+    /// `FS = Clean` — FP on and in use, but unmodified since the last save.
+    #[cfg(test)]
+    pub const FS_CLEAN: u64 = 0b10 << 13;
 }
 
 /// The CSR addresses snemu currently models (the S-mode trap set + satp).

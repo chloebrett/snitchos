@@ -146,7 +146,7 @@ deliberately a **tripwire for increment 4**: when lazy enable lands, `1.5 + 1.5`
 should print `3` and this scenario must be rewritten. If increment 4 lands and it
 still passes unchanged, the lazy enable isn't reaching the REPL.
 
-### 3b onward — the FP unit itself
+### 3b — the FP unit itself — **DONE**
 
 Not started. Per the design doc's scope list, in a sensible landing order — each
 step is independently testable, and the FS gate above means none of them changes
@@ -222,16 +222,43 @@ observable behaviour until the kernel enables FP:
    Small follow-up: `StepError::UnsupportedRoundingMode` reports the mode
    numerically (it reaches the user via `Debug`). The doc asked for it to be *named*;
    that needs a `Display` impl for `StepError`.
-4. **FMA** (`fmadd`/`fmsub`/`fnmsub`/`fnmadd`), which need a fused multiply-add —
-   `f64::mul_add`, not `a * b + c`, or the intermediate rounds twice.
-5. **`sstatus.FS` Clean/Dirty transitions**, once the kernel has something that
-   reads them (an FP write sets Dirty; that's what lets a context switch skip
-   saving unmodified state).
-6. **JIT**: handle FP blocks or explicitly bail to the interpreter. Same reasoning
-   as increment 2's `fetch_for_compile` — a mis-compiled FP block is the one
-   failure `snemu diff` cannot see, since both sides would be running snemu's own
-   code, so it needs an internal JIT-on/JIT-off A/B rather than the differential
-   oracle.
+4. **FMA** — **DONE.** All four opcodes, both precisions, via `mul_add` so the
+   product rounds once. The fusion test is constructed to *detect* an unfused
+   implementation rather than trust the code: `a = b = 2²⁷ + 1` are exact but their
+   product needs 55 significand bits, so subtracting `2⁵⁴` exposes the bit a
+   double-rounded `a * b + c` loses — fused gives `2²⁸ + 1`, unfused `2²⁸`.
+   The sign conventions are a trap worth naming: `fnmsub` negates the **product** and
+   *adds* `rs3`, `fnmadd` negates the product and subtracts it — so `fnmsub` is not
+   "the negation of `fmsub`", and reading the mnemonics as English gets two of four
+   backwards.
+5. **`sstatus.FS` Clean/Dirty** — **DONE**, and done now rather than deferred,
+   because increment 4's context switch depends on it: a kernel that saw `FS` stuck at
+   Initial would skip the save and silently lose FP state across a switch. The Dirty
+   promotion lives in `set_freg` (so no future FP instruction can forget it) plus the
+   `fcsr` write paths. Instructions that only *read* the FP file — stores, compares,
+   `fclass`, `fmv.x.*` — don't pass through there, which is exactly the distinction
+   `FS` exists to express, and there's a test for the Clean case as well as the Dirty
+   one.
+6. **Compressed FP forms** — **DONE.** `c.fld`/`c.fsd`/`c.fldsp`/`c.fsdsp` expand to
+   their full-width equivalents, so NaN boxing, width and the FS gate are inherited
+   rather than reimplemented; the tests pin the per-format *immediate layouts*, which
+   are what differ. Not a corner: a compiler spills doubles to the stack constantly,
+   so the `sp`-relative pair is most of what real optimised FP code is made of.
+7. **JIT** — nothing to do beyond what increment 2 already established.
+   `compile_op`'s catch-all rejects every FP opcode, so a block ends before one and
+   the interpreter runs it. That invariant is pinned by the JIT-on/JIT-off A/B over FP
+   loads/stores added in step 2 — an internal oracle, because a mis-compiled FP block
+   is the one failure `snemu diff` cannot see (both sides would be snemu's own code).
+   Compiling FP blocks *natively* would be a performance change, not a correctness
+   one, and nothing has asked for it.
+
+**RV64FD is now covered.** One test was deleted rather than weakened as a result:
+`fp_instruction_with_fs_enabled_reports_the_gap_rather_than_trapping` needed an FP
+instruction snemu didn't implement as its witness, and ran out of candidates. Its two
+behaviours survive elsewhere — the general rule via
+`legal_but_unmodelled_instruction_halts_the_host` (witness `mret`, not FP, so FP work
+can't invalidate it), and "the FS gate doesn't fire when FS is on" via every FP test
+in the file, all of which run with `FS_INITIAL`.
 
 **On the oracle (decided 2026-07-26).** `snemu diff` can't give differential FP
 coverage until the *kernel* enables FP (increment 4), because until then neither
