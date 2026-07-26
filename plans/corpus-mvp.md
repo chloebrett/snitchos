@@ -214,10 +214,57 @@ rescues the small model** — its main weakness is exactly what the mask covers 
 leaving semantic quality as the differentiator, and that appears in none of those
 columns. The arithmetic cannot settle this; Increment 0 can.
 
+**Memory does not constrain the choice.** 64 GB of unified memory holds a 32B at
+q4 (~18 GB) with room for generous batching, so every row above is available.
+This is purely a throughput-versus-semantic-quality call, which is why Increment
+0 spikes more than one size.
+
 **Keep the tooling decision reversible.** Pick a model available as both GGUF and
 MLX weights (all Qwen3 sizes are), because Increment 7 forces a choice between
 llama.cpp (GBNF grammars built in, static and approximate) and MLX (faster per
 token on Apple silicon, custom logit processor calling `oracle.rs`, exact).
+
+---
+
+## Structure
+
+**Libraries decide, xtask drives** — the `kernel-*` and `cram-*` precedent. The
+line goes at the **seam**, which is the model call, not around the pipeline:
+
+| Concern | Where | Why |
+|---|---|---|
+| The gate (parse → lower → check, salvage) | `stitch`, promoted out of `tests/canon.rs` | it is a Stitch-domain question: "is this valid?" |
+| Recipe tuples, exemplar index, prompt building, dedup, append | `cram-corpus` | extensions of what it already owns; no model dependency |
+| The model call + its trait; constrained-decoding tokenizer bridge | **new harness crate** | the only impure part |
+
+Bundling the pure pieces into the harness crate would put testable logic behind
+an I/O dependency — exactly what `kernel-devices` ("device protocol logic, no
+MMIO") exists to avoid.
+
+**The justification for the crate is that the trait needs a home**, not that
+other callers want it. Increment 5's fake responder must drive the whole
+pipeline with no model present. Today the only consumer is `xtask-cram`; do not
+design for speculative ones.
+
+**Consume from `xtask-cram`, never lean `xtask`.** Same rationale as the
+existing three-way split: an edit to the generation harness must not recompile
+the tool that runs `cargo xtask test`. Lean `xtask` forwards, as it already does
+for `itest` and `cram`.
+
+**No tokio.** A blocking HTTP client (`ureq`-class, no async runtime) covers
+this, *including* Increment 8 — batching means ~8–16 in-flight requests, which
+is threads-and-blocking territory, not an async-runtime problem. Blocked threads
+are parked in the kernel consuming no CPU, so the core count is irrelevant to
+the thread count. Pulling in an async runtime to talk to localhost would be the
+heaviest dependency in the workspace, for nothing.
+
+**Cache model responses on disk**, keyed by `(model, prompt, sampling params,
+seed)` — the same shape as `cram-corpus`'s manifest/fingerprint cache. Three
+payoffs: debugging the gate, salvage, or dedup logic stops costing generation
+time; runs become *reproducible* rather than merely deterministic-in-principle,
+which is the standard the rest of this repo holds; and the constrained-vs-
+unconstrained comparison (Increment 7) can re-score the same raw generations
+under different downstream policies instead of generating twice.
 
 ---
 
@@ -308,8 +355,10 @@ One candidate at a time against a local HTTP endpoint.
 - **RED**: the runner is a trait; a fake responder returning canned text drives
   the whole pipeline end to end without a model. Every increment above must be
   testable with the model absent.
-- Model choice is yours — a 4B-class instruct model with decent code ability.
-  Whatever is already installed beats whatever benchmarks best.
+- **RED**: a cache hit returns byte-identical text without calling the runner;
+  changing any of model, prompt, sampling params or seed misses. See Structure —
+  this is what makes every later increment debuggable without regenerating.
+- Model choice per the Model choice section; whatever Increment 0 picked.
 
 ### 6. Dedup and corpus append
 
@@ -389,8 +438,26 @@ same bandwidth and buy you close to nothing. The win is **continuous batching
 inside one process** — weights read once per step, amortised across the whole
 batch.
 
-- Concurrent requests against one server (llama.cpp server, MLX, or equivalent
-  with continuous batching enabled).
+**The batching is not in the harness.** It is a server-side scheduler feature —
+the server collects concurrent requests and runs them as one batch. The client's
+only job is keeping N requests outstanding so there is something to batch, which
+is why the client-side concurrency mechanism barely matters (see Structure: no
+tokio, and core count is irrelevant to blocked threads).
+
+- Enable it on the server: llama.cpp wants parallel slots (`-np N`) plus
+  continuous batching; MLX has its own batch API.
+- **Target batch ≈ 8, not 16.** Decode reads ~2.4 GB of weights per step (~6 ms
+  at 400 GB/s) and computes ~8 GFLOP per sequence (~0.8 ms each at ~10 TFLOPS),
+  so compute overtakes bandwidth around batch 8 and returns flatten after. Going
+  to 16 buys far less than another 2×. Measure the crossover rather than trusting
+  that sentence.
+- **KV cache is not a constraint on this machine.** Each parallel slot carries
+  its own allocation — roughly 150–300 MB for a 4B model at 2k context, so even
+  batch 32 is ~5–10 GB against 64 GB of unified memory. It scales linearly with
+  the context allowed, so revisit only if context grows a lot. **The binding
+  limit is the compute/bandwidth crossover above, not memory.**
+- Prefill is compute-bound and competes with decode under continuous batching,
+  which makes Increment 4's prefix caching worth *more* here, not less.
 - **RED**: a batched run and a single-stream run over the same seeded recipe
   sequence produce the same set of candidates. Determinism must survive
   batching, or every later comparison is unrepeatable.
