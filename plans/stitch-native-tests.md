@@ -112,17 +112,36 @@ on-target `stitch test` share one implementation.
   one with `uses Telemetry` may. This is increment 5's runtime half; the
   checker's static half rides on `check_callable` from increment 4.
 
-### 7. The Rust gate
+### 7. The Rust gate — **DONE**
 
-- **RED**: every `.st` file the repo ships has its native tests run, and a
-  deliberately-broken fixture fails the gate. Same shape as `canon.rs`, wired
-  into `cargo xtask test`.
+Three tests in `stitch/tests/canon.rs`, which already owned "every shipped `.st`
+file":
+
+- `every_shipped_programs_native_tests_pass` — the gate. Rust *drives* the
+  suite; the assertions live in the `.st` files.
+- `the_native_test_gate_catches_a_failing_test` — the control, matching the type
+  stage's existing one. Verified end-to-end by temporarily breaking a canon
+  assertion: the failure names the file, the test, and both operands
+  (`expect failed: 2 == 999`).
+- `the_canon_carries_native_tests` — the **anti-vacuity ratchet**. The gate
+  shipped green over zero tests, which is indistinguishable from green over a
+  working suite. Floor of 6; raise it as tranches land, never lower it.
+
+`cargo xtask itest` still 128/128 — `stats.st` ships into the ramfs image, and
+`test` items are inert on the target (the registry binds no name for them).
+Stripping them from the metal build is still worth doing for size, but nothing
+depends on it.
 
 ### 8. Migration, in tranches
 
 Each tranche is green in Stitch before its Rust file goes.
 
-1. `lib/text.st` + `lib/stats.st` — port `canon_behaviour.rs`, delete it.
+1. `lib/stats.st` — **DONE**: 6 native tests, written beside the functions they
+   cover (integer-only, so they run on the metal — userspace FP is illegal).
+   `lib/text.st` next, then `canon_behaviour.rs` is deletable. Note the Rust
+   version tested `stats` through a *driver module* (`use stats` + a generated
+   `main`); the native ones call `summarise` directly, because they are inside
+   the module — which is the ergonomic difference the whole design is about.
 2. `stim.st` — the 1021-line prize. Motions, then operators, then modes.
 3. `prelude.st` gets tests, which it has never had.
 
