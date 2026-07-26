@@ -22,7 +22,19 @@ prod EmitRecord(name: Str, value: Int)
 // the real telemetry sink, and return what was recorded. `work` is called
 // through a parameter, not a known top-level name, so the static checker's
 // `uses`-propagation (shell.st's entry) doesn't — and structurally can't —
-// require `captureEmits` itself to declare `Telemetry`; only `work` does.
+// require `captureEmits` itself to declare `Telemetry`; only `work` does,
+// and `captureEmits` below genuinely has no `uses` row at all.
+//
+// The *tests*, though, all need `uses Telemetry` — not because they call
+// `captureEmits` (whose own `uses` is empty), but because each one writes
+// `() -> sumSquares(...)` inline: a lambda *literal* sitting directly in
+// the test's own body, whose contents the checker's effect walker reaches
+// through ordinary syntactic recursion (`child_exprs` descends into a
+// lambda's body same as any other child), regardless of whether that
+// lambda is invoked yet at that point in the source. Propagation isn't
+// gated on "does this actually run" — it's "does this capability-needing
+// call appear anywhere in the tree," lambdas included. See
+// plans/stitch-examples-findings.md for the fuller writeup.
 captureEmits(work) -> List<EmitRecord> = {
     let mut log = []
     handle emit with (n, v) -> { log = concat(log, [EmitRecord(n, v)]) } {
@@ -50,26 +62,26 @@ noEmit() uses Telemetry = ()
 
 // --- tests ---
 
-test "captureEmits records what the work under test emitted" {
+test "captureEmits records what the work under test emitted" uses Telemetry {
     expect captureEmits(() -> sumSquares([1, 2, 3])) == [EmitRecord("sumSquares.result", 14)]
 }
 
-test "captureEmits works for a second, differently-shaped emitter" {
+test "captureEmits works for a second, differently-shaped emitter" uses Telemetry {
     expect captureEmits(() -> countEvens([1, 2, 3, 4])) == [EmitRecord("countEvens.count", 2)]
 }
 
-test "captureEmits is empty when the work under test never emits" {
+test "captureEmits is empty when the work under test never emits" uses Telemetry {
     expect captureEmits(() -> noEmit()) == []
 }
 
-test "each captureEmits call starts fresh — nothing leaks between calls" {
+test "each captureEmits call starts fresh — nothing leaks between calls" uses Telemetry {
     let first = captureEmits(() -> sumSquares([1, 2]))
     let second = captureEmits(() -> sumSquares([3, 4]))
     expect first == [EmitRecord("sumSquares.result", 5)]
     expect second == [EmitRecord("sumSquares.result", 25)]
 }
 
-test "captureEmits still returns the work's own value via the closure, independent of the log" {
+test "captureEmits still returns the work's own value via the closure, independent of the log" uses Telemetry {
     // The point being demonstrated: capturing telemetry doesn't require
     // giving up the function's normal return value — `work` in these
     // tests always computes its answer the same way whether or not

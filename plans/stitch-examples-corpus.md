@@ -93,23 +93,37 @@ ordering slip while working through "do the next 5" autonomously (picked
 up the list past `elo.st` one item too far in). Not reordering the list
 itself; 16–17 were written afterward to close the gap, so all of 11–22 are
 now done regardless of the order they landed in.
-- [ ] 23. `formula.st` — spreadsheet cell graph, cross-references, cycle
+- [x] 23. `formula.st` — spreadsheet cell graph, cross-references, cycle
        detection (`Result`), memoized eval.
-- [ ] 24. `template.st` — mustache-like `{{var}}`/`{{#each}}` renderer over
-       nested `Map`/`List` context.
-- [ ] 25. `semver.st` — semantic-version parse/compare/sort, first real
-       `Either` usage.
-- [ ] 26. `interval.st` — merge-overlapping-ranges / max-non-overlapping
+- [x] 24. `template.st` — mustache-like `{{var}}`/`{{#each}}` renderer over
+       nested context. (`List<Binding>`, not `Map` — and hit the `{{`/`}}`
+       escaping trap for real, plus a genuine argument-order bug of my
+       own; see findings.)
+- [x] 25. `semver.st` — semantic-version parse/compare/sort, first real
+       `Either` usage. (`Either` isn't a builtin either — self-declared.
+       Found the maximal-munch gotcha's third variant, at match-arm
+       boundaries; see findings.)
+- [x] 26. `interval.st` — merge-overlapping-ranges / max-non-overlapping
        interval scheduling.
-- [ ] 27. `queue.st` — producer/consumer queue simulation, throughput via
-       `stats.st`'s `summarise` (cross-module `use`).
-- [ ] 28. `poker.st` — 5-card poker hand ranking (`sum HandRank`), grouping/
-       sorting via `Map`.
-- [ ] 29. `handlers.st` — `handle`/`with`/`without` demo: a mock `Telemetry`
-       handler recording emits into a list, used to unit-test `primes.st`-
-       style code with no real capabilities.
-- [ ] 30. `logstats.st` — log-line parser (`LEVEL: message`), per-level
+- [x] 27. `queue.st` — producer/consumer queue simulation, throughput via
+       a locally-reimplemented `summarise` (cross-module `use` doesn't work
+       under this batch's standalone-per-file gate; see findings).
+- [x] 28. `poker.st` — 5-card poker hand ranking (`sum HandRank`), grouping/
+       sorting via association lists, designed from the start to avoid the
+       match-arm maximal-munch gotcha semver.st found.
+- [x] 29. `handlers.st` — `handle`/`with` demo: a mock `Telemetry` handler
+       recording emits into a list, used to unit-test `primes.st`-style
+       code purely in Stitch.
+- [x] 30. `logstats.st` — log-line parser (`LEVEL: message`), per-level
        counts + top-N words, observability-themed capstone.
+
+**All 30 programs complete.** Every file parses, type-checks, and passes
+its own tests under `stitch/tests/examples.rs`; the full workspace gate
+stayed green throughout. See plans/stitch-examples-findings.md for the
+full write-up, including two real interpreter/checker findings that led to
+fixes (`Str.parseInt`/`toStr` added to `natives.rs`; the `Env::bind`
+self-tail-call regression fixed) and one documentation fix
+(`docs/language-design.md`'s `mut`-aliasing claim corrected).
 
 ## Notes
 

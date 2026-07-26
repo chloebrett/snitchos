@@ -802,6 +802,173 @@ below); everything else was established habits holding up.
   after that fix, so it never hit the same shape). Verified against a
   Python BFS reference before writing the `.st`, same as tictactoe.st.
 
+### 23–30: the last eight (formula.st through logstats.st)
+
+The final stretch, written in one continuous pass. Three genuinely new
+findings — one of them (the match-arm maximal-munch variant) the most
+consequential parser gotcha since the original bank.st discovery, because
+it silently recurred through two more files before the pattern was named
+and designed around.
+
+- **23. formula.st** — 118 lines, 7 tests. Passed on the first try. A
+  spreadsheet cell graph, `evalCell`/`evalExpr` threading a
+  `List<CacheEntry>` cache exactly the way lru.st's `fibMemo` threads its
+  `Cache` — and the memoization is actually *verified*, not just assumed:
+  a diamond-dependency test asserts the shared ancestor cell appears
+  exactly once in the returned cache, which would show as two entries if
+  the cache-hit check were ever accidentally skipped.
+
+- **24. template.st** — 175 lines, 7 tests. Two real, independent bugs,
+  both mine, both worth the detail:
+  - **Fell into the exact `{{`/`}}` escaping trap json.st's entry already
+    documented — in the one file whose entire purpose is processing
+    `{{`/`}}` syntax.** `"{{"` in a Stitch string literal decodes to a
+    *single* `{` (interpolation's literal-brace escape), not two — so
+    `Str.split(template, "{{")` and every literal `"{{#each}}"` in an
+    error message or test template needs to be written **doubled again**:
+    source `"{{{{"` decodes to the value `"{{"`. The whole file parsed
+    without error using undoubled braces (visually it looks exactly
+    right, since `{{` *is* the delimiter you're picturing) and silently
+    behaved as if every tag were single-braced. Caught by `"Hello,
+    {{name}}!"` rendering as `"Hello, Ada"` with the `!` eaten, and an
+    unrelated `"no match arm matched"` fault on the each-block tests —
+    neither symptom points at the real cause. Confirms the earlier
+    finding's prediction outright: "every future program that builds
+    strings containing `{`/`}` … will hit this if it forgets the
+    doubling," and even *knowing* that in advance wasn't enough to avoid
+    it once — worth internalizing as "assume every brace in this file is
+    wrong until proven otherwise," not "remember to double them."
+  - **A genuine bug in my own code, not the language**: `renderEach`'s
+    recursive call had `body` and `items` swapped
+    (`renderEach(List.removeAt(items, 0), body)` instead of
+    `renderEach(body, List.removeAt(items, 0))`), which surfaced as `"no
+    match arm matched"` inside `renderSegments` two calls away from the
+    actual mistake. Found by bisecting with throwaway `test "DEBUG …"`
+    blocks asserting on intermediate values (`segmentsOf`'s output, then
+    `splitEachBlock`'s, then `renderEach`'s) until the fault's true origin
+    was pinned — each debug assertion's `expect X == Err("debug")` diff
+    printed `X`'s real value for free, the same "get a second opinion
+    from the interpreter itself" instinct as vm.st's Python simulator,
+    just using the native test runner as the oracle instead of an
+    external script.
+
+- **25. semver.st** — 153 lines, 8 tests. `Either`, self-declared (see
+  below), used for a genuinely two-sided field (`Version.pre`).
+  **`sortBy` can't express a multi-field/custom-comparator sort** (it
+  takes one scalar key), so `sortVersions` is a hand-written insertion
+  sort against `compareVersions` instead — worth remembering for any
+  future sort that isn't reducible to "order by this one projection."
+  - **`Either`/`Left`/`Right` are documented in `docs/language-design.md`
+    right alongside `Maybe`/`Result` as one of the "just sums," but —
+    unlike `Maybe`/`Result` (hardcoded in `registry.rs::register_builtin_types`,
+    `Some`/`Ok`/`Err` are literal Rust constructors, not something a
+    `prelude.st`-level declaration provides) — `Either` is *nowhere*:
+    not in `registry.rs`, `interp.rs`, or `check.rs`.** One step short of
+    `Set`'s gap (spellcheck.st's entry, design-doc-only and never built at
+    all) — `Either` is trivially fixable per-file (`sum Either<A, B> =
+    Left(A) | Right(B)`, three words, works identically to a builtin once
+    declared, since a `sum` is structurally the same regardless of where
+    it's declared) — but still a real "the doc and the ambient globals
+    disagree" gap worth checking before assuming any of the design doc's
+    "just sums" are actually ambient.
+  - **The maximal-munch call-paren gotcha, a third way — and the most
+    consequential variant found in this batch.** A `match (a, b) { (Right(_),
+    Right(_)) => 0  (Right(_), Left(_)) => 1  … }` with tuple patterns:
+    arm 2's bare-value body (`1`) is immediately followed by arm 3's
+    tuple pattern `(Left(_), Right(_))`, which starts with `(` — same
+    fusion as bank.st's `transfer` (statement-adjacency) and
+    tictactoe.st's `unwrapOr(Empty)` (pipe-RHS-adjacency), but this time
+    at a **match-arm boundary**, turning `1` into a nonsense call
+    `1(Left(_), Right(_))` that then eats arm 3's own `=>` as a
+    conditional, expects `|`, and fails with `"expected '|' in
+    conditional"` pointing at arm 3's fat arrow — nowhere near arm 2's
+    real, unrelated mistake. **Fixed by restructuring, not patching**:
+    nested single-value matches (`match a { Right(_) => match b { … } 
+    Left(x) => match b { … } }`) instead of one tuple-pattern match —
+    `Right(_)`/`Left(x)` patterns never start with `(`, so the whole
+    class of bug can't trigger, rather than parenthesizing around one
+    instance of it. **This is the shape every later tuple-pattern match in
+    this batch had to be designed around from the start** (poker.st,
+    below) rather than discovered by a failing test a second time.
+
+- **26. interval.st** — 84 lines, 9 tests. Passed on the first try (the
+  match-arm lesson from semver.st, written just before it, applied
+  cleanly — no tuple-pattern matches needed here at all, just `fold` +
+  `sortBy` + one scalar comparison per arm). No new friction.
+
+- **27. queue.st** — 84 lines, 6 tests. `Seq.iterate`/`take`/`toList` for
+  the tick-driving loop (life.st's pattern, now the default reach for "N
+  repetitions" rather than a special case). The proposal named
+  `stats.st`'s `summarise` via cross-module `use` — doesn't work under
+  this batch's per-file-standalone gate (`stitch/tests/examples.rs` calls
+  `parse_program` on one file at a time, not the multi-module
+  `run_modules` path `use` needs), the same reason life.st's renderer is
+  inline rather than importing `fs-image/lib/text.st`; reimplemented a
+  miniature `summarise` locally instead. **A real modeling correction
+  caught before committing to wrong test expectations, not after**: the
+  first draft's tick model (produce, then consume the same tick) makes a
+  matched-rate steady state settle at exactly the *starting* length
+  (usually 0), never a positive steady value — "throughput" only becomes
+  visible as a distinct steady-state length once consumption is limited
+  to *already-queued* work (consume from last tick's backlog, then this
+  tick's arrivals land) — caught by a Python cross-check before writing
+  any Stitch, not after a failing test.
+
+- **28. poker.st** — 151 lines, 10 tests. `classify`'s hand-ranking logic
+  is nested `match`es on `Bool`/`Int` — `match top.count { 4 => …  3 =>
+  match second.count { 2 => FullHouse(…)  … } … }` — deliberately, per
+  semver.st's finding: the first draft used one `match (straight, flush,
+  top.count, second.count) { (true, true, _, _) => StraightFlush(high)  … }`
+  tuple-pattern match, and would have hit the exact same call-paren fusion
+  between arms (every arm's body is a bare constructor call, every next
+  arm's pattern starts with `(`). Designed around from the start this
+  time — passed the gate on the first try. Also worth its own mention:
+  `isConsecutive` checks every *adjacent pair* differs by exactly 1,
+  rather than the cheaper-looking `max - min == 4`, specifically because
+  the cheap version is wrong on a hand with a duplicate rank (`2,2,3,4,6`
+  has the same min/max spread as a real straight) — caught by writing that
+  exact test case deliberately, not by accident.
+
+- **29. handlers.st** — 91 lines, 5 tests. `handle emit with (n, v) -> {
+  log = concat(log, [EmitRecord(n, v)]) } { work() }` capturing telemetry
+  into a plain `mut` list, closed over by reference the same way bank.st's
+  write-back relies on `mut` bindings being shared cells. **Extends the
+  shell.st/bank.st capability-propagation finding with a case neither of
+  those files needed**: `captureEmits(work)` itself never needs `uses
+  Telemetry` (calling `work()` through a parameter, not a known top-level
+  name, is invisible to `walk_effects`'s `funcs.get(name)` lookup — exactly
+  as shell.st's entry predicted) — but *every test that writes `() ->
+  sumSquares(...)` inline* does, because the checker's effect walk is a
+  plain syntactic recursion into `child_exprs`, and a lambda's body is a
+  child like any other. Propagation isn't gated on "will this code
+  actually run by the time we're done here" — it's "does a
+  capability-needing call appear anywhere in the tree, lambdas-not-yet-
+  invoked included." A finer-grained rule than "function calls propagate,
+  method calls and higher-order calls don't" — it's really "any *lexically
+  present* named-function call propagates, regardless of whether it's
+  behind an unevaluated lambda."
+  - Also confirms **the batch's standing testing-limitation note still
+    holds and wasn't worked around here either**: no test asserts that
+    `work` *without* `uses Telemetry` gets refused inside a `handle`
+    block, for the same reason bank.st's entry gives — `expect` can't
+    assert a fault was expected.
+
+- **30. logstats.st** — 120 lines, 8 tests. Passed on the first try. The
+  observability-themed capstone: association-list tallying (json.st's
+  pattern, now completely routine) for both per-level counts and per-word
+  frequency, `firstN` written by hand instead of `take` (markov.st's
+  `Seq`-only finding, now also routine to route around). No new friction
+  — the last program in the batch and the cleanest to write, which is
+  itself the point of the whole exercise: every gotcha it could have hit
+  had already been named, and so it didn't.
+
+**The batch is complete: 30/30 programs, 976 lines and 60 tests in this
+final stretch alone (roughly 6,300 lines and 280+ tests across all 30).
+Every file parses, type-checks, and passes its own tests under
+`stitch/tests/examples.rs`; the full workspace gate (`cargo nextest run -p
+stitch --features testing`, `cargo xtask links`, the `no_std` riscv64 lib
+build where the interpreter itself changed) stayed green throughout.**
+
 - **Not tested in-language, and worth recording why**: wanted a `bank.st`
   test proving a function *without* `uses FsWrite` is refused when it
   tries `fsWrite` (the negative case for the capability-boundary finding
