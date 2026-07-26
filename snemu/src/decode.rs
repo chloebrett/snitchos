@@ -32,6 +32,86 @@ pub(crate) mod opcode {
     pub const OP_FP: u32 = 0x53;
 }
 
+/// OP-FP operation selectors — `instr[31:27]`, the top five bits of funct7. The
+/// remaining two bits (`instr[26:25]`) are the format, [`fp_fmt`].
+pub(crate) mod funct5_fp {
+    pub const ADD: u32 = 0x00;
+    pub const SUB: u32 = 0x01;
+    pub const MUL: u32 = 0x02;
+    pub const DIV: u32 = 0x03;
+    pub const SQRT: u32 = 0x0b;
+    /// Sign injection — `fsgnj` / `fsgnjn` / `fsgnjx` by funct3 (0/1/2). How a
+    /// compiler spells `copysign`, `neg` and `abs`.
+    pub const SGNJ: u32 = 0x04;
+    /// `fmin` / `fmax` by funct3 (0/1).
+    pub const MINMAX: u32 = 0x05;
+    /// `fle` / `flt` / `feq` by funct3 (0/1/2) — result to an *integer* register.
+    pub const CMP: u32 = 0x14;
+    /// `fmv.x.w`/`fmv.x.d` (funct3 0) and `fclass` (funct3 1) — both to an integer
+    /// register.
+    pub const CLASS_MV: u32 = 0x1c;
+    /// `fcvt.s.d` / `fcvt.d.s` — convert between float widths. The destination format
+    /// is the instruction's `fmt`; the *source* format is named by `rs2`.
+    pub const CVT_WIDTH: u32 = 0x08;
+    /// `fcvt.{w,wu,l,lu}.{s,d}` — float→integer, the variant named by `rs2`
+    /// ([`cvt_variant`]). Result to an integer register.
+    pub const CVT_TO_INT: u32 = 0x18;
+    /// `fcvt.{s,d}.{w,wu,l,lu}` — integer→float, the source named by `rs2`.
+    pub const CVT_FROM_INT: u32 = 0x1a;
+    /// `fmv.w.x` / `fmv.d.x` — raw integer bits into the FP register file.
+    pub const MV_TO_FP: u32 = 0x1e;
+}
+
+/// Which integer type a `fcvt` names in its `rs2` field.
+pub(crate) mod cvt_variant {
+    /// Signed 32-bit — `.w`.
+    pub const W: u32 = 0b00;
+    /// Unsigned 32-bit — `.wu`.
+    pub const WU: u32 = 0b01;
+    /// Signed 64-bit — `.l`.
+    pub const L: u32 = 0b10;
+    /// Unsigned 64-bit — `.lu`.
+    pub const LU: u32 = 0b11;
+}
+
+/// Does this OP-FP operation use `instr[14:12]` as a **rounding mode**, or as an
+/// operation selector?
+///
+/// The distinction is load-bearing and easy to get wrong in the direction that
+/// breaks working code: `fsgnjn` (selector 1) and `fsgnjx` (selector 2) read as the
+/// rounding modes `RTZ` and `RDN`, so a rounding check applied to every OP-FP
+/// instruction refuses `-x` and `abs(x)`. Only genuinely rounding operations —
+/// arithmetic and the conversions — may be checked.
+/// (`MV_TO_FP` is a bit move, so it doesn't round either.)
+pub(crate) fn op_fp_rounds(funct5: u32) -> bool {
+    !matches!(
+        funct5,
+        funct5_fp::SGNJ
+            | funct5_fp::MINMAX
+            | funct5_fp::CMP
+            | funct5_fp::CLASS_MV
+            | funct5_fp::MV_TO_FP
+    )
+}
+
+/// Does this OP-FP operation do its **own** rounding (so it can honour more modes
+/// than the host FPU's nearest-even), or does it inherit the host's?
+///
+/// Only the float→int conversions: snemu rounds those itself, which is what lets it
+/// accept the `rtz` that every Rust float→int cast asks for. Arithmetic is evaluated
+/// by the host and so is nearest-even or nothing.
+pub(crate) fn op_fp_rounds_itself(funct5: u32) -> bool {
+    funct5 == funct5_fp::CVT_TO_INT
+}
+
+/// Precision format, `instr[26:25]` of an OP-FP instruction.
+pub(crate) mod fp_fmt {
+    /// Single precision — the `.s` suffix.
+    pub const S: u32 = 0b00;
+    /// Double precision — the `.d` suffix.
+    pub const D: u32 = 0b01;
+}
+
 /// Access width for an FP load/store, `instr[14:12]`. Numerically the same as the
 /// integer `LW`/`LD` selectors, but named separately because the *semantics*
 /// differ: a 32-bit FP load NaN-boxes rather than sign-extending.

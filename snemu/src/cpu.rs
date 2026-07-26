@@ -7,9 +7,11 @@ use crate::block::{self, Block, BlockCache, Compiled};
 use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, fcsr, sstatus};
 use crate::decode::{
-    Instr, amo_op, expand, fp_csr, fp_width, funct3, funct7, is_compressed, is_fp_instruction,
-    is_guest_illegal, nan_box, opcode, priv12, system,
+    Instr, amo_op, expand, fp_csr, fp_fmt, fp_width, funct3, funct5_fp, funct7, is_compressed,
+    cvt_variant, is_fp_instruction, is_guest_illegal, nan_box, op_fp_rounds,
+    op_fp_rounds_itself, opcode, priv12, system,
 };
+use crate::fp;
 use crate::fetch_cache::{FetchCache, Fetched};
 use crate::mem::{BusError, Memory, RAM_BASE};
 use crate::mmu::{self, Access};
@@ -230,6 +232,15 @@ pub enum StepError {
     Unimplemented { pc: u64, instr: u32 },
     /// A `csr*` instruction named a CSR snemu doesn't model yet (meta-loop).
     UnknownCsr { pc: u64, addr: u16 },
+    /// An FP instruction asked for a rounding mode other than round-to-nearest-even
+    /// — the only mode snemu implements. `mode` is the **effective** mode (resolved
+    /// through `fcsr.frm` if the instruction said `DYN`), so the report names what
+    /// the guest actually asked for.
+    ///
+    /// Loud on purpose, and never a guest trap: rounding the host's way instead would
+    /// produce a plausible number that flows downstream, leaving `snemu diff` to
+    /// report a distant symptom long after the cause.
+    UnsupportedRoundingMode { pc: u64, instr: u32, mode: u32 },
     /// Sv39 translation failed for `va` (unmapped or permission-denied). A real
     /// guest page-fault trap is future work; for now this halts the run.
     PageFault { va: u64 },
@@ -1126,6 +1137,7 @@ impl Hart {
             opcode::STORE => self.store(instr, bus),
             opcode::LOAD_FP => self.load_fp(instr, bus),
             opcode::STORE_FP => self.store_fp(instr, bus),
+            opcode::OP_FP => self.op_fp(instr),
             opcode::AMO => self.amo(instr, bus),
             opcode::SYSTEM => self.system(instr),
             opcode::MISC_MEM => {
@@ -1407,6 +1419,275 @@ impl Hart {
         }
         self.advance();
         Ok(())
+    }
+
+    /// OP-FP: the FP register-register family. `instr[31:27]` selects the operation
+    /// and `instr[26:25]` the precision, so each op is written once per width rather
+    /// than once per opcode.
+    ///
+    /// Arithmetic is plain Rust `f32`/`f64` — the reference is IEEE-754 and the host
+    /// is IEEE-754, so there is nothing to model. What the architecture *does* add is
+    /// applied around it: the rounding-mode check (refused loudly, never rounded the
+    /// host's way), canonical NaN on the result, and unboxing/reboxing for singles.
+    /// Those live in [`crate::fp`].
+    fn op_fp(&mut self, instr: Instr) -> Result<(), StepError> {
+        let funct5 = instr.funct5();
+        let fmt = instr.funct7() & 0b11;
+        // `instr[14:12]` is the rounding mode *only* for operations that round.
+        // Sign-injection, min/max, compares and classify reuse the field as an op
+        // selector — checking them would refuse `fsgnjn` (selector 1, which reads as
+        // `RTZ`) and so break `-x`.
+        let frm = self.csr_read(addr::FCSR) >> fcsr::FRM_SHIFT;
+        // Float→int conversions round *themselves*, so they accept more modes than the
+        // host FPU offers — notably `rtz`, which every Rust float→int cast emits.
+        // Everything else that rounds is evaluated by the host: nearest-even or refuse.
+        let rounding = if op_fp_rounds_itself(funct5) {
+            match fp::conversion_rounding(instr.funct3(), frm) {
+                Ok(mode) => mode,
+                Err(mode) => {
+                    return Err(StepError::UnsupportedRoundingMode {
+                        pc: self.pc,
+                        instr: instr.0,
+                        mode,
+                    });
+                }
+            }
+        } else {
+            if op_fp_rounds(funct5)
+                && let Err(mode) = fp::arithmetic_rounding(instr.funct3(), frm)
+            {
+                return Err(StepError::UnsupportedRoundingMode {
+                    pc: self.pc,
+                    instr: instr.0,
+                    mode,
+                });
+            }
+            fp::Rounding::NearestEven
+        };
+
+        // Operations whose destination is an *integer* register, so they never touch
+        // the FP file: compares, `fclass`, `fmv.x.*`.
+        if let Some(value) = self.op_fp_to_integer(instr, funct5, fmt, rounding)? {
+            self.set_reg(instr.rd(), value);
+            self.advance();
+            return Ok(());
+        }
+
+        // Operations that read an *integer* register or the other float width, so they
+        // don't fit the symmetric per-format arithmetic shape below.
+        if let Some(bits) = self.op_fp_from_elsewhere(instr, funct5, fmt)? {
+            self.set_freg(instr.rd(), bits);
+            self.advance();
+            return Ok(());
+        }
+
+        let bits = match fmt {
+            fp_fmt::D => {
+                let a = f64::from_bits(self.freg(instr.rs1()));
+                let b = f64::from_bits(self.freg(instr.rs2()));
+                match funct5 {
+                    funct5_fp::ADD => fp::canonicalise_d(a + b),
+                    funct5_fp::SUB => fp::canonicalise_d(a - b),
+                    funct5_fp::MUL => fp::canonicalise_d(a * b),
+                    funct5_fp::DIV => fp::canonicalise_d(a / b),
+                    // Single-operand: rs2 is part of the encoding, not data.
+                    funct5_fp::SQRT => fp::canonicalise_d(a.sqrt()),
+                    funct5_fp::MINMAX => match instr.funct3() {
+                        0 | 1 => fp::min_max_d(a, b, instr.funct3() == 1),
+                        _ => return Err(self.unimplemented(instr.0)),
+                    },
+                    // Bit manipulation, so it reads the raw register rather than the
+                    // `f64` — a NaN payload has to survive.
+                    funct5_fp::SGNJ => {
+                        let raw = fp::sign_inject(
+                            self.freg(instr.rs1()),
+                            self.freg(instr.rs2()),
+                            instr.funct3(),
+                            1 << 63,
+                        );
+                        match raw {
+                            Some(bits) => bits,
+                            None => return Err(self.unimplemented(instr.0)),
+                        }
+                    }
+                    _ => return Err(self.unimplemented(instr.0)),
+                }
+            }
+            fp_fmt::S => {
+                let a = fp::unbox_single(self.freg(instr.rs1()));
+                let b = fp::unbox_single(self.freg(instr.rs2()));
+                match funct5 {
+                    funct5_fp::ADD => fp::box_single(a + b),
+                    funct5_fp::SUB => fp::box_single(a - b),
+                    funct5_fp::MUL => fp::box_single(a * b),
+                    funct5_fp::DIV => fp::box_single(a / b),
+                    funct5_fp::SQRT => fp::box_single(a.sqrt()),
+                    funct5_fp::MINMAX => match instr.funct3() {
+                        0 | 1 => fp::min_max_s(a, b, instr.funct3() == 1),
+                        _ => return Err(self.unimplemented(instr.0)),
+                    },
+                    // Single-precision sign injection works on the boxed register's
+                    // low word, so the sign bit is bit 31, and the result is reboxed.
+                    funct5_fp::SGNJ => {
+                        let raw = fp::sign_inject(
+                            u64::from(fp::unbox_single(self.freg(instr.rs1())).to_bits()),
+                            u64::from(fp::unbox_single(self.freg(instr.rs2())).to_bits()),
+                            instr.funct3(),
+                            1 << 31,
+                        );
+                        match raw {
+                            Some(bits) => nan_box(bits as u32),
+                            None => return Err(self.unimplemented(instr.0)),
+                        }
+                    }
+                    _ => return Err(self.unimplemented(instr.0)),
+                }
+            }
+            // The half- and quad-precision formats (10, 11) aren't in RV64GC.
+            _ => return Err(self.unimplemented(instr.0)),
+        };
+        self.set_freg(instr.rd(), bits);
+        self.advance();
+        Ok(())
+    }
+
+    /// OP-FP operations that write the FP file but read from somewhere other than two
+    /// same-width FP registers: `fmv.{w,d}.x` (an integer register), `fcvt.{s,d}.*`
+    /// (an integer register), and `fcvt.s.d`/`fcvt.d.s` (the *other* float width).
+    /// `Ok(None)` means "not one of these".
+    ///
+    /// Separate from the arithmetic match because the operand *source* is what differs;
+    /// inlining them would make each format's arm re-decide where its inputs come from.
+    fn op_fp_from_elsewhere(
+        &mut self,
+        instr: Instr,
+        funct5: u32,
+        fmt: u32,
+    ) -> Result<Option<u64>, StepError> {
+        match funct5 {
+            // A raw bit move from an integer register: `fmv.d.x` takes all 64,
+            // `fmv.w.x` the low 32, NaN-boxed so the register is a well-formed single.
+            funct5_fp::MV_TO_FP => {
+                let value = self.x[instr.rs1()];
+                Ok(Some(match fmt {
+                    fp_fmt::D => value,
+                    fp_fmt::S => nan_box(value as u32),
+                    _ => return Err(self.unimplemented(instr.0)),
+                }))
+            }
+            funct5_fp::CVT_FROM_INT => {
+                let raw = self.x[instr.rs1()];
+                // The source width is named by rs2, and the narrow variants read only
+                // the low 32 bits — passing the whole register through would turn a
+                // negative `i32` into a huge positive float.
+                let value = match instr.rs2() as u32 {
+                    cvt_variant::W => f64::from(raw as u32 as i32),
+                    cvt_variant::WU => f64::from(raw as u32),
+                    cvt_variant::L => raw as i64 as f64,
+                    cvt_variant::LU => raw as f64,
+                    _ => return Err(self.unimplemented(instr.0)),
+                };
+                Ok(Some(match fmt {
+                    fp_fmt::D => fp::canonicalise_d(value),
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "narrowing to f32 is the instruction's purpose; \
+                                  out-of-range becomes an infinity, as IEEE requires"
+                    )]
+                    fp_fmt::S => fp::box_single(value as f32),
+                    _ => return Err(self.unimplemented(instr.0)),
+                }))
+            }
+            // Convert between float widths. `fmt` is the *destination*; `rs2` names the
+            // source, so `fcvt.s.d` is fmt=S with rs2=D.
+            funct5_fp::CVT_WIDTH => match (fmt, instr.rs2() as u32) {
+                (fp_fmt::S, fp_fmt::D) => {
+                    let wide = f64::from_bits(self.freg(instr.rs1()));
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "narrowing is the instruction's purpose (fcvt.s.d)"
+                    )]
+                    Ok(Some(fp::box_single(wide as f32)))
+                }
+                (fp_fmt::D, fp_fmt::S) => {
+                    let narrow = fp::unbox_single(self.freg(instr.rs1()));
+                    Ok(Some(fp::canonicalise_d(f64::from(narrow))))
+                }
+                _ => Err(self.unimplemented(instr.0)),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// The OP-FP operations whose destination is an **integer** register: compares
+    /// (`fle`/`flt`/`feq`) and `fclass`. `Ok(None)` means "not one of these" — the
+    /// caller carries on with the FP-destination families.
+    ///
+    /// Split out because the destination register file is the real distinction here;
+    /// folding these into the per-format arithmetic match would have each width
+    /// re-deciding where its result goes.
+    fn op_fp_to_integer(
+        &mut self,
+        instr: Instr,
+        funct5: u32,
+        fmt: u32,
+        rounding: fp::Rounding,
+    ) -> Result<Option<u64>, StepError> {
+        match funct5 {
+            funct5_fp::CMP => {
+                let (a, b) = match fmt {
+                    fp_fmt::D => (
+                        f64::from_bits(self.freg(instr.rs1())),
+                        f64::from_bits(self.freg(instr.rs2())),
+                    ),
+                    fp_fmt::S => (
+                        f64::from(fp::unbox_single(self.freg(instr.rs1()))),
+                        f64::from(fp::unbox_single(self.freg(instr.rs2()))),
+                    ),
+                    _ => return Err(self.unimplemented(instr.0)),
+                };
+                // Widening a single to a double is exact, so the comparison's result
+                // is unchanged — including the NaN cases, since NaN stays NaN.
+                match fp::compare(a, b, instr.funct3()) {
+                    Some(result) => Ok(Some(u64::from(result))),
+                    None => Err(self.unimplemented(instr.0)),
+                }
+            }
+            // funct3 1 = fclass, funct3 0 = fmv.x.* — a raw bit move, so a NaN payload
+            // survives. `fmv.x.w` takes the low word **sign-extended**, which is why it
+            // can't just hand the register over.
+            funct5_fp::CLASS_MV => match (instr.funct3(), fmt) {
+                (1, fp_fmt::D) => Ok(Some(fp::classify_d(self.freg(instr.rs1())))),
+                (0, fp_fmt::D) => Ok(Some(self.freg(instr.rs1()))),
+                (0, fp_fmt::S) => {
+                    let low = self.freg(instr.rs1()) as u32;
+                    Ok(Some(i64::from(low as i32) as u64))
+                }
+                _ => Err(self.unimplemented(instr.0)),
+            },
+            funct5_fp::CVT_TO_INT => {
+                let value = match fmt {
+                    fp_fmt::D => f64::from_bits(self.freg(instr.rs1())),
+                    fp_fmt::S => f64::from(fp::unbox_single(self.freg(instr.rs1()))),
+                    _ => return Err(self.unimplemented(instr.0)),
+                };
+                // The 32-bit results are sign-extended into the 64-bit register — for
+                // `.wu` too, per the spec, so `u32::MAX` reads as -1.
+                Ok(Some(match instr.rs2() as u32 {
+                    cvt_variant::W => fp::to_signed(value, rounding, 32) as u64,
+                    cvt_variant::L => fp::to_signed(value, rounding, 64) as u64,
+                    // Note the `as i32`: `i64::from(u32)` would zero-extend, but RV64
+                    // sign-extends *every* 32-bit FP→int result — `.wu` included, so
+                    // `u32::MAX` reads back as -1.
+                    cvt_variant::WU => {
+                        i64::from(fp::to_unsigned(value, rounding, 32) as u32 as i32) as u64
+                    }
+                    cvt_variant::LU => fp::to_unsigned(value, rounding, 64),
+                    _ => return Err(self.unimplemented(instr.0)),
+                }))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// AMO: atomic read-modify-write. Reads the addressed word/doubleword,
@@ -3623,33 +3904,178 @@ mod tests {
     const FUNCT3_D: u32 = 0b011;
 
     const FP_SRC: u64 = RAM_BASE + 0x100;
-    const FP_DST: u64 = RAM_BASE + 0x108;
+    const FP_SRC2: u64 = RAM_BASE + 0x110;
+    const FP_DST: u64 = RAM_BASE + 0x120;
 
     /// Run an FP `program` with FP enabled, then read the result back **the way the
     /// guest would** — an integer `ld` of `FP_DST` into x5 — rather than reaching
     /// into host memory. Same idiom as `run_amo_d`: the observation goes through the
     /// instruction set, so a store that didn't really reach memory can't pass.
     ///
-    /// `FP_SRC` is seeded with `src` and preloaded into x1; `FP_DST` with
-    /// `dst_sentinel` and preloaded into x2, so a partial-width store reveals which
-    /// neighbouring bytes it left alone.
-    fn run_fp_program(program: &[u32], src: u64, dst_sentinel: u64) -> u64 {
+    /// Register/address conventions, so the programs below read as assembly:
+    /// x1 → `FP_SRC` (seeded `a`), x6 → `FP_SRC2` (seeded `b`), x2 → `FP_DST`
+    /// (seeded `dst_sentinel`, so a partial-width store reveals which neighbouring
+    /// bytes it left alone).
+    fn run_fp_program(program: &[u32], a: u64, b: u64, dst_sentinel: u64) -> u64 {
         let mut mem = Memory::new(0x2000);
         for (i, &word) in program.iter().enumerate() {
             mem.write_u32(RAM_BASE + i as u64 * 4, word).unwrap();
         }
         let readback = RAM_BASE + program.len() as u64 * 4;
         mem.write_u32(readback, ld(5, 2, 0)).unwrap();
-        mem.write_u64(FP_SRC, src).unwrap();
+        mem.write_u64(FP_SRC, a).unwrap();
+        mem.write_u64(FP_SRC2, b).unwrap();
         mem.write_u64(FP_DST, dst_sentinel).unwrap();
         let mut cpu = Cpu::new(mem);
         cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
         cpu.set_reg(1, FP_SRC);
+        cpu.set_reg(6, FP_SRC2);
         cpu.set_reg(2, FP_DST);
         for _ in 0..=program.len() {
             cpu.step().unwrap();
         }
         cpu.reg(5)
+    }
+
+    /// Encode an OP-FP instruction. `funct5` is `instr[31:27]` (the operation),
+    /// `fmt` is `instr[26:25]` (00 = single, 01 = double), and `rm` doubles as the
+    /// rounding mode on arithmetic or the op selector on compares/sign-injection.
+    fn op_fp(funct5: u32, fmt: u32, rm: u32, rd: u32, rs1: u32, rs2: u32) -> u32 {
+        (funct5 << 27) | (fmt << 25) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7)
+            | opcode::OP_FP
+    }
+
+    /// `fmt` values for [`op_fp`].
+    const FMT_S: u32 = 0b00;
+    const FMT_D: u32 = 0b01;
+
+    /// Run a double-precision binary op over `a` and `b`, returning the result's
+    /// raw bits: load both operands, apply `funct5`, store the result.
+    fn run_arith_d(funct5: u32, a: f64, b: f64) -> u64 {
+        run_fp_program(
+            &[
+                fp_load(FUNCT3_D, 1, 1, 0),                        // fld f1, 0(x1)
+                fp_load(FUNCT3_D, 2, 6, 0),                        // fld f2, 0(x6)
+                op_fp(funct5, FMT_D, fp::rm::DYN, 3, 1, 2),        // f3 = f1 op f2
+                fp_store(FUNCT3_D, 3, 2, 0),                       // fsd f3, 0(x2)
+            ],
+            a.to_bits(),
+            b.to_bits(),
+            0,
+        )
+    }
+
+    /// The arithmetic families, both widths, against the host FPU. There is nothing
+    /// architecture-specific to model in `a + b` itself — the reference is IEEE-754,
+    /// which is what the host does — so these check the *plumbing*: operand
+    /// selection, width, and that the result lands in the right register.
+    #[test]
+    fn double_precision_arithmetic_computes() {
+        assert_eq!(f64::from_bits(run_arith_d(funct5_fp::ADD, 1.5, 2.25)), 3.75);
+        assert_eq!(f64::from_bits(run_arith_d(funct5_fp::SUB, 1.5, 2.25)), -0.75);
+        assert_eq!(f64::from_bits(run_arith_d(funct5_fp::MUL, 1.5, 2.25)), 3.375);
+        assert_eq!(f64::from_bits(run_arith_d(funct5_fp::DIV, 4.5, 1.5)), 3.0);
+    }
+
+    /// Operand *order* matters for the non-commutative ops, and getting rs1/rs2
+    /// backwards is invisible in `add`/`mul`. Checked explicitly rather than trusted.
+    #[test]
+    fn subtraction_and_division_use_rs1_as_the_left_operand() {
+        assert_eq!(f64::from_bits(run_arith_d(funct5_fp::SUB, 10.0, 3.0)), 7.0);
+        assert_eq!(f64::from_bits(run_arith_d(funct5_fp::DIV, 10.0, 4.0)), 2.5);
+    }
+
+    /// `fsqrt.d` takes a single operand — `rs2` is part of the encoding, not an
+    /// operand, so a naive two-operand implementation would read a register the
+    /// instruction never named.
+    #[test]
+    fn square_root_ignores_the_rs2_field() {
+        let out = run_fp_program(
+            &[
+                fp_load(FUNCT3_D, 1, 1, 0),
+                // rs2 = 7, deliberately naming an untouched register.
+                op_fp(funct5_fp::SQRT, FMT_D, fp::rm::DYN, 3, 1, 7),
+                fp_store(FUNCT3_D, 3, 2, 0),
+            ],
+            9.0f64.to_bits(),
+            0,
+            0,
+        );
+        assert_eq!(f64::from_bits(out), 3.0);
+    }
+
+    /// Single-precision arithmetic reads **boxed** operands and reboxes its result,
+    /// so a chain of single ops stays well-formed. The result is checked as a full
+    /// 64-bit register value, which is what catches a missing rebox.
+    #[test]
+    fn single_precision_arithmetic_unboxes_operands_and_reboxes_the_result() {
+        let out = run_fp_program(
+            &[
+                fp_load(FUNCT3_W, 1, 1, 0),                 // flw f1, 0(x1)
+                fp_load(FUNCT3_W, 2, 6, 0),                 // flw f2, 0(x6)
+                op_fp(funct5_fp::ADD, FMT_S, fp::rm::DYN, 3, 1, 2),
+                fp_store(FUNCT3_D, 3, 2, 0),                // fsd — the whole register
+            ],
+            u64::from(1.5f32.to_bits()),
+            u64::from(2.25f32.to_bits()),
+            0,
+        );
+        assert_eq!(out, nan_box(3.75f32.to_bits()), "single result, canonically boxed");
+    }
+
+    /// An operation that *generates* a NaN yields the **canonical** NaN, not the
+    /// operand's payload — the host propagates, RISC-V does not. End-to-end through
+    /// the register file, since `fp::canonicalise_d`'s own test can't prove the
+    /// dispatch path actually calls it.
+    #[test]
+    fn nan_generating_arithmetic_writes_the_canonical_nan() {
+        let payload_nan = 0x7ff0_0000_dead_beef; // sNaN carrying a payload
+        let out = run_arith_d(funct5_fp::ADD, f64::from_bits(payload_nan), 1.0);
+        assert_eq!(out, fp::CANONICAL_NAN_D, "payload must not survive the add");
+    }
+
+    /// **Any rounding mode other than round-to-nearest-even fails loudly**, naming
+    /// the effective mode, the PC and the instruction — it is never silently rounded
+    /// the host's way. A wrong mode produces a plausible number that flows
+    /// downstream, so `snemu diff` would report a distant symptom long after the
+    /// cause; that class of gap has to shout. (`docs/floating-point-design.md`.)
+    ///
+    /// Reported through `StepError` rather than a literal `panic!`: same effect —
+    /// loud, host-side, run halted — via the mechanism snemu already uses for
+    /// `Unimplemented`/`UnknownCsr`, so the harness reports it like any other gap.
+    #[test]
+    fn an_unsupported_rounding_mode_halts_the_host_naming_the_mode() {
+        let instr = op_fp(funct5_fp::ADD, FMT_D, fp::rm::RTZ, 3, 1, 2);
+        let mut cpu = cpu_with_fp(&[instr]);
+        assert_eq!(
+            cpu.step(),
+            Err(StepError::UnsupportedRoundingMode {
+                pc: RAM_BASE,
+                instr,
+                mode: fp::rm::RTZ,
+            }),
+        );
+    }
+
+    /// `DYN` resolves through `fcsr.frm`, so a guest that sets a non-RNE mode
+    /// dynamically must be refused just as loudly — and the report must name the
+    /// *effective* mode (what the guest asked for), not the `DYN` placeholder it
+    /// asked with. Reporting `DYN` here would send you looking for a rounding-mode
+    /// bug in the wrong place.
+    #[test]
+    fn a_dynamic_non_default_rounding_mode_is_refused_by_its_effective_value() {
+        let instr = op_fp(funct5_fp::ADD, FMT_D, fp::rm::DYN, 3, 1, 2);
+        let mut cpu = cpu_with_fp(&[csrrw(0, 1, fp_csr::FRM), instr]);
+        cpu.set_reg(1, u64::from(fp::rm::RDN));
+        cpu.step().unwrap(); // frm <- RDN
+        assert_eq!(
+            cpu.step(),
+            Err(StepError::UnsupportedRoundingMode {
+                pc: RAM_BASE + 4,
+                instr,
+                mode: fp::rm::RDN,
+            }),
+        );
     }
 
     /// A double survives `fld` → `fsd` bit-for-bit. The baseline the whole FP unit
@@ -3668,6 +4094,7 @@ mod tests {
                 fp_store(FUNCT3_D, 1, 2, 0), // fsd f1, 0(x2)
             ],
             PAYLOAD,
+            0,
             0,
         );
         assert_eq!(out, PAYLOAD, "fld/fsd moved bits, not values");
@@ -3692,6 +4119,7 @@ mod tests {
             ],
             u64::from(SINGLE),
             0,
+            0,
         );
         assert_eq!(
             out,
@@ -3711,6 +4139,7 @@ mod tests {
                 fp_store(FUNCT3_W, 3, 2, 0), // fsw f3, 0(x2)
             ],
             u64::from(SINGLE),
+            0,
             0xaaaa_aaaa_aaaa_aaaa, // sentinel in both halves of the destination
         );
         assert_eq!(
@@ -3733,8 +4162,381 @@ mod tests {
             ],
             PAYLOAD,
             0,
+            0,
         );
         assert_eq!(out, PAYLOAD, "f0 held its value");
+    }
+
+    /// Run an OP-FP instruction whose destination is an **integer** register (a
+    /// compare, `fclass`, `fmv.x.*`), returning that register directly — there is no
+    /// store to read back, because the result never enters the FP file.
+    fn run_fp_to_integer(op: u32, a: u64, b: u64) -> u64 {
+        let mut mem = Memory::new(0x2000);
+        let program = [
+            fp_load(FUNCT3_D, 1, 1, 0), // fld f1, 0(x1)
+            fp_load(FUNCT3_D, 2, 6, 0), // fld f2, 0(x6)
+            op,                         // x3 <- f1 op f2
+        ];
+        for (i, &word) in program.iter().enumerate() {
+            mem.write_u32(RAM_BASE + i as u64 * 4, word).unwrap();
+        }
+        mem.write_u64(FP_SRC, a).unwrap();
+        mem.write_u64(FP_SRC2, b).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+        cpu.set_reg(1, FP_SRC);
+        cpu.set_reg(6, FP_SRC2);
+        for _ in 0..program.len() {
+            cpu.step().unwrap();
+        }
+        cpu.reg(3)
+    }
+
+    /// Run a double-precision op with an explicit `funct3` selector (sign-injection,
+    /// min/max) and return the result register's raw bits.
+    fn run_fp_selector_d(funct5: u32, selector: u32, a: u64, b: u64) -> u64 {
+        run_fp_program(
+            &[
+                fp_load(FUNCT3_D, 1, 1, 0),
+                fp_load(FUNCT3_D, 2, 6, 0),
+                op_fp(funct5, FMT_D, selector, 3, 1, 2),
+                fp_store(FUNCT3_D, 3, 2, 0),
+            ],
+            a,
+            b,
+            0,
+        )
+    }
+
+    /// **Sign injection** — `fsgnj`/`fsgnjn`/`fsgnjx`, which is how a compiler spells
+    /// `abs`, `neg` and `copysign`. Pure bit manipulation: take rs1's magnitude and a
+    /// sign derived from rs2. Not arithmetic, so **no rounding mode applies and no NaN
+    /// canonicalisation happens** — the magnitude bits pass through untouched even for
+    /// a NaN with a payload.
+    ///
+    /// The trap this guards: `funct3` here is an *op selector* (0/1/2), not a rounding
+    /// mode. Code that checks the rounding mode for every OP-FP instruction refuses
+    /// `fsgnjn` (funct3 = 1, which reads as `RTZ`) and `fsgnjx` (2, `RDN`) — so `-x`
+    /// becomes an emulator halt.
+    #[test]
+    fn sign_injection_takes_magnitude_from_rs1_and_sign_from_rs2() {
+        let pos = 2.5f64.to_bits();
+        let neg = (-7.0f64).to_bits();
+        // fsgnj: rs2's sign verbatim.
+        assert_eq!(f64::from_bits(run_fp_selector_d(funct5_fp::SGNJ, 0, pos, neg)), -2.5);
+        assert_eq!(f64::from_bits(run_fp_selector_d(funct5_fp::SGNJ, 0, neg, pos)), 7.0);
+        // fsgnjn: rs2's sign inverted.
+        assert_eq!(f64::from_bits(run_fp_selector_d(funct5_fp::SGNJ, 1, pos, neg)), 2.5);
+        assert_eq!(f64::from_bits(run_fp_selector_d(funct5_fp::SGNJ, 1, pos, pos)), -2.5);
+        // fsgnjx: the XOR of the two signs — `fsgnjx rd, x, x` is how `abs` is spelled.
+        assert_eq!(f64::from_bits(run_fp_selector_d(funct5_fp::SGNJ, 2, neg, neg)), 7.0);
+        assert_eq!(f64::from_bits(run_fp_selector_d(funct5_fp::SGNJ, 2, pos, neg)), -2.5);
+    }
+
+    /// Sign injection moves bits, so a NaN payload in rs1 **survives** — unlike an
+    /// arithmetic result, which canonicalises. Applying canonicalisation everywhere
+    /// would quietly rewrite `-x` on a NaN.
+    #[test]
+    fn sign_injection_preserves_a_nan_payload() {
+        let payload_nan = 0x7ff0_0000_dead_beef;
+        let negated = run_fp_selector_d(funct5_fp::SGNJ, 1, payload_nan, 0);
+        assert_eq!(negated, payload_nan | (1 << 63), "payload kept, sign flipped");
+    }
+
+    /// **`fmin`/`fmax` NaN rules.** RISC-V returns the *non-NaN* operand when exactly
+    /// one is NaN — the opposite of ordinary arithmetic, where any NaN operand
+    /// poisons the result — and canonical NaN only when both are NaN.
+    #[test]
+    fn min_and_max_return_the_non_nan_operand() {
+        let nan = 0x7ff0_0000_dead_beef; // a NaN with a payload
+        let three = 3.0f64.to_bits();
+        for selector in [0, 1] {
+            // 0 = fmin, 1 = fmax
+            assert_eq!(
+                f64::from_bits(run_fp_selector_d(funct5_fp::MINMAX, selector, nan, three)),
+                3.0,
+                "a NaN operand is skipped, not propagated",
+            );
+            assert_eq!(
+                f64::from_bits(run_fp_selector_d(funct5_fp::MINMAX, selector, three, nan)),
+                3.0,
+            );
+            assert_eq!(
+                run_fp_selector_d(funct5_fp::MINMAX, selector, nan, nan),
+                fp::CANONICAL_NAN_D,
+                "both NaN → canonical NaN, payload discarded",
+            );
+        }
+    }
+
+    /// **Signed zero in `fmin`/`fmax`.** RISC-V requires `−0.0 < +0.0` here, but
+    /// `−0.0 == +0.0` under comparison — so an implementation written as
+    /// `if a < b { a } else { b }` returns whichever operand happened to be second
+    /// and is wrong half the time, in a way no ordinary test notices.
+    #[test]
+    fn min_and_max_order_negative_zero_below_positive_zero() {
+        let neg_zero = (-0.0f64).to_bits();
+        let pos_zero = 0.0f64.to_bits();
+        assert_eq!(run_fp_selector_d(funct5_fp::MINMAX, 0, neg_zero, pos_zero), neg_zero);
+        assert_eq!(run_fp_selector_d(funct5_fp::MINMAX, 0, pos_zero, neg_zero), neg_zero);
+        assert_eq!(run_fp_selector_d(funct5_fp::MINMAX, 1, neg_zero, pos_zero), pos_zero);
+        assert_eq!(run_fp_selector_d(funct5_fp::MINMAX, 1, pos_zero, neg_zero), pos_zero);
+    }
+
+    /// Compares write **0 or 1 into an integer register** — they leave the FP file
+    /// alone entirely, which is what makes them usable by a branch.
+    #[test]
+    fn compares_write_a_boolean_to_an_integer_register() {
+        let cmp = |selector, a: f64, b: f64| {
+            run_fp_to_integer(
+                op_fp(funct5_fp::CMP, FMT_D, selector, 3, 1, 2),
+                a.to_bits(),
+                b.to_bits(),
+            )
+        };
+        // funct3: 0 = fle, 1 = flt, 2 = feq
+        assert_eq!(cmp(2, 1.5, 1.5), 1, "feq: equal");
+        assert_eq!(cmp(2, 1.5, 2.5), 0, "feq: unequal");
+        assert_eq!(cmp(1, 1.5, 2.5), 1, "flt: less");
+        assert_eq!(cmp(1, 2.5, 1.5), 0, "flt: greater");
+        assert_eq!(cmp(1, 1.5, 1.5), 0, "flt is strict");
+        assert_eq!(cmp(0, 1.5, 1.5), 1, "fle includes equal");
+        assert_eq!(cmp(0, 2.5, 1.5), 0, "fle: greater");
+    }
+
+    /// **NaN is unordered**: every comparison against it is false, including
+    /// `feq(nan, nan)`. A comparison implemented by subtracting, or one that forgets
+    /// the unordered case, gets this exactly backwards.
+    #[test]
+    fn every_comparison_with_nan_is_false() {
+        let nan = f64::NAN.to_bits();
+        let one = 1.0f64.to_bits();
+        for selector in [0, 1, 2] {
+            let op = op_fp(funct5_fp::CMP, FMT_D, selector, 3, 1, 2);
+            assert_eq!(run_fp_to_integer(op, nan, one), 0, "selector {selector}: nan vs 1.0");
+            assert_eq!(run_fp_to_integer(op, one, nan), 0, "selector {selector}: 1.0 vs nan");
+            assert_eq!(run_fp_to_integer(op, nan, nan), 0, "selector {selector}: nan vs nan");
+        }
+    }
+
+    /// `fclass.d` reports which of ten disjoint classes a value falls in, as a
+    /// one-hot mask in an integer register. It's the branch-free way to ask "is this
+    /// a NaN / infinity / subnormal", and the *signalling*-vs-quiet NaN distinction
+    /// (bits 8 and 9) is one only `fclass` can see — arithmetic canonicalises it away.
+    #[test]
+    fn fclass_reports_one_hot_value_classes() {
+        let classify = |bits: u64| {
+            run_fp_to_integer(op_fp(funct5_fp::CLASS_MV, FMT_D, 1, 3, 1, 0), bits, 0)
+        };
+        assert_eq!(classify(f64::NEG_INFINITY.to_bits()), 1 << 0);
+        assert_eq!(classify((-1.0f64).to_bits()), 1 << 1);
+        assert_eq!(classify((-f64::MIN_POSITIVE / 2.0).to_bits()), 1 << 2, "negative subnormal");
+        assert_eq!(classify((-0.0f64).to_bits()), 1 << 3);
+        assert_eq!(classify(0.0f64.to_bits()), 1 << 4);
+        assert_eq!(classify((f64::MIN_POSITIVE / 2.0).to_bits()), 1 << 5, "positive subnormal");
+        assert_eq!(classify(1.0f64.to_bits()), 1 << 6);
+        assert_eq!(classify(f64::INFINITY.to_bits()), 1 << 7);
+        assert_eq!(classify(0x7ff0_0000_dead_beef), 1 << 8, "signalling NaN");
+        assert_eq!(classify(fp::CANONICAL_NAN_D), 1 << 9, "quiet NaN");
+    }
+
+    /// `fmv.x.d` moves a register's **raw bits** into an integer register — a move,
+    /// not a conversion, so a NaN payload survives intact. It's how a compiler
+    /// implements `f64::to_bits`.
+    #[test]
+    fn fmv_x_d_moves_raw_bits_including_a_nan_payload() {
+        let payload_nan = 0x7ff0_0000_dead_beef;
+        let op = op_fp(funct5_fp::CLASS_MV, FMT_D, 0, 3, 1, 0);
+        assert_eq!(run_fp_to_integer(op, payload_nan, 0), payload_nan);
+        assert_eq!(run_fp_to_integer(op, 1.5f64.to_bits(), 0), 1.5f64.to_bits());
+    }
+
+    /// `fmv.x.w` moves the low word and **sign-extends** it into the 64-bit integer
+    /// register — it does not zero-extend, and it does not carry the NaN box's
+    /// all-ones upper half across.
+    #[test]
+    fn fmv_x_w_sign_extends_the_low_word() {
+        let op = op_fp(funct5_fp::CLASS_MV, FMT_S, 0, 3, 1, 0);
+        // A single with the sign bit set: -1.0f32 is 0xbf80_0000.
+        let negative_single = nan_box(0xbf80_0000);
+        assert_eq!(
+            run_fp_to_integer(op, negative_single, 0),
+            0xffff_ffff_bf80_0000,
+            "sign-extended, and the NaN box did not leak in",
+        );
+        assert_eq!(run_fp_to_integer(op, nan_box(0x4048_f5c3), 0), 0x4048_f5c3);
+    }
+
+    /// The reverse moves: `fmv.d.x` takes 64 integer bits verbatim, `fmv.w.x` takes
+    /// the low 32 and **NaN-boxes** them, so the register is well-formed for later
+    /// single-precision use.
+    #[test]
+    fn integer_to_fp_moves_box_the_single_and_pass_the_double_through() {
+        let move_to_fp = |fmt, value: u64| {
+            let mut mem = Memory::new(0x2000);
+            let program = [
+                op_fp(funct5_fp::MV_TO_FP, fmt, 0, 3, 1, 0), // f3 <- x1
+                fp_store(FUNCT3_D, 3, 2, 0),                 // fsd f3, 0(x2)
+                ld(5, 2, 0),
+            ];
+            for (i, &word) in program.iter().enumerate() {
+                mem.write_u32(RAM_BASE + i as u64 * 4, word).unwrap();
+            }
+            let mut cpu = Cpu::new(mem);
+            cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+            cpu.set_reg(1, value);
+            cpu.set_reg(2, FP_DST);
+            for _ in 0..program.len() {
+                cpu.step().unwrap();
+            }
+            cpu.reg(5)
+        };
+        assert_eq!(move_to_fp(FMT_D, 0x0123_4567_89ab_cdef), 0x0123_4567_89ab_cdef);
+        assert_eq!(
+            move_to_fp(FMT_S, 0xffff_ffff_4048_f5c3),
+            nan_box(0x4048_f5c3),
+            "fmv.w.x boxes the low word and ignores the upper half",
+        );
+    }
+
+    /// **Float→int truncates toward zero when asked for `rtz`** — and that is the
+    /// mode real code uses: `rustc` emits `fcvt.w.d a0, fa0, rtz` for every `as i32`,
+    /// because Rust's cast semantics are truncation. Measured from
+    /// `rustc --target riscv64gc-unknown-none-elf --emit asm`, and it corrects
+    /// `docs/floating-point-design.md`, which claimed RNE + DYN covered everything a
+    /// Rust compiler emits. Refusing `rtz` would halt snemu at the first cast.
+    #[test]
+    fn float_to_int_truncates_toward_zero_for_rtz() {
+        let cvt = |variant, value: f64| {
+            run_fp_to_integer(
+                op_fp(funct5_fp::CVT_TO_INT, FMT_D, fp::rm::RTZ, 3, 1, variant),
+                value.to_bits(),
+                0,
+            )
+        };
+        assert_eq!(cvt(cvt_variant::L, 1.9), 1, "toward zero, not nearest");
+        assert_eq!(cvt(cvt_variant::L, -1.9) as i64, -1, "toward zero for negatives too");
+        assert_eq!(cvt(cvt_variant::L, 2.5), 2);
+    }
+
+    /// ...and rounds to nearest-even when asked for `rne`, which is a *different*
+    /// answer for the same input. Truncating regardless of the mode field would pass
+    /// the `rtz` test above and quietly be wrong here.
+    #[test]
+    fn float_to_int_rounds_to_nearest_even_for_rne() {
+        let cvt = |value: f64| {
+            run_fp_to_integer(
+                op_fp(funct5_fp::CVT_TO_INT, FMT_D, fp::rm::RNE, 3, 1, cvt_variant::L),
+                value.to_bits(),
+                0,
+            )
+        };
+        assert_eq!(cvt(1.5), 2, "ties to even rounds up to 2");
+        assert_eq!(cvt(2.5), 2, "ties to even rounds *down* to 2");
+        assert_eq!(cvt(0.5), 0, "ties to even → 0");
+        assert_eq!(cvt(1.9), 2);
+    }
+
+    /// **NaN converts to the maximum positive integer**, for signed and unsigned
+    /// alike — not to zero, which is what Rust's `as` does. The divergence is real
+    /// and observable: LLVM emits an explicit `feq.d fa0, fa0` NaN test around every
+    /// cast precisely to paper over it, which is the strongest available evidence for
+    /// what the hardware does.
+    #[test]
+    fn float_to_int_maps_nan_to_the_maximum_positive_value() {
+        let cvt = |variant, value: f64| {
+            run_fp_to_integer(
+                op_fp(funct5_fp::CVT_TO_INT, FMT_D, fp::rm::RTZ, 3, 1, variant),
+                value.to_bits(),
+                0,
+            )
+        };
+        assert_eq!(cvt(cvt_variant::L, f64::NAN) as i64, i64::MAX);
+        assert_eq!(cvt(cvt_variant::LU, f64::NAN), u64::MAX);
+        // The 32-bit variants are sign-extended into the 64-bit register.
+        assert_eq!(cvt(cvt_variant::W, f64::NAN) as i64, i64::from(i32::MAX));
+        assert_eq!(cvt(cvt_variant::WU, f64::NAN) as i64, i64::from(u32::MAX as i32));
+    }
+
+    /// Out-of-range values **saturate** rather than wrapping: +∞ and anything too
+    /// large give the maximum, −∞ and anything too negative give the minimum (zero
+    /// for the unsigned variants).
+    #[test]
+    fn float_to_int_saturates_out_of_range_values() {
+        let cvt = |variant, value: f64| {
+            run_fp_to_integer(
+                op_fp(funct5_fp::CVT_TO_INT, FMT_D, fp::rm::RTZ, 3, 1, variant),
+                value.to_bits(),
+                0,
+            )
+        };
+        assert_eq!(cvt(cvt_variant::L, f64::INFINITY) as i64, i64::MAX);
+        assert_eq!(cvt(cvt_variant::L, f64::NEG_INFINITY) as i64, i64::MIN);
+        assert_eq!(cvt(cvt_variant::LU, f64::NEG_INFINITY), 0, "unsigned floors at zero");
+        assert_eq!(cvt(cvt_variant::W, 1e300) as i64, i64::from(i32::MAX));
+        assert_eq!(cvt(cvt_variant::W, -1e300) as i64, i64::from(i32::MIN));
+    }
+
+    /// Int→float, in both signedness and both widths. `fcvt.d.w` must read the
+    /// *low 32 bits as signed* — passing the full 64-bit register through would turn
+    /// a negative `i32` into a huge positive double.
+    #[test]
+    fn int_to_float_respects_the_source_width_and_signedness() {
+        let cvt = |variant, value: u64| {
+            let mut mem = Memory::new(0x2000);
+            let program = [
+                op_fp(funct5_fp::CVT_FROM_INT, FMT_D, fp::rm::RNE, 3, 1, variant),
+                fp_store(FUNCT3_D, 3, 2, 0),
+                ld(5, 2, 0),
+            ];
+            for (i, &word) in program.iter().enumerate() {
+                mem.write_u32(RAM_BASE + i as u64 * 4, word).unwrap();
+            }
+            let mut cpu = Cpu::new(mem);
+            cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
+            cpu.set_reg(1, value);
+            cpu.set_reg(2, FP_DST);
+            for _ in 0..program.len() {
+                cpu.step().unwrap();
+            }
+            f64::from_bits(cpu.reg(5))
+        };
+        assert_eq!(cvt(cvt_variant::L, 42), 42.0);
+        assert_eq!(cvt(cvt_variant::L, (-42i64) as u64), -42.0);
+        assert_eq!(cvt(cvt_variant::LU, u64::MAX), 18_446_744_073_709_551_615.0);
+        // Only the low 32 bits, read as signed — the upper half is noise here.
+        assert_eq!(cvt(cvt_variant::W, 0xdead_beef_ffff_ffd6), -42.0);
+        assert_eq!(cvt(cvt_variant::WU, 0xdead_beef_ffff_ffd6), 4_294_967_254.0);
+    }
+
+    /// Converting between the two float widths: widening is exact, narrowing rounds
+    /// (and a double outside `f32`'s range becomes an infinity).
+    #[test]
+    fn conversions_between_float_widths() {
+        let narrow = run_fp_program(
+            &[
+                fp_load(FUNCT3_D, 1, 1, 0),
+                // fcvt.s.d: destination fmt = S, source fmt named by rs2 = D.
+                op_fp(funct5_fp::CVT_WIDTH, FMT_S, fp::rm::RNE, 3, 1, FMT_D),
+                fp_store(FUNCT3_D, 3, 2, 0),
+            ],
+            1.5f64.to_bits(),
+            0,
+            0,
+        );
+        assert_eq!(narrow, nan_box(1.5f32.to_bits()), "narrowed and reboxed");
+
+        let widen = run_fp_program(
+            &[
+                fp_load(FUNCT3_W, 1, 1, 0),
+                op_fp(funct5_fp::CVT_WIDTH, FMT_D, fp::rm::RNE, 3, 1, FMT_S),
+                fp_store(FUNCT3_D, 3, 2, 0),
+            ],
+            u64::from(1.5f32.to_bits()),
+            0,
+            0,
+        );
+        assert_eq!(f64::from_bits(widen), 1.5, "widening is exact");
     }
 
     /// FP loads/stores inside a **hot block** must behave identically with the block
@@ -3872,15 +4674,22 @@ mod tests {
     /// here would be indistinguishable from hardware refusing FP, sending you
     /// debugging the kernel's FP authority logic when the real answer is "snemu
     /// hasn't implemented fadd.d yet".
+    /// The witness has to be an FP instruction snemu genuinely doesn't implement
+    /// yet — currently `fmadd.d` (the fused multiply-add family). It has already
+    /// moved once, from `fadd.d`, when arithmetic landed, and it will need moving
+    /// again as FP grows. When the FP unit is *complete* this test's premise
+    /// disappears and it should be **deleted**, not weakened: its general-rule
+    /// sibling `legal_but_unmodelled_instruction_halts_the_host` (witness `mret`)
+    /// keeps covering the rule itself.
     #[test]
     fn fp_instruction_with_fs_enabled_reports_the_gap_rather_than_trapping() {
-        const FADD_D: u32 = 0x0200_0053;
-        let mut cpu = cpu_with(&[FADD_D]);
+        const FMADD_D: u32 = 0x0200_0043; // fmadd.d f0, f0, f0, f0
+        let mut cpu = cpu_with(&[FMADD_D]);
         cpu.hart.csr.write(addr::SSTATUS, sstatus::FS_INITIAL).unwrap();
 
         assert_eq!(
             cpu.step(),
-            Err(StepError::Unimplemented { pc: RAM_BASE, instr: FADD_D }),
+            Err(StepError::Unimplemented { pc: RAM_BASE, instr: FMADD_D }),
             "FS enabled → snemu's gap, which must name itself host-side",
         );
     }
