@@ -33,7 +33,7 @@ checks the whole workspace shares), and its `test` blocks pass.
 
 - [x] 1. `json.st` — hand-rolled JSON parser/printer (`sum Json`), recursive
       descent, `Result`/`?`.
-- [ ] 2. `bank.st` — ledger with `mut` accounts, `uses Telemetry` + `uses
+- [x] 2. `bank.st` — ledger with `mut` accounts, `uses Telemetry` + `uses
       FsWrite` audit log, capability-gated `on` methods.
 - [ ] 3. `vm.st` — toy stack-based bytecode interpreter (`sum Instr`),
       tail-recursive step function.

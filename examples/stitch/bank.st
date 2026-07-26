@@ -23,6 +23,13 @@
 // write the updated account back into `@accounts` (`replaceAccount`) after
 // mutating it — the functional-update discipline `List.set` already implies,
 // made unavoidable rather than optional.
+//
+// One more piece the design doc undersells: calling a `mut` method on a
+// binding declared with plain `let` is a **runtime error** ("cannot assign
+// to immutable `x` (declare it with `let mut`)"), not silently accepted —
+// so every `let` that will later take a `.mutMethod()` call needs `let mut`
+// from the start, same as the receiver itself needs `mut deposit`/`mut
+// withdraw` in its own signature.
 
 use Str
 
@@ -39,7 +46,7 @@ on Account {
     // (the write-back to `@` already updates whatever variable this was
     // called on; see `Ledger.deposit` below, which never touches the return
     // value), but because `Ledger`'s own methods *do* need it, to carry the
-    // update from a local `let acc = …` binding into `@accounts`.
+    // update from a local `let mut acc = …` binding into `@accounts`.
     mut deposit(amount: Int) -> Result<Account, Str> uses Telemetry {
         amount <= 0
             => Err("deposit amount must be positive")
@@ -94,14 +101,14 @@ on Ledger {
     // ledger-level `Result` never needs `acc.deposit(...)`'s own return
     // value — the write-back already updated `acc` in place.
     mut deposit(id: Str, amount: Int) -> Result<(), Str> uses Telemetry {
-        let acc = @findAccount(id) |> okOr("no such account: " + id)?
+        let mut acc = (@findAccount(id) |> okOr("no such account: " + id))?
         acc.deposit(amount)?
         @accounts = replaceAccount(@accounts, acc)
         Ok(())
     }
 
     mut withdraw(id: Str, amount: Int) -> Result<(), Str> uses Telemetry {
-        let acc = @findAccount(id) |> okOr("no such account: " + id)?
+        let mut acc = (@findAccount(id) |> okOr("no such account: " + id))?
         acc.withdraw(amount)?
         @accounts = replaceAccount(@accounts, acc)
         Ok(())
@@ -115,8 +122,13 @@ on Ledger {
     // the language, so a multi-step mutation has to be made safe by
     // ordering and up-front validation, by hand, every time.)
     mut transfer(fromId: Str, toId: Str, amount: Int) -> Result<(), Str> uses Telemetry {
-        @findAccount(fromId) |> okOr("no such account: " + fromId)?
-        @findAccount(toId) |> okOr("no such account: " + toId)?
+        // `let _ = …` rather than two bare statements: a statement that
+        // starts with `(` right after a preceding expression-statement
+        // fuses with it into a call (`stmt1  (stmt2)` parses as
+        // `stmt1(stmt2)` — maximal munch, see the findings doc). `let`
+        // starting the line rules that out.
+        let _ = (@findAccount(fromId) |> okOr("no such account: " + fromId))?
+        let _ = (@findAccount(toId) |> okOr("no such account: " + toId))?
         @withdraw(fromId, amount)?
         @deposit(toId, amount)?
         @record(Transaction(fromId, TransferOut(toId), amount))
@@ -226,7 +238,7 @@ test "a mut method call writes back into its own local binding without needing t
     // `acc`, and `Ledger.deposit` above never captures the `Ok(Account)` it
     // returns — this test proves that write-back actually happened, using
     // the same shape directly rather than through the ledger.
-    let acc = Account("a1", "Alice", 100)
+    let mut acc = Account("a1", "Alice", 100)
     acc.deposit(50)
     expect acc == Account("a1", "Alice", 150)
 }
