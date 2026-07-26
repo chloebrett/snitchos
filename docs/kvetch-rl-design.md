@@ -347,6 +347,18 @@ leaves.
 
 **Use it offline, not at inference.** Tree search multiplies inference cost by
 nodes expanded, which is very likely fatal on the VF2 target at 20–50 tok/s. But
+that figure is **ballad's, not the ladder's** — decode at int8 is bandwidth-bound
+at roughly a byte of weights per parameter per token, so drivel at ~1M is about
+30× cheaper per token than ballad at ~30M. The verdict stands for the deployed
+rung; it is not a ladder-wide law, and a tiny model with a search or scratchpad
+budget is a different calculation nobody here has run. If that calculation ever
+matters, the shape to check is a **small model whose output is a constraint
+rather than text** — a derivation consumed by the decode mask and never shown,
+so its latency is precomputation at line starts (the same snapshot trick the
+continuation oracle already uses) rather than tokens a human waits on. Note this
+is not a licence to revive §2: whatever such a model emits must still be trained
+from search, not from the checker's derivations. Off the critical path either
+way. But
 as a **training-data generator** the cost is paid once, on the host: search finds
 good programs, the model is fine-tuned on what search found, and the deployed
 model does plain greedy or constrained decoding. That is AlphaZero's expert-
@@ -479,10 +491,25 @@ label attached.
 
 ## 12. Prerequisites
 
+- **A longer training context.** `TrainingConfig::context` defaults to **128
+  tokens** (`cram/src/run.rs`), which is a program-sized window. A repair trace
+  (§5) is a broken program *plus* a complaint *plus* a fix, several times over —
+  comfortably several hundred tokens. **Increment 0 is invalid until corpus B
+  fits**, because a truncated trace is not a worse trace, it is a different task
+  (see §14). Favourable facts: positions are RoPE, computed per sequence length
+  (`kvetch-model/src/lib.rs`), so raising context adds **no parameters and no
+  checkpoint change**; and total corpus tokens are unchanged — you get fewer,
+  longer windows, not more data. The cost is per-token attention: at drivel's
+  `d_model = 128` the score matmuls are ~`2·T·d` against a ~`8d²` feed-forward,
+  so they are negligible at `T = 128` and roughly comparable to the FFN at
+  `T = 512`. A small multiple on step cost, not an order of magnitude — but
+  measure it rather than trusting that sentence.
 - **KV cache in `kvetch-model`.** Does not exist today; generation is O(n²). RL
   is sampling-dominated (5–20× more forward passes than SFT per gradient step),
   so this is the load-bearing cost item. **It is worth building regardless** —
-  it is also the on-target inference path for the VF2 runner.
+  it is also the on-target inference path for the VF2 runner. Note it composes
+  with the item above: cache size is linear in context, so a 4× context bump is
+  a 4× cache.
 - **Batched sampling** with per-token logprob capture.
 - **A corruption engine** shared with the Stitch mutation tester (designed,
   unbuilt). See [../plans/stitch-native-tests.md](../plans/stitch-native-tests.md)
@@ -504,6 +531,13 @@ Train two rungs identically except for the training corpus:
 
 - **A:** programs (the status quo).
 - **B:** manufactured repair traces (§5).
+
+**Both arms must run at a context that fits corpus B** (§12) — a shared setting,
+raised once, used for A as well. A and B differing in context is not the
+experiment: it confounds "traces teach repair" with "longer windows help," and
+the honest read of a B win would be unavailable. Raising context for A too costs
+one extra `cram` run and buys an uncontaminated comparison; measure B's token
+length distribution first and set the context above its tail, not its mean.
 
 Score both on held-out corruptions using the existing `cram-eval` harness —
 held-out masked NLL (the gate metric) via `Predictor`, plus typecheck-pass on
@@ -552,6 +586,11 @@ and none gates the increments above:
 Stated up front so the design can lose honestly:
 
 - Increment 0 shows repair traces ≤ plain programs. → The reasoning branch dies.
+  **Rule out the mechanical explanations before believing it:** were traces
+  truncated by the context window (§12), and did both arms train at the same
+  context? A gate that fails because corpus B did not fit has answered a question
+  about `TrainingConfig`, not about reasoning, and it is the cheapest way for
+  this document to be wrongly abandoned.
 - Increment 1 finds no rung and no `k` with pass rates in the learnable band. →
   GRPO cannot get traction; STaR may still work.
 - Gains appear but do not survive a held-out distribution. → We learned the
