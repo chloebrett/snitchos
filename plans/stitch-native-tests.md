@@ -45,13 +45,33 @@ and the augmentation tier in sift depends on the printer being total.
   structure: when the inner expression is a comparison, the fault renders both
   sides via `render.rs`; otherwise it reports the expression's source span.
 
-### 4. Tests type-check
+### 4. Tests type-check — **blocked on a pre-existing checker gap**
 
 The canon gate's definition of "a program" widens to include `test` items —
-which is precisely what tests-in-Rust were invisible to.
+which is precisely what tests-in-Rust were invisible to. `CoreItem::Test` now
+routes through `check_callable`, so a test is checked exactly like a nullary
+function.
 
-- **RED**: a `test` body with a type error is reported by `check_program`; the
-  canon still type-checks clean.
+**But `synth` does not descend into `Block`.** Found while writing increment 3's
+type test; it predates tests entirely:
+
+```
+errors(r#"f() -> Int = "x""#)      // reported ✓
+errors(r#"f() -> Int = { "x" }"#)  // silent ✗
+```
+
+Every real test body is a block, so until this is fixed the type stage only
+holds for `= expr` bodies and the design's claim that test bodies are
+type-checked is half-true. It also means the *canon gate itself* has been weaker than it
+looks — `canon.rs` type-checks programs whose bodies are almost all blocks.
+
+- **RED (this increment)**: a mismatched body inside `{ … }` is reported;
+  the canon and stim still type-check clean afterward.
+- Fixing it means extending `synth` with a `Block` arm (walk statements, take
+  the result expression's type) and probably `If`/`Match` arm bodies too. The
+  blast radius is real: it may surface genuine errors in the canon *and* false
+  positives from the gradual checker's blind spots. That is a decision worth
+  making explicitly rather than as a side effect of adding a keyword.
 
 ### 5. Authority: a test with no `uses` has none
 

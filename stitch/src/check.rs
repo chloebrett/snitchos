@@ -154,6 +154,14 @@ fn synth(expr: &CoreExpr, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
             synth_binary(*op, left, right, expr.span, ctx, errors)
         }
         CoreExprKind::Match { subject, arms } => synth_match(subject, arms, expr.span, ctx, errors),
+        // An assertion contributes no value — only its effect. Its operand must
+        // be `Bool`, which is a real check rather than a gradual shrug: a `Dyn`
+        // operand still passes (`assignable` is consistency-based), so this only
+        // fires on an operand whose type is known and wrong.
+        CoreExprKind::Expect { expr: asserted } => {
+            check(asserted, &Ty::Bool, ctx, errors);
+            Ty::Unit
+        }
         // Everything else is not yet understood: stay gradual (sound-by-omission).
         _ => Ty::Dyn,
     }
@@ -616,6 +624,13 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
                 }
                 world.check_callable(params, ret.as_ref(), uses, body, Ty::Dyn, &mut errors);
             }
+            // A test checks exactly like a nullary function: no params, no
+            // declared return, and its `uses` is the authority its body may
+            // exercise — which is the whole point of the form, since an
+            // undeclared effect must be an error rather than a runtime surprise.
+            CoreItem::Test { uses, body, .. } => {
+                world.check_callable(&[], None, uses, body, Ty::Dyn, &mut errors);
+            }
             // `on Type { … }` method bodies check with `@` = the receiver's type.
             CoreItem::On { target, methods, .. } => {
                 let self_ty = ty_of_annotation(target, &world.types);
@@ -938,9 +953,16 @@ mod tests {
     /// `expect 3` is nonsense the checker should catch before the test ever
     /// runs — the gradual checker stays quiet about a `Dyn` operand, but a
     /// *known* non-`Bool` is an error.
+    ///
+    /// Written with a bare (`=`) body deliberately: `synth` does not descend
+    /// into `Block`, so the same assertion inside `{ … }` is currently invisible
+    /// to the checker. That gap predates tests (it applies to every function
+    /// body too) and is tracked in `plans/stitch-native-tests.md` — it is what
+    /// stands between this rule and being useful, since real test bodies are
+    /// always blocks.
     #[test]
     fn expect_on_a_non_bool_is_a_type_error() {
-        let errors = errors(r#"test "bad" { expect 3 }"#);
+        let errors = errors(r#"test "bad" = expect 3"#);
         assert_eq!(errors.len(), 1, "expected one type error, got {errors:?}");
         assert!(
             errors[0].message.contains("Bool"),
@@ -953,9 +975,10 @@ mod tests {
     /// living in Rust string literals were invisible to.
     #[test]
     fn a_test_body_is_type_checked() {
-        let errors = errors(r#"test "mismatched" { expect 1 == "one" }"#);
+        let errors = errors(r#"test "mismatched" = expect 1 == "one""#);
         assert!(!errors.is_empty(), "a test body's type error should be reported");
     }
+
 
     #[test]
     fn a_function_body_is_checked_against_its_declared_return_type() {
