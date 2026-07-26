@@ -9,11 +9,14 @@
 // Two scope cuts, and both are language-shaped rather than arbitrary — see
 // plans/stitch-examples-findings.md for the fuller writeup:
 //
-// - **Numbers are `Int` only.** There is no `Str -> Float` or `Int -> Float`
-//   conversion in the stdlib today (v0 is strict — no implicit numeric
-//   coercion, and no native fills the gap), so a `3.14` in the input parses
-//   as a genuine parse error here rather than silently truncating. `-42` and
-//   `0` parse fine.
+// - **Numbers are `Int` only.** There is still no `Str -> Float` or
+//   `Int -> Float` conversion in the stdlib (v0 is strict — no implicit
+//   numeric coercion), so a `3.14` in the input parses as a genuine parse
+//   error here rather than silently truncating. `-42` and `0` parse fine.
+//   (Number *parsing* itself uses `Str.parseInt` — a native that didn't
+//   exist when this file was first written; see the findings doc for that
+//   story. It closed the `Str -> Int` half of this gap, not the `Float`
+//   half.)
 // - **Objects are `List<(Str, Json)>`, not `Map<Str, Json>`.** `Map` in
 //   today's interpreter is a *fixed-arity literal* (`[k: v, …]`, entry count
 //   fixed at parse time) plus read-only `map[key]` indexing — there is no
@@ -116,17 +119,12 @@ isDigit(c: Str) -> Bool =
     c == "0" or c == "1" or c == "2" or c == "3" or c == "4"
     or c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
 
-// A single decimal digit's value. There is no character-code native
-// (`Str.slice` is the only way to look at one character, as a length-1
-// `Str`), so this is the only way to turn a digit character into an `Int`:
-// name all ten.
-digitValue(c: Str) -> Int =
-    match c {
-        "0" => 0  "1" => 1  "2" => 2  "3" => 3  "4" => 4
-        "5" => 5  "6" => 6  "7" => 7  "8" => 8  "9" => 9
-        _ => 0
-    }
-
+// Digit-scanning (`isDigit`/`scanDigits`) still has to be hand-rolled — it's
+// how a "where does the number end" boundary gets found in a string with no
+// tokenizer of its own — but turning the scanned slice into an `Int` doesn't:
+// `Str.parseInt` (see plans/stitch-examples-findings.md) takes the whole
+// slice, sign included, so there's no separate negative-number branch here
+// either.
 parseNum(src: Str, pos: Int) -> Result<(Json, Int), Str> = {
     let negative = Str.slice(src, pos, pos + 1) == "-"
     let digitsStart = negative => pos + 1 | pos
@@ -134,11 +132,12 @@ parseNum(src: Str, pos: Int) -> Result<(Json, Int), Str> = {
         => Err("expected a digit")
         | {
             let end = scanDigits(src, digitsStart)
-            let magnitude = fold(digitsStart..end, 0, (acc, i) -> acc * 10 + digitValue(Str.slice(src, i, i + 1)))
-            let value = negative => 0 - magnitude | magnitude
             end < Str.length(src) and Str.slice(src, end, end + 1) == "."
                 => Err("floating-point numbers are not supported (see the file header)")
-                | Ok((JNum(value), end))
+                | match Str.parseInt(Str.slice(src, pos, end)) {
+                    Some(n) => Ok((JNum(n), end))
+                    None => Err("malformed number")
+                }
         }
 }
 
@@ -279,30 +278,13 @@ print(j: Json) -> Str =
     match j {
         JNull    => "null"
         JBool(b) => b => "true" | "false"
-        JNum(n)  => intToStr(n)
+        JNum(n)  => toStr(n)
         JStr(s)  => "\"" + escapeStr(s) + "\""
         JArr(xs) => "[" + (xs |> map(print) |> Str.join(",")) + "]"
         JObj(fs) => "{{" + (fs |> map(printMember) |> Str.join(",")) + "}}"
     }
 
 printMember(pair: (Str, Json)) -> Str = match pair { (k, v) => "\"" + escapeStr(k) + "\":" + print(v) }
-
-// There is no `Int -> Str` native either — `print`/telemetry render values
-// through the interpreter's own formatter, not through anything a Stitch
-// program can call. Built here the same way `digitValue` went the other
-// direction: peel off digits and look each one up.
-intToStr(n: Int) -> Str =
-    n == 0 => "0" | (n < 0 => "-" + digitsToStr(0 - n) | digitsToStr(n))
-
-digitsToStr(n: Int) -> Str =
-    n == 0 => "" | digitsToStr(n / 10) + digitChar(n % 10)
-
-digitChar(d: Int) -> Str =
-    match d {
-        0 => "0"  1 => "1"  2 => "2"  3 => "3"  4 => "4"
-        5 => "5"  6 => "6"  7 => "7"  8 => "8"  9 => "9"
-        _ => "?"
-    }
 
 escapeStr(s: Str) -> Str =
     Str.split(s, "")
