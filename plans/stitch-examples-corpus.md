@@ -44,9 +44,9 @@ checks the whole workspace shares), and its `test` blocks pass.
       Telemetry` span.
 - [x] 6. `sched.st` — priority vs round-robin task scheduler simulation via
       `contract Schedulable`.
-- [ ] 7. `calc.st` — infix expression parser/evaluator with variables,
+- [x] 7. `calc.st` — infix expression parser/evaluator with variables,
       `Result`-typed errors (div-by-zero, unbound var).
-- [ ] 8. `inventory.st` — pluggable pricing via `contract PricingStrategy`,
+- [x] 8. `inventory.st` — pluggable pricing via `contract PricingStrategy`,
       per-category telemetry gauges.
 - [ ] 9. `life.st` — Conway's Game of Life over `List<List<Bool>>`, pure
       `step`, `text.st`-based renderer.

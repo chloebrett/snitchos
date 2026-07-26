@@ -470,6 +470,51 @@ now.
   further, but worth naming so a fluctuating total isn't mistaken for a
   regression this work introduced.
 
+### 7. calc.st
+
+- Lines: 265. Tests: 13 (13 pass). Passed the gate on the first try.
+- What it exercises: the classic two-stage pipeline (tokenize, then a
+  precedence-climbing recursive-descent parse) as a deliberate contrast to
+  json.st's single-pass character scanner; `Str.parseInt` used directly for
+  the first time in the batch (json.st predates it and still hand-rolls
+  digit parsing — see that entry); `Parsed(expr, pos)` as another named-
+  product-over-tuple cursor-carrier, same shape as json.st's original
+  `(value, pos)` pairs but done the way vm.st's entry recommended instead.
+- Third program in a row (with graph.st, sched.st) to pass on the first
+  try. The established-habits list now reliably includes: named `prod` over
+  tuple, `(x |> f)?` parens, never start a statement with bare `(`,
+  association list over `Map`, nest a conditional's else-branch in parens
+  the moment it's itself conditional (used throughout `scanTokens`'
+  digit/alpha dispatch here without incident).
+- No new language friction. The one thing worth flagging as *absence* of
+  friction: `Str.parseInt`/`toStr` (added for json.st) made number-token
+  scanning a non-event here — exactly the "every later program should use
+  these directly" prediction from the natives' own fix note paid off on the
+  very next program that needed numeric parsing.
+
+### 8. inventory.st
+
+- Lines: 157. Tests: 10 (10 pass). Passed the gate on the first try (fourth
+  in a row, with graph.st/sched.st/calc.st).
+- What it exercises: a second, "business logic" `contract`-dispatch example
+  distinct from sched.st's (three pricing strategies with actual field
+  state — `BulkDiscount(threshold, percentOff)`, `Seasonal(percentAdjust)`
+  — rather than sched.st's zero-field markers), `use <-`'s second outing
+  (`report`'s `use <- span(...)`), and grouping-by-computed-key as an
+  established, unremarkable pattern by now.
+- **Minor correction to earlier entries' style, not a finding**: Stitch's
+  unary `-` is an ordinary prefix operator
+  (`plans/lang/01-grammar-and-precedence.md` lists it explicitly, and
+  `parser.rs` parses `TokenKind::Minus` as `UnOp::Neg` in prefix position),
+  so a negative literal like `Seasonal(-20)` just works. Earlier entries in
+  this batch wrote negative *computed results* inside `expect` assertions
+  as `0 - 7` rather than `-7` — that pattern started in json.st out of
+  unverified caution and got carried forward by copying, not because `-7`
+  doesn't parse. Not worth going back to fix (both are correct, `0 - 7` is
+  just noisier), but worth naming so it doesn't read as "negative literals
+  don't work" to someone skimming this doc.
+- No new language friction.
+
 - **Not tested in-language, and worth recording why**: wanted a `bank.st`
   test proving a function *without* `uses FsWrite` is refused when it
   tries `fsWrite` (the negative case for the capability-boundary finding
