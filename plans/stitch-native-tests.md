@@ -82,7 +82,7 @@ Still gradual by omission: a `let` binding's type is not threaded into
 their branches. Both are refinements, not gaps — they cost missed errors, never
 false ones.
 
-### 5. Authority: a test with no `uses` has none
+### 5. Authority: a test with no `uses` has none — **DONE** (see increment 6)
 
 The point of the design. Enforced by the checker already — this increment proves
 it and pins it.
@@ -91,13 +91,26 @@ it and pins it.
   capability is a type error; the same body with `uses Telemetry` checks clean;
   `handle`/`without` inside a test body behave as they do anywhere.
 
-### 6. The runner
+### 6. The runner — **DONE**
 
-- **RED**: a module with three tests (one passing, one failing, one faulting)
-  produces three results with names, verdicts, and — for the failures — the
-  message and location. A test that loops forever is reported as fuel
-  exhaustion, not as a hang.
-- Pure function over parsed items → results. Per-test fuel budget. No I/O.
+`stitch::test_runner`: `run_tests(&[Item]) -> Vec<TestResult>`, plus
+`run_tests_with_fuel`. Pure function over parsed items — no printing, no I/O, no
+exit — which is what lets the host gate, the funnel's run stage, and an
+on-target `stitch test` share one implementation.
+
+- Every test runs, in source order; one failure does not stop the rest.
+- `Verdict::{Passed, Failed { message, span }, Exhausted}`. Exhaustion is its own
+  verdict because "never finished" and "was wrong" are different diagnoses —
+  which is exactly the funnel's per-stage-death principle applied one level down.
+- `DEFAULT_FUEL = 1_000_000` steps per test. The environment (prelude + natives +
+  the program's declarations) is built **once** and refuelled per test via a new
+  `Env::refuel`, so a file with many tests pays registration once.
+- Classifying exhaustion needed the fault text; it is now
+  `interp::FUEL_EXHAUSTED` rather than a literal repeated at the classifier.
+- **Authority is enforced at runtime, both directions**: a test with no `uses`
+  is refused when it performs an effect (the refusal names the missing cap), and
+  one with `uses Telemetry` may. This is increment 5's runtime half; the
+  checker's static half rides on `check_callable` from increment 4.
 
 ### 7. The Rust gate
 

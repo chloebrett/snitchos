@@ -37,6 +37,13 @@ pub fn eval_program(items: &[Item]) -> Result<Value, RuntimeError> {
     eval_program_with_telemetry(items).0
 }
 
+/// The fault a program gets when it runs out of evaluation budget. Named rather
+/// than spelled inline because callers *classify* on it — the test runner
+/// reports exhaustion as its own verdict ("never finished" is a different
+/// diagnosis from "was wrong"), and a classifier matching a string literal
+/// written somewhere else is a silent break waiting to happen.
+pub const FUEL_EXHAUSTED: &str = "evaluation fuel exhausted";
+
 /// The parsed Stitch-source prelude. Exposed so a REPL can parse it **once** and
 /// reuse the AST across lines instead of re-parsing the source each evaluation.
 #[must_use]
@@ -501,7 +508,7 @@ fn eval_expect(asserted: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
 
 fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     if !env.take_fuel() {
-        return Err(RuntimeError::new("evaluation fuel exhausted"));
+        return Err(RuntimeError::new(FUEL_EXHAUSTED));
     }
     match &expr.kind {
         CoreExprKind::Int(n) => Ok(Value::Int(*n)),

@@ -47,6 +47,7 @@ pub mod runner;
 pub mod source;
 pub mod stim;
 pub mod telemetry;
+pub mod test_runner;
 pub mod value;
 pub mod wire;
 

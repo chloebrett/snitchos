@@ -160,6 +160,15 @@ impl Env {
         Env { fuel: Rc::new(Cell::new(steps)), ..self }
     }
 
+    /// Reset the shared budget to `steps`. The counter is run-shared (every
+    /// closure called from this env draws on the same cell), so this refills the
+    /// tank for the whole call tree — which is what lets a runner build one
+    /// environment and give each test its own budget, instead of paying to
+    /// register the prelude again per test.
+    pub fn refuel(&self, steps: u64) {
+        self.fuel.set(steps);
+    }
+
     /// Consume one unit of evaluation fuel. Returns `false` when the budget is
     /// exhausted (the caller should fault), `true` otherwise. Decrements the
     /// run-shared counter in place.
