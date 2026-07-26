@@ -31,7 +31,7 @@ checks the whole workspace shares), and its `test` blocks pass.
 
 ## Batch 1 — first proposal
 
-- [ ] 1. `json.st` — hand-rolled JSON parser/printer (`sum Json`), recursive
+- [x] 1. `json.st` — hand-rolled JSON parser/printer (`sum Json`), recursive
       descent, `Result`/`?`.
 - [ ] 2. `bank.st` — ledger with `mut` accounts, `uses Telemetry` + `uses
       FsWrite` audit log, capability-gated `on` methods.
