@@ -24,7 +24,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use kernel_obs::clock::Clock;
-use kernel_boot::trap::{TrapCause, decode_scause};
+use kernel_boot::trap::{FaultDisposition, TrapCause, decode_scause, exception_name};
 
 use crate::percpu::PerCpu;
 
@@ -187,20 +187,34 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             // for the duration of the handler.
             crate::syscall::handle_user_ecall(unsafe { &mut *frame });
         }
-        // Instruction/load/store page fault (codes 12/13/15) from U-mode is
-        // the isolation firewall catching userspace touching memory it has no
-        // `U`-bit access to. Count it and park (v0.7a has no process teardown).
-        // The same fault from S-mode is a real kernel bug — fall through to panic.
+        // A page fault (12/13/15) from S-mode (SPP=1) is a kernel bug. If it
+        // landed in a kernel-stack guard page (Tier B), name it as a stack
+        // overflow — the exact-PC fault the guard page exists to produce —
+        // before panicking. Checked ahead of the general disposition below
+        // because only this cause has that extra diagnosis to offer.
         TrapCause::UnknownException(12 | 13 | 15)
-            if unsafe { &*frame }.sstatus & SSTATUS_SPP == 0 =>
+            if unsafe { &*frame }.sstatus & SSTATUS_SPP != 0 =>
         {
-            handle_user_fault();
+            handle_kernel_fault(scause);
         }
-        // The same fault from S-mode (SPP=1) is a kernel bug. If it landed in a
-        // kernel-stack guard page (Tier B), name it as a stack overflow — the
-        // exact-PC fault the guard page exists to produce — before panicking.
-        TrapCause::UnknownException(12 | 13 | 15) => handle_kernel_fault(scause),
-        other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
+        // Everything with no dedicated handler: `fault_disposition` decides
+        // whose bug it is. From U-mode the faulting instruction was the
+        // process's, so the process dies and the machine carries on — a page
+        // fault caught by the `U`-bit firewall, an illegal instruction (what an
+        // FP instruction is while `sstatus.FS` is Off), or a code we've never
+        // seen. From S-mode, or for an interrupt from a source we never enabled,
+        // there's nothing smaller to terminate: panic.
+        other => {
+            let from_user = unsafe { &*frame }.sstatus & SSTATUS_SPP == 0;
+            match kernel_boot::trap::fault_disposition(other, from_user) {
+                FaultDisposition::TerminateProcess => {
+                    terminate_faulting_process(scause & !(1u64 << 63));
+                }
+                FaultDisposition::KernelPanic => {
+                    panic!("unhandled trap: {other:?} (scause={scause:#x})")
+                }
+            }
+        }
     }
 
     // v2b cross-hart Kill checkpoint. Only on a return to **U-mode** (SPP == 0) — never
@@ -257,18 +271,53 @@ fn handle_kernel_fault(scause: u64) -> ! {
 /// `sstatus.SPP` (bit 8): the privilege the trap came from. 0 = User.
 const SSTATUS_SPP: u64 = 1 << 8;
 
-/// A U-mode access faulted — the page-table `U`-bit firewall did its job
-/// (v0.7a has no capability layer yet; that's v0.7b). Count it and park this
-/// hart: with no process teardown we can't reschedule, and returning would
-/// re-run the faulting instruction forever. Hart 0 carries on. Never returns.
-fn handle_user_fault() -> ! {
+/// A U-mode trap the kernel has no handler for — the faulting instruction was
+/// the process's, so the **process** dies and the machine carries on. Returning
+/// would re-run the faulting instruction forever, so this never returns.
+///
+/// `code` is the `scause` exception code (interrupt bit already cleared). Snitch
+/// first — `snitchos.user.faults_total` plus a `Log` naming the cause, `sepc` and
+/// `stval`, so the fault is attributable rather than a process that merely
+/// vanished — then terminate exactly as the cross-hart kill checkpoint does:
+/// record the zombie with [`crate::sched::FAULTED_STATUS`], wake any parent
+/// blocked in `Wait`, and hand the hart to its next ready task.
+///
+/// This replaces v0.7a's `loop { wfi }` park, which predated process teardown.
+/// Parking leaked a whole hart per fault, and a fault on hart 0 took the
+/// heartbeat with it — so the isolation firewall's success looked, from the
+/// wire, exactly like the kernel dying.
+fn terminate_faulting_process(code: u64) -> ! {
     if let Some(id) = crate::user::user_fault_metric_id() {
         crate::tracing::emit_metric(id, 1);
     }
-    loop {
-        // SAFETY: park until the next interrupt; nothing to do on this hart.
-        unsafe { asm!("wfi", options(nomem, nostack)) };
+
+    let (sepc, stval): (usize, usize);
+    // SAFETY: two CSR reads; no memory access, no side effects.
+    unsafe {
+        asm!("csrr {}, sepc", out(reg) sepc, options(nomem, nostack));
+        asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
     }
+
+    let me = crate::sched::current_task_id();
+    crate::tracing::emit_log(&alloc::format!(
+        "user fault: task {} killed by {} (scause={code} sepc={sepc:#x} stval={stval:#x})",
+        me.0,
+        exception_name(code),
+    ));
+
+    // The process is gone; this hart is no longer running it. Mirrors
+    // `handle_exit` — the pointer must not outlive the address space.
+    crate::process::CURRENT_PROCESS
+        .this_cpu()
+        .store(core::ptr::null_mut(), Ordering::Relaxed);
+
+    // Record the zombie + wake any parent blocked in `Wait` on us, then exit via
+    // the *owned* path so the status survives for the parent to reap. A
+    // parentless faulted task leaves a zombie until reaped — same as `Exit`.
+    if let Some(parent) = crate::sched::note_exit(me, crate::sched::FAULTED_STATUS) {
+        crate::sched::wake(parent);
+    }
+    crate::sched::exit_now_owned()
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

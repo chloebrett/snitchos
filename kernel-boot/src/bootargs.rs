@@ -363,6 +363,14 @@ workloads! {
         /// the `faulter` program, which reads a kernel VA from U-mode — the
         /// `U`-bit firewall must fault it. Not a storm.
         UserspaceFault,
+        /// Unhandled-user-trap probe: runs the `illegal` program, which executes
+        /// `unimp` from U-mode. The kernel must terminate the process and keep
+        /// running — before this existed, any exception from U-mode other than a
+        /// page fault reached the trap dispatcher's catch-all `panic!`, so one
+        /// illegal instruction from any user program halted the machine (which is
+        /// what a float at the Stitch REPL did — see
+        /// `docs/floating-point-design.md`). Not a storm.
+        UserspaceIllegal,
         /// Span-quota probe: runs the `span-flood` program, which opens spans with
         /// many distinct names to exceed the per-process `SpanNameTable` quota — the
         /// kernel must refuse the surplus (`SyscallRefused{Quota}`) without panicking.

@@ -32,6 +32,10 @@ pub static HELLO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_USER_ELF"));
 /// The `workload=userspace-fault` program: emits a marker, then reads a
 /// kernel VA to prove the `U`-bit firewall faults it.
 pub static FAULTER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FAULTER_ELF"));
+
+/// The `workload=userspace-illegal` program: emits a marker, then executes
+/// `unimp` — the kernel must kill it rather than panic.
+pub static ILLEGAL_ELF: &[u8] = include_bytes!(env!("SNITCHOS_ILLEGAL_ELF"));
 pub static BAD_PTR_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BAD_PTR_ELF"));
 
 /// The `workload=userspace-span-flood` program: opens spans with many distinct
@@ -331,6 +335,10 @@ pub static HELLO: ProgramSpec = ProgramSpec { elf: HELLO_ELF, launch: Launch::Pl
 
 /// `workload=userspace-fault`: the isolation probe (reads a kernel VA — must fault).
 pub static FAULTER: ProgramSpec = ProgramSpec { elf: FAULTER_ELF, launch: Launch::Plain };
+
+/// `workload=userspace-illegal`: the unhandled-user-trap probe (executes `unimp`
+/// — the kernel must terminate the process, not panic).
+pub static ILLEGAL: ProgramSpec = ProgramSpec { elf: ILLEGAL_ELF, launch: Launch::Plain };
 
 /// `workload=userspace-bad-ptr`: the user-pointer validation probe (passes an
 /// unmapped user VA to `DebugWrite` — the kernel must refuse, not fault).
@@ -713,6 +721,10 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::UserspaceFault, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "user_fault", program: &FAULTER, priority: Priority::Normal }],
+    }),
+    (WorkloadKind::UserspaceIllegal, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "user_illegal", program: &ILLEGAL, priority: Priority::Normal }],
     }),
     (WorkloadKind::UserspaceSpanFlood, UserLayout {
         needs_endpoint: false,

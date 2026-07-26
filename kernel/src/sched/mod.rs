@@ -1377,6 +1377,15 @@ pub fn note_exit(child: TaskId, status: i32) -> Option<TaskId> {
 /// though `SnitchOS` has no signals (a shutdown is a `Notification`, not a signal).
 pub const KILLED_STATUS: i32 = -9;
 
+/// Status a `WaitAny` parent reads for a task the kernel terminated because it
+/// **faulted** — an unhandled U-mode exception (illegal instruction, an access
+/// the page table refused). Distinct from [`KILLED_STATUS`] so a supervisor can
+/// tell "I killed it" from "it died on its own", which are different bugs. Same
+/// caveat: a convention on a wire userspace also writes to, not proof — the
+/// unforgeable record is the kernel-emitted fault `Log` + `user.faults_total`.
+/// `-4` echoes SIGILL's number without implying signals exist.
+pub const FAULTED_STATUS: i32 = -4;
+
 /// What [`kill_task`] did with a target — the syscall handler maps this to the
 /// caller's `a0` + telemetry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

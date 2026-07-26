@@ -527,6 +527,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::PingPong
             | WorkloadKind::Userspace
             | WorkloadKind::UserspaceFault
+            | WorkloadKind::UserspaceIllegal
             | WorkloadKind::UserspaceBadPtr
             | WorkloadKind::UserspaceSpanFlood
             | WorkloadKind::Workers
@@ -652,6 +653,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
                 w,
                 WorkloadKind::Userspace
                     | WorkloadKind::UserspaceFault
+                    | WorkloadKind::UserspaceIllegal
                     | WorkloadKind::UserspaceSpanFlood
                     | WorkloadKind::Workers
                     | WorkloadKind::HeapGrow
