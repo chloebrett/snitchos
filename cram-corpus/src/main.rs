@@ -55,6 +55,7 @@ fn main() -> std::io::Result<()> {
             program_count: count,
             layout,
             probe_digest: Manifest::probe_digest(layout),
+            grammar_digest: Manifest::grammar_digest(),
         }
         .render(),
     )?;

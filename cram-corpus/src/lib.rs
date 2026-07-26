@@ -21,7 +21,20 @@ use kvetch_vocab::{TokenId, Vocab};
 /// Three programs is cheap enough to recompute on every cache check and
 /// specific enough that a change to the oracle, the bias tables or the
 /// wordlists moves the digest.
-const PROBE_SEEDS: [u64; 3] = [0, 1, 2];
+/// How many programs the output fingerprint samples.
+///
+/// Three was too few, and the failure was concrete: fixing the printer's
+/// `expect` parenthesization changed how ~1% of programs render, and a 3-seed
+/// probe misses that ~97% of the time. 256 misses it with probability
+/// `0.99^256 ≈ 8%`, and catches anything affecting 5% of programs essentially
+/// always. The cost is 256 babble walks (~0.5 s in release) on a cache *hit*,
+/// against ~8 minutes to regenerate — worth paying to not silently train on a
+/// corpus the current pipeline would not produce.
+///
+/// This is a sample and remains one. The deterministic half is
+/// [`Manifest::grammar_digest`]; between them the uncovered case is a printer
+/// change touching well under 1% of programs.
+const PROBE_COUNT: u64 = 256;
 
 /// The corpus file layout this build reads and writes.
 ///
@@ -30,7 +43,7 @@ const PROBE_SEEDS: [u64; 3] = [0, 1, 2];
 /// count, same generator — and parses as one enormous program. Caught the first
 /// time the separator changed; a format is exactly the kind of thing a cache
 /// key forgets.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// How a corpus renders the programs it holds.
 ///
@@ -81,6 +94,15 @@ pub struct Manifest {
     pub layout: Layout,
     /// Fingerprint of the generator that produced it.
     pub probe_digest: u64,
+    /// Fingerprint of the *grammar* it was generated against.
+    ///
+    /// Separate from [`Self::probe_digest`] because the two fail differently.
+    /// The probe digest samples output, so it catches a change that shows up in
+    /// the first few programs and misses one that touches a thousandth of the
+    /// corpus. This one is computed from the token classes themselves, so a
+    /// keyword added, removed or respelled invalidates every cached corpus
+    /// deterministically — no sampling, no luck.
+    pub grammar_digest: u64,
 }
 
 impl Manifest {
@@ -92,8 +114,28 @@ impl Manifest {
     /// much the printer's artifact as the generator's.
     #[must_use]
     pub fn probe_digest(layout: Layout) -> u64 {
-        PROBE_SEEDS.iter().fold(FNV_OFFSET, |digest, &seed| {
+        (0..PROBE_COUNT).fold(FNV_OFFSET, |digest, seed| {
             fnv1a(digest, render(&babble::generate(seed), layout).as_bytes())
+        })
+    }
+
+    /// Fingerprint of Stitch's token classes and their spellings.
+    ///
+    /// The grammar half of staleness. Adding the `test` keyword changed babble's
+    /// output for *every* seed (a 59th class shifts every draw) and adding
+    /// `expect` changed how ~1% of programs print; the first a 3-seed probe
+    /// would catch, the second it would not. This catches both, because it does
+    /// not look at output at all.
+    ///
+    /// It cannot see a pure printer change that leaves the class set alone —
+    /// nothing short of regenerating can. That residue is what
+    /// [`Self::probe_digest`]'s sample is for, and why the sample is no longer
+    /// three programs.
+    #[must_use]
+    pub fn grammar_digest() -> u64 {
+        stitch::oracle::all_classes().iter().fold(FNV_OFFSET, |digest, &class| {
+            let digest = fnv1a(digest, stitch::oracle::describe(class).as_bytes());
+            fnv1a(digest, stitch::oracle::representative(class).unwrap_or("").as_bytes())
         })
     }
 
@@ -108,6 +150,7 @@ impl Manifest {
             || self.seed != seed
             || self.program_count != program_count
             || self.layout != layout
+            || self.grammar_digest != Self::grammar_digest()
             || self.probe_digest != Self::probe_digest(layout)
     }
 
@@ -118,12 +161,14 @@ impl Manifest {
     /// earns nothing from a dependency here.
     pub fn render(&self) -> String {
         format!(
-            "format_version={}\nseed={}\nprogram_count={}\nlayout={}\nprobe_digest={}\n",
+            "format_version={}\nseed={}\nprogram_count={}\nlayout={}\nprobe_digest={}\n\
+             grammar_digest={}\n",
             self.format_version,
             self.seed,
             self.program_count,
             self.layout.as_str(),
-            self.probe_digest
+            self.probe_digest,
+            self.grammar_digest
         )
     }
 
@@ -141,6 +186,10 @@ impl Manifest {
             program_count: field("program_count")?.parse().ok()?,
             layout: Layout::parse(field("layout")?)?,
             probe_digest: field("probe_digest")?.parse().ok()?,
+            // A manifest written before this field existed parses as `None` and
+            // the caller regenerates — which is the correct answer for a corpus
+            // whose grammar was never recorded.
+            grammar_digest: field("grammar_digest")?.parse().ok()?,
         })
     }
 }
@@ -378,6 +427,7 @@ mod tests {
             program_count: 64,
             layout: Layout::Flat,
             probe_digest: Manifest::probe_digest(Layout::Flat),
+            grammar_digest: Manifest::grammar_digest(),
         }
     }
 
@@ -654,5 +704,41 @@ mod tests {
             older_layout.is_stale_for(cached.seed, cached.program_count, cached.layout),
             "a corpus in an older file layout must not be reused"
         );
+    }
+
+    #[test]
+    fn a_corpus_is_stale_when_the_grammar_changed() {
+        // The gap `probe_digest` alone cannot close. It fingerprints a *sample*
+        // of babble's output, so a change touching one program in 246,000 is
+        // invisible to it — which is why every language change so far has ended
+        // in someone deleting the manifest by hand, and why a corpus once got
+        // trained on after the printer was fixed underneath it.
+        //
+        // The grammar digest is not a sample: it fingerprints the token classes
+        // and their spellings directly, so *any* keyword added, removed or
+        // respelled invalidates every cached corpus deterministically.
+        let cached = manifest();
+
+        let after_grammar_changed = Manifest {
+            grammar_digest: cached.grammar_digest ^ 1,
+            ..cached
+        };
+        assert!(
+            after_grammar_changed.is_stale_for(cached.seed, cached.program_count, cached.layout),
+            "a corpus generated against a different grammar must not be reused"
+        );
+    }
+
+    #[test]
+    fn the_grammar_digest_sees_every_token_class() {
+        // Guards the digest against being computed over something narrower than
+        // it claims — a fold that silently covered only the first class would
+        // still be a stable u64 and would still pass every other test here.
+        let classes = stitch::oracle::all_classes().len();
+        assert!(classes > 50, "sanity: Stitch has ~59 token classes, found {classes}");
+
+        let digest = Manifest::grammar_digest();
+        assert_ne!(digest, 0, "a digest of nothing");
+        assert_eq!(digest, Manifest::grammar_digest(), "the digest must be a function");
     }
 }

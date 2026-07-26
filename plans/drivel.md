@@ -300,6 +300,28 @@ warning, names the program, byte, line and admitted-class count, and exits
 nonzero *after* printing everything else. Not fixed here — `stitch` was being
 edited concurrently, and this is a `stitch` bug rather than a harness one.
 
+### The corpus cache now sees the grammar, not just a sample of its output
+
+The manual "delete the manifest after a printer change" ritual was a missing
+cache key, and it cost a real run: a corpus generated before a printer fix looks
+perfectly fresh to a digest that fingerprints three programs. Two changes, both
+from failures that actually happened:
+
+- **`Manifest::grammar_digest`** — FNV over every token class and its spelling.
+  Deterministic, not sampled, so a keyword added, removed or respelled
+  invalidates every cached corpus. Adding `test` changed babble's output for
+  *every* seed (a 59th class shifts every draw); nothing in the old manifest
+  would have noticed.
+- **`PROBE_COUNT` 3 → 256.** The `expect` printer fix changed how ~1% of
+  programs render; a 3-seed probe misses that ~97% of the time, 256 misses it
+  ~8% of the time. Costs ~0.5 s on a cache *hit* against ~8 minutes to
+  regenerate.
+
+`FORMAT_VERSION` 2 → 3, so every manifest written before the grammar digest
+existed is invalid by construction rather than by luck. What remains uncovered
+is a printer change touching well under 1% of programs — a sample cannot close
+that, and the honest fix there is still to delete the manifest.
+
 ### Cost, measured rather than estimated
 
 **~138 s for 8,318 decisions — ~17 ms each**, and it is quadratic in program
