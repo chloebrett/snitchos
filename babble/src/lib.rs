@@ -20,7 +20,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use stitch::oracle::{Entry, TokenClass, admits_next, all_classes, representative};
+use stitch::oracle::{Entry, TokenClass, TokenSet, admits_next, all_classes, representative};
 
 /// How many tokens a single walk may emit before it is cut off. Without the
 /// depth damping that bias tables bring, a uniform walk can wander a long way
@@ -32,7 +32,12 @@ use stitch::oracle::{Entry, TokenClass, admits_next, all_classes, representative
 const MAX_TOKENS: usize = 200;
 
 /// Number of token classes — the width of a weight table.
-const CLASS_COUNT: usize = 58;
+///
+/// Derived from the oracle rather than written down: a hardcoded count is a
+/// silent trap, because adding a class to Stitch makes `Eof`'s index fall off
+/// the end of the table. That is not hypothetical — the `test` keyword landed a
+/// 59th class and turned `Tables::DEFAULT` into a const-eval panic.
+const CLASS_COUNT: usize = all_classes().len();
 
 /// Fixed-point headroom for weight arithmetic. Weights are integers (no floats
 /// in the sampler), so without a scale the pressure divisions collapse to 0/1
@@ -92,7 +97,11 @@ fn is_opener(class: TokenClass) -> bool {
     matches!(class, TokenClass::LParen | TokenClass::LBrace | TokenClass::LBracket)
 }
 
-fn is_closer(class: TokenClass) -> bool {
+/// Public because scoring a program babble did *not* walk has to reconstruct
+/// the depth babble would have been at — and a second copy of this rule in the
+/// eval harness would make babble's floor row the score of a different sampler.
+#[must_use]
+pub fn is_closer(class: TokenClass) -> bool {
     matches!(class, TokenClass::RParen | TokenClass::RBrace | TokenClass::RBracket)
 }
 
@@ -105,7 +114,9 @@ fn is_closer(class: TokenClass) -> bool {
 /// expressions that can open further constructs. Delimiter depth cannot see
 /// that debt (the keyword arrives before its `{`), so they are damped as
 /// openers and counted as depth in their own right.
-fn is_obligation(class: TokenClass) -> bool {
+/// Public for the same reason as [`is_closer`].
+#[must_use]
+pub fn is_obligation(class: TokenClass) -> bool {
     is_opener(class)
         || matches!(
             class,
@@ -305,6 +316,37 @@ fn pick(source: &str, rng: &mut Rng, tables: &Tables, emitted: u32, depth: u32) 
         candidates.swap_remove(index);
     }
     None
+}
+
+/// The distribution [`pick`] draws from: every legal class, with the weight it
+/// carries at this point in the walk. `p(class) = weight / Σ weights`.
+///
+/// This is babble wearing the *scoring* hat rather than the sampling one. The
+/// eval harness needs a probability for the token a human actually wrote, which
+/// `pick` cannot give — it returns a draw, not a density. Both hats read the
+/// same [`Tables::weight`], and `pick_draws_from_the_distribution_babble_publishes`
+/// pins them together, so babble's floor row is the score of the sampler that
+/// actually runs.
+///
+/// **Weights, not probabilities, and deliberately.** babble runs on the VF2 as
+/// model zero behind the kvetch endpoint, where `sstatus.FS` is never set — a
+/// single float in userspace panics the kernel. Normalizing is the host's job.
+///
+/// Ordered by class discriminant, so a caller folding over it gets a stable
+/// order without sorting.
+#[must_use]
+pub fn distribution(
+    tables: &Tables,
+    legal: TokenSet,
+    emitted: u32,
+    depth: u32,
+) -> Vec<(TokenClass, u32)> {
+    all_classes()
+        .iter()
+        .filter(|class| legal.contains(**class))
+        .map(|class| (*class, tables.weight(*class, emitted, depth)))
+        .filter(|(_, weight)| *weight > 0)
+        .collect()
 }
 
 /// Walk the grammar from empty source, recording each step.
@@ -522,7 +564,15 @@ mod tests {
         // Until terminal synthesis, every name was `x` and every number `0` —
         // the oracle answers in *classes*, and the sampler was appending the
         // same representative lexeme it probes with.
-        let corpus: Vec<String> = (0..8).map(generate).collect();
+        //
+        // 64 programs, not 8: integers are rare in babble's output, so a small
+        // sample makes this an assertion about a lucky seed rather than about
+        // the sampler. At 8 it passed for months and then failed the day
+        // Stitch gained a `test` keyword — a 59th class shifts every draw, and
+        // the sample happened to land on one integer. Nothing about the
+        // sampler had changed. Widen rather than pin a seed: the property is
+        // "terminals vary", and it should hold over the stream, not at a point.
+        let corpus: Vec<String> = (0..64).map(generate).collect();
         let kinds: Vec<TokenKind> =
             corpus.iter().flat_map(|s| lex(s).tokens).map(|t| t.kind).collect();
         let names: BTreeSet<&str> = kinds
@@ -566,6 +616,59 @@ mod tests {
         tables.set_base(TokenClass::Eof, 0);
         assert!(tables.validate().is_err());
         assert!(super::Tables::DEFAULT.validate().is_ok());
+    }
+
+    #[test]
+    fn pick_draws_from_the_distribution_babble_publishes() {
+        // Anti-drift, the same discipline that pins `admits_next` to
+        // `valid_next`: the eval harness scores babble through
+        // `distribution`, while every program babble *generates* comes from
+        // `pick`. Nothing but this test stops the two from describing
+        // different samplers — and if they did, babble's floor row would be
+        // the score of a model nobody runs.
+        //
+        // Statistical but not flaky: the seed sequence is fixed, so the
+        // histogram is a constant. The tolerance is ~4 standard errors at
+        // this many draws.
+        const DRAWS: usize = 5_000;
+        const TOLERANCE: f64 = 0.02;
+
+        let source = "let count = ";
+        let (emitted, depth) = (4, 0);
+        let tables = super::Tables::DEFAULT;
+        let legal = stitch::oracle::valid_next(source, source.len());
+        let published = super::distribution(&tables, legal, emitted, depth);
+        assert!(!published.is_empty(), "no legal classes to draw from");
+
+        let total: u32 = published.iter().map(|(_, weight)| *weight).sum();
+        let mut rng = super::Rng::new(11);
+        let mut counts = alloc::collections::BTreeMap::new();
+        for _ in 0..DRAWS {
+            let class = super::pick(source, &mut rng, &tables, emitted, depth)
+                .expect("a legal continuation exists here");
+            *counts.entry(class).or_insert(0usize) += 1;
+        }
+
+        // Support first: a class `pick` can draw but `distribution` omits (or
+        // vice versa) is the drift that matters most, and a probability
+        // comparison alone would report it as a small numeric gap.
+        let drawn: alloc::collections::BTreeSet<_> = counts.keys().copied().collect();
+        let announced: alloc::collections::BTreeSet<_> =
+            published.iter().map(|(class, _)| *class).collect();
+        assert!(
+            drawn.is_subset(&announced),
+            "pick drew classes the distribution omits: {:?}",
+            drawn.difference(&announced).collect::<Vec<_>>()
+        );
+
+        for (class, weight) in &published {
+            let expected = f64::from(*weight) / f64::from(total);
+            let observed = counts.get(class).copied().unwrap_or(0) as f64 / DRAWS as f64;
+            assert!(
+                (expected - observed).abs() < TOLERANCE,
+                "{class:?}: published p={expected:.4}, pick drew {observed:.4}"
+            );
+        }
     }
 
     #[test]

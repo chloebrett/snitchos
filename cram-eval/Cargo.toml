@@ -1,0 +1,27 @@
+[package]
+name = "cram-eval"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# The scoring half of the host pipeline, beside `cram-corpus`'s assembly half.
+# It links the *forward pass* and never the trainer: an eval must be runnable
+# from an itest and from the on-target story, neither of which should compile a
+# backward pass or an Accelerate binding to ask a model a question.
+[dependencies]
+# Rung 0. The floor row every trained rung is measured against, scored through
+# the same code path as every other rung so the two cannot drift apart.
+babble = { path = "../babble" }
+# The continuation oracle (the legal set at each position), the parser (is this
+# sample legal Stitch), and the lexer (where the decisions are).
+stitch = { path = "../stitch" }
+# The forward pass a trained rung is scored through.
+kvetch-model = { path = "../kvetch-model" }
+# Held-out programs must be tokenized the same way training tokenized them.
+kvetch-vocab = { path = "../kvetch-vocab" }
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false

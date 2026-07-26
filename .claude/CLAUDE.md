@@ -222,7 +222,8 @@ xtask-itest/  The **snemu-linked** half of xtask: `itest`, the `snemu` group
               Caveat: standalone `cargo xtask diagram …` now builds snemu; the
               frequent path (drift via `test`) stays snemu-free.
 xtask-cram/   The **cram-linked** half of xtask: `cram` (train a rung end to
-              end) and the `parse-rate` bin. Same split rationale as
+              end) and `cram --eval` (score the ladder: floor rows +
+              any checkpoint). Same split rationale as
               `xtask-itest` — an edit to the trainer should not recompile the
               tool that runs `cargo xtask test`. Built `--release`, since
               training is a numerics loop where the run dwarfs the compile.

@@ -287,6 +287,7 @@ catalog! {
     // and exits. That shared superset is what makes them one shared-boot group.
     wfi "userspace-emits-telemetry"       scenarios::userspace_emits_telemetry     [userspace]  {"userspace"};
     wfi "userspace-cannot-touch-kernel"   scenarios::userspace_cannot_touch_kernel  [userspace]  {"userspace-fault"};
+    wfi "unhandled-user-trap-kills-only-the-process" scenarios::unhandled_user_trap_kills_only_the_process [userspace] {"userspace-illegal"};
     wfi "userspace-grant-snitched"        scenarios::userspace_grant_snitched       [userspace]  {"userspace"};
     wfi "userspace-cap-denied"            scenarios::userspace_cap_denied           [userspace]  {"userspace"};
     wfi "userspace-cap-granted-event"     scenarios::userspace_cap_granted_event    [userspace]  {"userspace"};

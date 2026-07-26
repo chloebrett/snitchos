@@ -33,12 +33,19 @@ const DEFAULT_PROGRAMS: usize = 1_000_000;
 /// for more is harmless — the trainer stops when there is nothing left to merge.
 const DEFAULT_VOCAB: usize = 1024;
 
+mod eval;
+
 struct Options {
     rung: Rung,
     programs: usize,
     vocab_size: usize,
     layout: Layout,
     config: TrainingConfig,
+    /// Score instead of train. Both live behind one verb because they share
+    /// every path a run depends on — rung, checkpoint naming, vocab — and a
+    /// separate binary is how `parse-rate` drifted into measuring one rung on
+    /// one metric with no floor to compare it to.
+    eval: Option<eval::EvalOptions>,
 }
 
 fn main() -> std::io::Result<()> {
@@ -49,6 +56,10 @@ fn main() -> std::io::Result<()> {
             std::process::exit(2);
         }
     };
+
+    if let Some(eval) = &options.eval {
+        return eval::run(eval);
+    }
 
     let corpus = load_corpus(options.programs, options.layout)?;
     // Train and tokenize on the *programs*, never the corpus file. The file's
@@ -112,7 +123,15 @@ usage: cargo xtask cram [options]
   --context <n>       tokens per sequence                      (default 128)
   --lr <f>            peak learning rate                       (default 0.003)
   --seed <n>          seeds weights and batch order            (default 0)
-  --report-every <n>  steps between progress lines             (default 20)";
+  --report-every <n>  steps between progress lines             (default 20)
+
+evaluation (replaces the old `parse-rate` bin):
+
+  --eval              score rungs instead of training
+  --corpus-root <d>   where to find real .st files             (default .)
+  --samples <n>       programs sampled per generative metric   (default 200)
+  --checkpoint <p>    a trained rung to include in the report
+  --eval-vocab <p>    the vocab that checkpoint was trained against";
 
 fn parse(args: &[String]) -> Result<Options, String> {
     // `Printed` by default: it re-prints each program from its AST, so the
@@ -126,6 +145,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
         vocab_size: DEFAULT_VOCAB,
         layout: Layout::Printed,
         config: TrainingConfig::default(),
+        eval: None,
+    };
+    let mut evaluating = false;
+    let mut eval = eval::EvalOptions {
+        corpus_root: PathBuf::from("."),
+        samples: 200,
+        checkpoint: None,
+        vocab: None,
     };
 
     let mut rest = args.iter();
@@ -162,12 +189,27 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .parse()
                     .map_err(|_| format!("--lr: {text:?} is not a number"))?;
             }
+            "--eval" => evaluating = true,
+            "--corpus-root" => eval.corpus_root = PathBuf::from(value()?),
+            "--samples" => eval.samples = number(&value()?)?,
+            "--checkpoint" => eval.checkpoint = Some(PathBuf::from(value()?)),
+            "--eval-vocab" => eval.vocab = Some(PathBuf::from(value()?)),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown option {other:?}")),
         }
+    }
+
+    if evaluating {
+        // Half a checkpoint is a mistake, not a mode: weights loaded against
+        // the wrong token table produce a model that runs and is nonsense.
+        if eval.checkpoint.is_some() != eval.vocab.is_some() {
+            return Err(String::from("--checkpoint and --eval-vocab go together"));
+        }
+        options.eval = Some(eval);
+        return Ok(options);
     }
 
     options.config.rung = options.rung;

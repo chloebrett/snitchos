@@ -13,6 +13,9 @@ default-run = "xtask-cram"
 [dependencies]
 cram = { path = "../cram" }
 cram-corpus = { path = "../cram-corpus" }
+# The scoring path. `--eval` is a mode of this tool rather than its own binary,
+# so the floor rows and a checkpoint's row are always printed together.
+cram-eval = { path = "../cram-eval" }
 kvetch-model = { path = "../kvetch-model" }
 kvetch-vocab = { path = "../kvetch-vocab" }
 # The parser that judges whether sampled output is legal Stitch.
