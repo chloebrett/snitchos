@@ -2669,6 +2669,57 @@ pub fn userspace_cannot_touch_kernel(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// An unhandled U-mode trap kills the **process**, not the kernel
+/// (`workload=userspace-illegal`). The `illegal` program emits a marker, then
+/// executes `unimp` — an encoding the RISC-V spec guarantees illegal, so it traps
+/// on every engine and on real hardware.
+///
+/// Before this, `trap_handler` handled exactly three U-mode exceptions (the page
+/// faults) and sent every other cause to a catch-all `panic!` — so any user
+/// program could halt the machine with one instruction. That is what typing
+/// `1.5 + 1.5` at the Stitch REPL did: floats compile to FP instructions, and FP
+/// traps as illegal while `sstatus.FS` is Off (`docs/floating-point-design.md`).
+///
+/// Three assertions, in the order they must happen:
+///
+///   1. The marker arrives — the program really reached U-mode, so the trap we
+///      then observe is the `unimp` and not a failure to launch. Without this the
+///      scenario would pass on a program that never ran.
+///   2. A `Log` naming the fault: `"user fault: task N killed by illegal
+///      instruction …"`. This is the attributable-death assertion — the process
+///      must be *reported*, not silently gone — and it pins the classification,
+///      so a future FP change that reclassified the cause would be caught here.
+///   3. A `kernel.heartbeat` *after* that Log. The whole point: the kernel is
+///      alive on the far side of a user program's illegal instruction. Under the
+///      old `panic!` this could never arrive, and under the pre-kill `loop { wfi }`
+///      park it would only arrive when the fault happened to land on a hart that
+///      wasn't running the heartbeat.
+pub fn unhandled_user_trap_kills_only_the_process(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 10, is_metric_named("snitchos.illegal.marker"))
+        .ok_or(
+            "no snitchos.illegal.marker within 10s — the illegal program never reached U-mode, \
+             so nothing below would be evidence about trap disposition",
+        )?;
+
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("user fault") && msg.contains("illegal instruction"))
+    })
+    .ok_or(
+        "no Log naming a 'user fault' by 'illegal instruction' within 10s — either the trap \
+         didn't fire (the engine executed `unimp` as something), or the kernel panicked instead \
+         of terminating the process, or the fault was classified as some other cause",
+    )?;
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or(
+            "no heartbeat after the illegal instruction — the kernel died with the process, or \
+             the faulting hart was parked rather than rescheduled",
+        )?;
+
+    Ok(())
+}
+
 /// v0.7b denial payoff (`workload=userspace`): after invoking the
 /// `TelemetrySink` it *was* granted (handle 0), `hello` deliberately
 /// invokes a handle it was **never granted** (handle 1 — its table holds

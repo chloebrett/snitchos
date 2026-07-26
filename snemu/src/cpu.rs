@@ -6,7 +6,9 @@ use std::sync::Arc;
 use crate::block::{self, Block, BlockCache, Compiled};
 use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
-use crate::decode::{Instr, amo_op, expand, funct3, funct7, is_compressed, opcode, priv12, system};
+use crate::decode::{
+    Instr, amo_op, expand, funct3, funct7, is_compressed, is_guest_illegal, opcode, priv12, system,
+};
 use crate::fetch_cache::{FetchCache, Fetched};
 use crate::mem::{BusError, Memory, RAM_BASE};
 use crate::mmu::{self, Access};
@@ -60,6 +62,10 @@ pub(crate) fn memop_charge(len: u64) -> u64 {
 
 /// Trap cause codes (`scause`, exceptions; interrupt bit clear).
 mod cause {
+    /// An instruction the *guest* may not execute — see
+    /// [`crate::decode::is_guest_illegal`]. Not snemu's "I don't model this",
+    /// which halts the host instead.
+    pub const ILLEGAL_INSTRUCTION: u64 = 2;
     pub const BREAKPOINT: u64 = 3;
     pub const ECALL_FROM_U: u64 = 8;
     pub const INSTRUCTION_PAGE_FAULT: u64 = 12;
@@ -870,26 +876,42 @@ impl Hart {
     }
 
     /// Fetch + decode the instruction at `pc` without executing or trapping — the
-    /// block compiler walks a block this way. `None` on a fetch fault or an illegal
-    /// compressed encoding: the compiler ends the block there and the interpreter
-    /// re-fetches and traps correctly at run time. Side-effect-free (`&self`).
+    /// block compiler walks a block this way. `None` on a fetch fault, an illegal
+    /// compressed encoding, or an encoding that is illegal for the guest: the
+    /// compiler ends the block there and the interpreter re-fetches and traps
+    /// correctly at run time. Side-effect-free (`&self`).
+    ///
+    /// Declining a guest-illegal word is load-bearing, not defensive. A block that
+    /// swallowed one would trap at the wrong PC or not at all, and it is the one
+    /// failure `snemu diff` cannot see — both sides would be running snemu's own
+    /// code, so QEMU never gets a look in.
     fn fetch_for_compile(&self, pc: u64, bus: &Bus) -> Option<Fetched> {
         let satp = self.csr.read(addr::SATP).ok()?;
         let user = self.privilege == Privilege::User;
         let sum = self.csr_read(addr::SSTATUS) & sstatus::SUM != 0;
         let pa = mmu::translate(satp, pc, Access::Fetch, bus.ram(), user, sum).ok()?;
         let half = bus.read_u16(pa).ok()?;
-        if is_compressed(half) {
-            Some(Fetched { raw: expand(half)?, ilen: ILEN_COMPRESSED })
+        let compressed = is_compressed(half);
+        // The word as encoded, assembled the same way the interpreter assembles it
+        // — so the guest-illegal check below sees exactly what the interpreter will.
+        let encoded = if compressed {
+            u32::from(half)
         } else if pc & 0xfff > 0xffc {
             // Upper half in the next page: translate it separately (the pages need
             // not be physically contiguous — same hazard as the interpreter fetch).
             // `None` on a fault ends the block; the interpreter re-fetches and traps.
             let hi_pa = mmu::translate(satp, pc.wrapping_add(2), Access::Fetch, bus.ram(), user, sum).ok()?;
-            let raw = u32::from(half) | (u32::from(bus.read_u16(hi_pa).ok()?) << 16);
-            Some(Fetched { raw, ilen: ILEN_FULL })
+            u32::from(half) | (u32::from(bus.read_u16(hi_pa).ok()?) << 16)
         } else {
-            Some(Fetched { raw: bus.read_u32(pa).ok()?, ilen: ILEN_FULL })
+            bus.read_u32(pa).ok()?
+        };
+        if is_guest_illegal(encoded) {
+            return None; // ends the block; the interpreter delivers the trap
+        }
+        if compressed {
+            Some(Fetched { raw: expand(half)?, ilen: ILEN_COMPRESSED })
+        } else {
+            Some(Fetched { raw: encoded, ilen: ILEN_FULL })
         }
     }
 
@@ -948,25 +970,39 @@ impl Hart {
             return Ok(HartEffect::None); // fetch faulted → trapped to the handler
         };
         let half = bus.read_u16(pc_pa)?;
-        let raw = if is_compressed(half) {
-            self.cur_ilen = ILEN_COMPRESSED;
-            expand(half).ok_or_else(|| self.unimplemented(u32::from(half)))?
-        } else {
-            self.cur_ilen = ILEN_FULL;
+        let compressed = is_compressed(half);
+        self.cur_ilen = if compressed { ILEN_COMPRESSED } else { ILEN_FULL };
+        // The word *as encoded* — a compressed half zero-extended, a 32-bit
+        // instruction whole. Classified before expansion, since an illegal
+        // compressed encoding must not be expanded into something executable.
+        let encoded = if compressed {
+            u32::from(half)
+        } else if self.pc & 0xfff > 0xffc {
             // A 4-byte instruction whose upper half spills into the next page must
             // have that half translated on its own — the two pages need not be
             // physically contiguous. Fetch each 16-bit half separately (reusing the
             // low half already read); a faulting upper half traps as an
             // instruction-page-fault, exactly like hardware.
-            if self.pc & 0xfff > 0xffc {
-                let Some(hi_pa) = self.translate_or_trap(self.pc.wrapping_add(2), Access::Fetch, bus)
-                else {
-                    return Ok(HartEffect::None); // upper half faulted → trapped
-                };
-                u32::from(half) | (u32::from(bus.read_u16(hi_pa)?) << 16)
-            } else {
-                bus.read_u32(pc_pa)?
-            }
+            let Some(hi_pa) = self.translate_or_trap(self.pc.wrapping_add(2), Access::Fetch, bus)
+            else {
+                return Ok(HartEffect::None); // upper half faulted → trapped
+            };
+            u32::from(half) | (u32::from(bus.read_u16(hi_pa)?) << 16)
+        } else {
+            bus.read_u32(pc_pa)?
+        };
+        // The guest's bug, not snemu's gap: deliver the illegal-instruction trap
+        // hardware would, `stval` carrying the faulting word. Not cached — the
+        // handler's `sret` may legitimately retry the same PC (that's how lazy FP
+        // enable will work), and the trap must fire again if it does.
+        if is_guest_illegal(encoded) {
+            self.take_trap(cause::ILLEGAL_INSTRUCTION, u64::from(encoded));
+            return Ok(HartEffect::None);
+        }
+        let raw = if compressed {
+            expand(half).ok_or_else(|| self.unimplemented(u32::from(half)))?
+        } else {
+            encoded
         };
         if let Some(cache) = self.fetch_cache.as_mut() {
             cache.insert(self.pc, Fetched { raw, ilen: self.cur_ilen });
@@ -3275,16 +3311,136 @@ mod tests {
         assert_eq!(cpu.uart_output(), b"X");
     }
 
+    /// A **legal** RV64GC instruction snemu doesn't model yet is snemu's gap, not
+    /// the guest's bug — halt the host naming pc + instr (the meta-loop signal).
+    /// Turning this into a guest trap would be indistinguishable from real
+    /// hardware refusing the instruction, which sends you debugging the kernel:
+    /// the failure mode `docs/floating-point-design.md` opens with.
+    ///
+    /// The witness is `fadd.d f0, f0, f0` (OP-FP, opcode 0x53) — legal RV64D that
+    /// snemu has no FP unit for. Distinct path from
+    /// `spec_guaranteed_illegal_encodings_trap_the_guest` below; both must stay
+    /// covered, since the whole point is that snemu tells them apart.
     #[test]
-    fn unknown_instruction_reports_unimplemented() {
-        let mut cpu = cpu_with(&[0xffff_ffff]);
+    fn legal_but_unmodelled_instruction_halts_the_host() {
+        const FADD_D: u32 = 0x0200_0053; // fadd.d f0, f0, f0
+        let mut cpu = cpu_with(&[FADD_D]);
         assert_eq!(
             cpu.step(),
             Err(StepError::Unimplemented {
                 pc: RAM_BASE,
-                instr: 0xffff_ffff,
+                instr: FADD_D,
             })
         );
+    }
+
+    /// With the block JIT hot, an illegal instruction must still trap at its own
+    /// PC — the JIT is the one path `snemu diff` cannot audit, since both sides of
+    /// the diff would be running snemu's own code and QEMU never gets a look in.
+    /// The oracle here is therefore internal: JIT on must equal JIT off, exactly.
+    ///
+    /// A hot two-instruction loop compiles and caches a block, then falls through
+    /// into an illegal word. The block compiler must decline that word (ending the
+    /// block) rather than folding it into compiled code, where it would trap at the
+    /// block's head PC or vanish entirely.
+    #[test]
+    fn an_illegal_instruction_traps_identically_with_the_block_jit_hot() {
+        const HANDLER: u64 = RAM_BASE + 0x200;
+        const ILLEGAL_PC: u64 = RAM_BASE + 12;
+        let program = &[
+            addi(1, 1, 1), // x1 += 1
+            0xfe20_9ee3,   // bne x1, x2, -4 — loop until x1 == x2 (goes hot)
+            addi(4, 4, 7), // post-loop marker, so the fall-through is observable
+            0x0000_0000,   // illegal
+        ];
+        let run = |jit: bool| {
+            let mut cpu = cpu_with(program);
+            cpu.set_reg(2, 40); // iterate enough to compile + hit the block
+            cpu.set_block_jit(jit);
+            cpu.hart.csr.write(addr::STVEC, HANDLER).unwrap();
+            for _ in 0..500 {
+                if cpu.pc() == HANDLER {
+                    break;
+                }
+                cpu.step().unwrap(); // must never halt the host
+            }
+            // Architectural state (must match across the A/B) and, separately, the
+            // JIT hit count (must legitimately differ — that's the A/B).
+            let state = TrapState {
+                pc: cpu.pc(),
+                scause: cpu.hart.csr.read(addr::SCAUSE).unwrap(),
+                sepc: cpu.hart.csr.read(addr::SEPC).unwrap(),
+                stval: cpu.hart.csr.read(addr::STVAL).unwrap(),
+                instret: cpu.instret(),
+                marker: cpu.reg(4),
+            };
+            (state, cpu.hart.block_jit_hits())
+        };
+        let (off, _) = run(false);
+        let (on, hits) = run(true);
+
+        assert_eq!(on.pc, HANDLER, "trapped into the handler with the JIT on");
+        assert_eq!(on.scause, 2, "illegal instruction");
+        assert_eq!(on.sepc, ILLEGAL_PC, "sepc is the illegal instruction's own PC");
+        assert_eq!(on.marker, 7, "the post-loop marker ran — we reached the illegal word");
+        assert!(hits > 0, "the loop's block went hot, so the JIT path was exercised");
+        assert_eq!(on, off, "block JIT ON must trap identically to the interpreter OFF");
+    }
+
+    /// The architectural state an illegal-instruction trap leaves behind, compared
+    /// across the block-JIT A/B in
+    /// [`an_illegal_instruction_traps_identically_with_the_block_jit_hot`].
+    #[derive(Debug, PartialEq, Eq)]
+    struct TrapState {
+        pc: u64,
+        scause: u64,
+        sepc: u64,
+        stval: u64,
+        instret: u64,
+        marker: u64,
+    }
+
+    /// The RISC-V spec **guarantees** the all-zero and all-ones instruction words
+    /// are illegal, permanently and on every implementation — so no judgement
+    /// about snemu's coverage is involved: they are the *guest's* bug, and the
+    /// guest must receive the trap real hardware would deliver (`scause=2`,
+    /// `stval` = the faulting instruction word, as QEMU sets it) rather than the
+    /// run halting host-side.
+    ///
+    /// This is what makes the kernel's "an unhandled U-mode trap kills the
+    /// process" path testable under snemu at all, and later the lazy-FP-enable
+    /// trap that fires when `sstatus.FS` is Off.
+    #[test]
+    fn spec_guaranteed_illegal_encodings_trap_the_guest() {
+        const HANDLER: u64 = RAM_BASE + 0x200;
+        const ILLEGAL_INSTRUCTION: u64 = 2;
+        // All-zeros arrives via the *compressed* fetch path (low bits 00), all-ones
+        // via the 32-bit path — both classifications must hold.
+        for word in [0x0000_0000_u32, 0xffff_ffff] {
+            let mut cpu = cpu_with(&[word]);
+            cpu.hart.csr.write(addr::STVEC, HANDLER).unwrap();
+
+            assert_eq!(
+                cpu.step(),
+                Ok(()),
+                "instruction {word:#010x} should trap the guest, not halt the host",
+            );
+            assert_eq!(cpu.pc(), HANDLER, "trapped into the guest's handler");
+            assert_eq!(
+                cpu.hart.csr.read(addr::SCAUSE).unwrap(),
+                ILLEGAL_INSTRUCTION,
+            );
+            assert_eq!(
+                cpu.hart.csr.read(addr::STVAL).unwrap(),
+                u64::from(word),
+                "stval carries the faulting instruction word",
+            );
+            assert_eq!(
+                cpu.hart.csr.read(addr::SEPC).unwrap(),
+                RAM_BASE,
+                "sepc is the faulting PC, un-advanced — the handler may retry it",
+            );
+        }
     }
 
     /// Encode an AMO (opcode 0x2f): `funct5`, width (`2`=`.w`, `3`=`.d`),

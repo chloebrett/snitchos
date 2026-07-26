@@ -233,6 +233,37 @@ pub(crate) fn is_compressed(half: u16) -> bool {
     half & 0b11 != 0b11
 }
 
+/// Is `encoded` an instruction word that is illegal **for the guest**, as opposed
+/// to one snemu merely doesn't model yet? Takes the word *as fetched* — a 16-bit
+/// compressed half zero-extended, a 32-bit instruction whole — so it must be
+/// consulted before [`expand`].
+///
+/// The distinction is the whole point, and conflating the two costs debugging
+/// hours in opposite directions (see `docs/floating-point-design.md`):
+///
+/// - **snemu's gap** (a legal RV64GC instruction with no model here) must halt
+///   the host naming pc + instr. Delivering a guest trap instead is
+///   indistinguishable from real hardware refusing the instruction, so it sends
+///   you debugging the kernel.
+/// - **The guest's bug** (this function) must trap the guest exactly as hardware
+///   would. Halting the host instead makes a *correct* guest fault handler
+///   untestable under snemu.
+///
+/// So this is deliberately not "did my match arm fall through" — it is only
+/// encodings the RISC-V spec itself *guarantees* illegal on every conforming
+/// implementation, permanently: the all-zero and all-ones instruction words. No
+/// judgement about snemu's coverage is involved, and the set can't rot as snemu
+/// grows. (All-zeros matters more than it looks: as a compressed half it would
+/// otherwise [`expand`] cleanly into `c.addi4spn` with a reserved zero immediate
+/// and *execute*.)
+///
+/// FP instructions while `sstatus.FS == Off` are the next member of this set, and
+/// they are privilege/CSR-dependent rather than encoding-only — so they'll be
+/// classified at the FS check, not here.
+pub(crate) fn is_guest_illegal(encoded: u32) -> bool {
+    encoded == 0 || encoded == u32::MAX
+}
+
 /// Expand a 16-bit compressed instruction to its canonical 32-bit form, or
 /// `None` if it isn't a compressed instruction snemu models yet (the meta-loop).
 pub(crate) fn expand(half: u16) -> Option<u32> {
