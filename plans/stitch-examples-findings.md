@@ -278,7 +278,11 @@ now.
   `uses FsWrite`, calls `@transfer` (which independently declares and gets
   its own `uses Telemetry`) with no Telemetry in `transferAudited`'s own
   row — and it works, exactly as `natives.rs`'s `shout()/main()` refusal
-  test implies from the other direction.
+  test implies from the other direction. **Qualified by shell.st's entry
+  below**: that's true at *runtime*, and true of the *static checker* for
+  method calls specifically — but the checker requires transitive
+  `uses`-propagation for plain function calls, an asymmetry this file
+  didn't hit because `@transfer` is a method call.
 
 ### 3. vm.st
 
@@ -514,6 +518,176 @@ now.
   just noisier), but worth naming so it doesn't read as "negative literals
   don't work" to someone skimming this doc.
 - No new language friction.
+
+### 9. life.st
+
+- Lines: 171. Tests: 10 (10 pass). Passed the gate on the first try (fifth
+  in a row).
+- What it exercises: `Seq.iterate`/`take`/`toList` (first use of the `Seq`
+  module's producer side in the batch — `bfs`/`dfs`/etc. so far all used
+  hand-rolled worklists, not the stdlib's own lazy-sequence machinery), a
+  cellular automaton as the immutable-data showcase (`step` never mutates,
+  every generation is a fresh grid), and a real Conway pattern (a blinker)
+  as the correctness oracle rather than an invented toy case — a period-2
+  oscillator gives a much stronger test than an arbitrary hand-picked grid,
+  since `step(step(g)) == g` is a real structural property, not just "I
+  computed this by hand and it matches."
+
+- **`use <-` breaks self-tail-call trampolining, confirmed empirically
+  before committing to a design.** The obvious way to write "drive N
+  generations, emit a span per tick" is a self-recursive loop with
+  `use <- span("life.generation")` inside it. That doesn't work: `use <-`
+  desugars to the rest of the block becoming a **callback argument** to
+  `span`, so the recursive call ends up inside a lambda `span` invokes, not
+  in the enclosing function's own tail position. `eval_tail_dispatch` only
+  recognizes a *direct* self-call sitting in AST tail position (see vm.st's
+  and this program's own `Env::bind` background) — a call reached through a
+  native's callback doesn't qualify no matter how "tail-shaped" the source
+  looks. Verified with a scratch program (`loop(n) uses Telemetry = n <= 0
+  => 0 | { use <- span("tick")  loop(n - 1) }`, run for 1000 iterations)
+  faulting with `"call stack too deep"` at `MAX_CALL_DEPTH` (48) before
+  writing `life.st`'s real driver — same "get a second, independent
+  opinion before trusting the derivation" instinct as vm.st's and
+  markov.st's Python simulations, just aimed at a language-mechanics
+  question instead of arithmetic.
+  - **Not a bug** — this is the direct, correct consequence of how the
+    trampoline is implemented (recognize a literal self-call in tail
+    position; nothing more general), and `use <-`'s whole design *is*
+    "the rest of the block becomes a callback." The two are simply in
+    tension the moment the callback's body needs to keep recursing.
+  - **The workaround generalizes past this file**: don't drive repeated
+    computation with hand-written self-recursion when you also want a
+    per-iteration effect. Compute the whole sequence first via a *native*
+    loop (`Seq.iterate`/`take`/`toList`, or building a `List` some other
+    way), which costs no Stitch-level call-stack depth no matter how long
+    it is, then walk the already-built list with `each`/`fold` for the
+    effects — those are native loops too, so a callback (`use <-` included)
+    inside *that* lambda never touches the recursion-depth counter, since
+    `each`/`fold` never recurse through the trampoline at all, they iterate
+    in Rust. Any future program in this batch that wants "N repetitions,
+    one effect per repetition" (a future `queue.st`, maybe others) should
+    reach for this shape by default rather than rediscovering the fault.
+- No other new friction — grid indexing (`cellAt`, off-edge = dead) and the
+  `nextCell` rule read exactly like the textbook definition once written as
+  `List.at` chains.
+
+### 10. shell.st
+
+- Lines: 153. Tests: 9 (9 pass). Last program of this ten-program round.
+- What it exercises: `?.` safe navigation through a `Maybe<Profile>` field
+  (`session.user?.name`, first genuine use in the batch — nothing earlier
+  needed a `Maybe`-of-a-`prod` to chain through), a `sum Command` parsed
+  from tokenized input with a graceful catch-all (`Unknown`) rather than a
+  `Result`, and capability rows that genuinely differ per command
+  (`runLs`'s `FsRead` vs. the rest of `runCommand`'s commands, which need
+  none).
+
+- **The static checker's capability-effect propagation is stricter than
+  the runtime's — and inconsistent between plain function calls and method
+  calls.** `runCommand` (a plain function) calling `runLs()` (also a plain
+  function, declaring its own `uses FsRead`) failed the type-check gate:
+  *`"performs an effect that needs `uses FsRead`, which is not declared"`*
+  — on `runCommand`, even though nothing in `runCommand`'s own body
+  performs an FsRead effect directly. `check.rs::walk_effects` (case C2,
+  its own doc comment: *"a called user function propagates its declared
+  `uses`"*) explicitly walks the call graph and requires every caller of a
+  capability-needing function to redeclare that capability, transitively,
+  for **plain function calls** (`CoreExprKind::Call` with a bare-name
+  callee) — a strictly more conservative rule than the *runtime*, which
+  resets authority to exactly a function's own declared `uses` at every
+  call boundary regardless of caller (bank.st's finding, and
+  `natives.rs`'s `shout()/main()` test, from the refusal side). But
+  `walk_effects` only pattern-matches `CoreExprKind::Call`, not
+  `CoreExprKind::MethodCall` — so bank.st's identically-shaped
+  `transferAudited` (`uses FsWrite` only, calling `@transfer` which
+  independently needs `Telemetry`) sailed through the checker clean,
+  because `@transfer(...)` is a *method* call and the effect walker never
+  looks inside one. Two real asymmetries stacked on each other: static
+  vs. runtime (checker is stricter), and function vs. method call syntax
+  (checker only propagates through one of them) — a program can dodge the
+  static requirement entirely just by writing `@method()` instead of
+  `plainFn()`, whether or not that's the receiver shape that actually makes
+  sense for the call. Fixed here by being honest rather than routing around
+  it: `runCommand` and `runLine` both widened to `uses Telemetry, FsRead`,
+  even though `FsRead` is only exercised on the `Ls` branch. Given the
+  checker is explicitly gradual and gaining rules over time
+  (`docs/language-design.md`'s status note), extending C2 to method calls
+  — or documenting the asymmetry as intentional, if dynamic dispatch
+  genuinely makes it infeasible to do soundly — looks like a natural next
+  increment; recorded here rather than fixed, since (unlike the `Str.parseInt`
+  gap) this is a design tradeoff about a type checker's soundness/
+  completeness boundary, not a missing three-line native.
+- No other new friction.
+
+### 11–15: regex.st, csv.st, trie.st, lru.st, elo.st (batch 2 opens)
+
+All five passed the gate on the first try (regex.st, csv.st, trie.st,
+elo.st) or after a self-caught `use List` omission fixed before running
+(lru.st) — the run of "no new friction" programs that started with
+graph.st continued through the whole back half of this session. Grouped
+into one entry since none of them needed a dedicated deep-dive the way
+json.st/bank.st/vm.st/markov.st/life.st/shell.st did; what's below is what
+was worth recording from each.
+
+- **11. regex.st** — 136 lines, 11 tests. A Kernighan-style recursive
+  backtracking matcher (literals, `.`, `*`, `^`/`$`, `|`). Confirms
+  top-level `|` alternation can be handled with a plain `Str.split(pattern,
+  "|")` — safe specifically *because* this toy grammar has no grouping
+  construct, so a literal `|` can never appear nested inside anything else.
+  No `Map` needed (no dictionary anywhere in a regex matcher). No new
+  friction — every nested conditional got parenthesized correctly from the
+  first draft.
+
+- **12. csv.st** — 124 lines, 9 tests. A `Result`-threaded quoted-field
+  parser/writer, deliberately un-recursive-descent (no grammar, just
+  comma/quote state machine) as a register shift from json.st/calc.st's
+  parsers. The round-trip test (`parseCsv(writeCsv(rows)) == Ok(rows)`) is
+  doing double duty as both a correctness check and — like life.st's
+  blinker — a much stronger property than any single hand-picked example.
+  No new friction.
+
+- **13. trie.st** — 148 lines, 9 tests. The sharpest illustration yet of
+  "no `Box` needed for a recursive type" (`Trie` contains `List<TrieEdge>`,
+  `TrieEdge` contains `Trie`, mutually recursive, just works) and, in the
+  same file, the sharpest illustration of the `Map` gap costing something
+  real: a trie's whole point is fast keyed fan-out, and here every branch
+  is a linear scan over `List<TrieEdge>` instead. Filed as a repeat data
+  point for the json.st finding, not a new one — but worth flagging as the
+  program in this batch where the missing native actually costs the
+  *design*, not just verbosity.
+
+- **14. lru.st** — 134 lines, 8 tests. An immutable-value cache
+  (`get`/`put` return a new `Cache`) with memoized Fibonacci threaded
+  explicitly through it — no global mutable cache, so `fibMemo` returns
+  `FibResult(value, cache)` and the caller is responsible for carrying the
+  updated cache into the next call, same shape as bank.st's `mut` write-
+  back discipline but arrived at without needing `mut` at all. `fibMemo`
+  is genuine (non-tail) recursion — two recursive calls combined
+  afterward — so test `n` stayed under `MAX_CALL_DEPTH` (used up to 10;
+  the depth cap from vm.st's/shell.st's/life.st's findings is a hazard for
+  *any* non-tail-recursive function, not just deliberately deep loops, and
+  a naive Fibonacci is the textbook example of one).
+
+- **15. elo.st** — 152 lines, 12 tests, third program using `contract`-
+  dispatched strategies (after sched.st, inventory.st) but the one that hit
+  a stdlib ceiling head-on: **the real Elo formula needs `10^(diff/400)`,
+  and there is no exponentiation, `sqrt`, or any `Float` math native in
+  this interpreter at all** — checked `natives.rs` for `pow`/`exp`/`sqrt`
+  under any name, all absent. Unlike the `Str<->Int` gap (fixed for
+  json.st, two natives, an afternoon), this isn't a small missing native —
+  real transcendental math would need either a `libm`-style dependency
+  (the project's own `kvetch-model` crate takes exactly that dependency,
+  for the same reason) or a from-scratch series approximation, both out of
+  scope for an example-writing session. Worked around, not routed around:
+  `expectedScorePerMille` is a deliberately-labeled **integer, piecewise-
+  linear approximation** of the logistic curve (some real game engines do
+  exactly this), and `marginMultiplierPerMille`'s staircase stands in for
+  the textbook `sqrt(margin+1)` diminishing-returns curve the same way.
+  Both are honest about being approximations in their own doc comments,
+  not silently-wrong stand-ins. **This is the batch's second hard stdlib
+  ceiling** (after `Map` construction) — worth remembering for any later
+  program that reaches for real math (none currently planned need it, but
+  worth flagging before one is written assuming it's available).
 
 - **Not tested in-language, and worth recording why**: wanted a `bank.st`
   test proving a function *without* `uses FsWrite` is refused when it

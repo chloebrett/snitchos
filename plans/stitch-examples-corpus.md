@@ -48,23 +48,27 @@ checks the whole workspace shares), and its `test` blocks pass.
       `Result`-typed errors (div-by-zero, unbound var).
 - [x] 8. `inventory.st` — pluggable pricing via `contract PricingStrategy`,
       per-category telemetry gauges.
-- [ ] 9. `life.st` — Conway's Game of Life over `List<List<Bool>>`, pure
-      `step`, `text.st`-based renderer.
-- [ ] 10. `shell.st` — command dispatcher/mini-REPL, capability-gated
+- [x] 9. `life.st` — Conway's Game of Life over `List<List<Bool>>`, pure
+      `step`, `text.st`-based renderer. (Renderer written inline, not via
+      `use text` — examples parse standalone under the batch's own gate;
+      see corpus doc's Notes section.)
+- [x] 10. `shell.st` — command dispatcher/mini-REPL, capability-gated
        commands, `use <-` + `?.`.
 
 ## Batch 2 — second proposal
 
-- [ ] 11. `regex.st` — tiny regex engine (literal/`.`/`*`/`|`/anchors),
+- [x] 11. `regex.st` — tiny regex engine (literal/`.`/`*`/`|`/anchors),
        recursive backtracking matcher.
-- [ ] 12. `csv.st` — CSV parser/writer, quoted-field handling, `Result`-typed
+- [x] 12. `csv.st` — CSV parser/writer, quoted-field handling, `Result`-typed
        row parsing.
-- [ ] 13. `trie.st` — persistent prefix trie, immutable insert/lookup/
+- [x] 13. `trie.st` — persistent prefix trie, immutable insert/lookup/
        prefixSearch.
-- [ ] 14. `lru.st` — immutable-value LRU cache (`get`/`put` return a new
+- [x] 14. `lru.st` — immutable-value LRU cache (`get`/`put` return a new
        cache), memoized Fibonacci on top.
-- [ ] 15. `elo.st` — Elo rating calculator, `contract RatingSystem` with two
-       `on` strategies (fixed-K vs margin-scaled).
+- [x] 15. `elo.st` — Elo rating calculator, `contract RatingSystem` with two
+       `on` strategies (fixed-K vs margin-scaled). (Elo's real formula is
+       infeasible — no `pow`/`exp`/`sqrt`/`Float` math at all; landed as a
+       documented integer piecewise-linear approximation — see findings.)
 - [ ] 16. `tictactoe.st` — board + win detection + minimax AI.
 - [ ] 17. `maze.st` — BFS pathfinding over a wall grid, tuple coordinates.
 - [ ] 18. `huffman.st` — Huffman coding tree, encode/decode round-trip test.
