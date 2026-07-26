@@ -71,8 +71,12 @@ A single number collapses four different actions into one shrug.
    **not** get a private `check()` convention, because the corpus teaches
    whatever convention it contains, and a convention adopted here for expedience
    would become Stitch's de-facto test idiom.
-2. **What counts as a grammar production** for the coverage metric — open, see
-   the bottom.
+2. **What counts as a grammar production** for the coverage metric — *settled*:
+   **AST node-kind + child-shape pairs** (`Match` with 3 arms and a guard is a
+   distinct production from `Match` with 1 arm). One AST walk, stable across
+   parser refactors, and directly interpretable as "an idiom we have / haven't
+   generated". The oracle's `TokenClass` transitions were the alternative: free,
+   but they count lexical rather than structural variety.
 3. **Where the code lives** — *settled*: a new `sift` crate, depending on
    `stitch` only. `cram-corpus` and `xtask-cram` depend on it. Keeps the funnel
    usable by anything that isn't training (the canon gate, the mutation tester)
@@ -213,23 +217,6 @@ Only once the funnel is trusted, because it multiplies whatever it is given.
 
 27–32B, already installed, costing electricity. Stage 2's gate is yield ≥ ~40%
 with coverage still climbing — which this harness is what measures.
-
----
-
-## Open decision
-
-**What is a "production" for coverage?** The parser is recursive descent,
-so there is no production table to instrument.
-
-- *(recommended)* **AST node-kind + child-shape pairs.** e.g. `Match` with
-  3 arms and a guard is a distinct production from `Match` with 1 arm. Cheap
-  (one AST walk), stable across parser refactors, and directly interpretable as
-  "an idiom we have / haven't generated".
-- **Oracle `TokenClass` transitions.** Closer to the literal grammar and free
-  from the existing oracle, but tied to the token layer, so it counts lexical
-  variety rather than structural variety.
-- **Both, reported separately.** Two curves — more signal, more to build and
-  interpret in increment 6.
 
 ---
 

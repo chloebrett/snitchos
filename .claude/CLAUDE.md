@@ -221,6 +221,33 @@ xtask-itest/  The **snemu-linked** half of xtask: `itest`, the `snemu` group
               twice (tool + tests). See plans/xtask-lean-test-binary.md.
               Caveat: standalone `cargo xtask diagram …` now builds snemu; the
               frequent path (drift via `test`) stays snemu-free.
+xtask-cram/   The **cram-linked** half of xtask: `cram` (train a rung end to
+              end) and the `parse-rate` bin. Same split rationale as
+              `xtask-itest` — an edit to the trainer should not recompile the
+              tool that runs `cargo xtask test`. Built `--release`, since
+              training is a numerics loop where the run dwarfs the compile.
+kvetch-vocab/ no_std + alloc, NO deps. The frozen BPE tokenizer every rung of
+              the model ladder shares. Byte-level, GPT-2-style pre-tokenization
+              (one leading space joins its word; longer whitespace runs stand
+              alone, so an indent run can be one token). Vocab and merge order
+              are **wire law** — same rule as `protocol::Frame`.
+kvetch-model/ no_std + alloc, one dep (`libm`). The transformer forward pass the
+              on-target runner will link, plus the `Rung` registry
+              (drivel/quip/cliché/ballad/saga) and the checkpoint format. **A
+              rung is a config plus a checkpoint, never a crate** — the same
+              additive-registry shape as runtime workloads. Also owns the `Gemm`
+              trait: >95% of training FLOPs are matmul, so one trait carries the
+              whole performance story.
+cram/         Host-side trainer, hand-written — no ML framework. Backward pass,
+              AdamW, training loop, and the fast `Gemm` backends (`BlockedGemm`,
+              `AccelerateGemm` over Apple AMX). Every backward op is checked
+              against finite differences rather than against another
+              implementation; see plans/drivel.md.
+cram-corpus/  Host-only. Tier-0 corpus assembly: babble generation (parallel,
+              byte-identical to sequential), the on-disk cache + manifest,
+              `Layout::{Flat, Printed}`, and `training_text`. **Train on the
+              programs, never the corpus file** — the file's separator is not
+              Stitch, and a model fed the raw file learns to emit it.
 stack/        docker-compose for Tempo + Prometheus + Grafana.
 plans/        Per-milestone and per-refactor implementation plans.
 docs/         Architecture and design.
@@ -248,7 +275,16 @@ cargo xtask build             # just build the kernel ELF
 cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note below)
 cargo xtask diagram <target>  # generate a diagram (deps|itest-matrix|caps|trace|switches) into docs/generated/; --check gates the static ones
 cargo xtask diagram png       # render the hand-drawn mermaid docs to local PNGs (needs mmdc, Node >=18)
+cargo xtask cram --rung drivel    # train a ladder rung end to end: corpus (generated or cached) → vocab → model → checkpoint + loss curve
 ```
+
+**Training (`cargo xtask cram`) reports on itself.** Loss, smoothed loss,
+learning rate, gradient norm, tok/s, elapsed and ETA every N steps, plus a TSV
+curve beside the checkpoint. This is not decoration: a training run's failure
+modes are quiet (a plateau, a halved throughput, a schedule that never warms up),
+and the first run's self-report is what caught a 9-hour extrapolation against a
+15-minute estimate. Checkpoints and corpora are gitignored derived artifacts —
+what's pinned is the generator, the config and the seed.
 
 **Diagrams:** the `diagram` crate + `cargo xtask diagram` draw the workspace's
 diagrams. Static targets (`deps`, `itest-matrix`) are `--check`-gated (drift

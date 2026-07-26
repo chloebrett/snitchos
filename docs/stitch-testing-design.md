@@ -231,10 +231,10 @@ or the Stitch runtime.
    above. The counter-argument is that every other declaration binds an
    identifier, and a string name cannot be referenced — though nothing needs to
    reference it, and `--filter "pad widens"` is the only access anyone wants.
-2. **Is `expect` a keyword or a lowering of an existing form?** It needs
-   unevaluated operands either way. A keyword is honest; a macro-ish desugar
-   keeps the keyword count down. Recommended: keyword, because the grammar has
-   no macro concept and inventing one for this is a much larger commitment.
+2. ~~**Is `expect` a keyword or a lowering of an existing form?**~~ *Settled
+   (2026-07-26): a keyword.* It needs unevaluated operands either way, and the
+   grammar has no macro concept — inventing one for this is a much larger
+   commitment than one keyword.
 3. **Setup/fixtures.** Deliberately omitted above. A test is a block; shared
    setup is a function call. Recommended: ship nothing, and see whether the
    canon actually wants more.
