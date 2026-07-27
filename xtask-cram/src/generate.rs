@@ -147,6 +147,19 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
                 // has (`docs/kvetch-rl-design.md` §5).
                 if let Some(dir) = &options.out {
                     save(dir, index, &run)?;
+                    // Rewrite the manifest after every candidate rather than at
+                    // the end. A long batch is very likely to be interrupted —
+                    // and one that was lost every verdict it had already earned,
+                    // leaving a directory of programs with no record of what the
+                    // gate said about any of them.
+                    write_manifest(
+                        dir,
+                        &header,
+                        batch_started.elapsed().as_secs_f64(),
+                        &tally,
+                        &records,
+                        options.count,
+                    )?;
                 }
             }
             Err(error) => {

@@ -94,6 +94,16 @@ user?.address                            // safe navigation
 toStr(n)                                 // Int -> Str, NOT n.toString()
 Str.parseInt(s)                          // Str -> Maybe<Int>
 
+// Collections have NO methods and NO indexing. Everything is a free function:
+count(xs)                                // NOT xs.count
+List.at(xs, i) |> unwrapOr(0)            // NOT xs[i]
+xs |> first |> unwrapOr(0)               // the first element, or a default
+
+// A module-qualified name needs its import, or the call fails at *run* time
+// with no type error to warn you:
+use List                                 // required before any List.…
+use Str                                  // required before any Str.…
+
 // Pipes and lambdas. A pipe supplies the FIRST argument, so these are identical:
 fold(xs, 0, (acc, x) -> acc + x)
 xs |> fold(0, (acc, x) -> acc + x)
