@@ -189,6 +189,12 @@ workloads! {
         /// the whole serving path — protocol, serve loop, telemetry, seed
         /// discipline — before any checkpoint exists. `docs/babble-design.md`.
         KvetchBabble,
+        /// The same endpoint served from **weights**: a `kvetch-drivel-server`
+        /// (rung 1, the trained `drivel-all-30k` checkpoint embedded in its own
+        /// image) plus the same fixed-prefix client. Deliberately the `KvetchBabble`
+        /// layout with a different server behind it, so the two rungs are comparable
+        /// on one prompt. `plans/kvetch-drivel-on-target.md`.
+        KvetchDrivel,
         /// Many long-**lived** tasks: spawn a large fixed set of tasks that each
         /// loop-yield forever (never exit), so the scheduler's task table genuinely
         /// holds N *live* entries. Stresses the O(1) `TaskDirectory` lookup — the
@@ -291,6 +297,11 @@ workloads! {
         /// reports cleanly, where without it a deep overflow would double-fault on the
         /// overflowed stack. `itest-workloads` only.
         StackOverflowDeep,
+        /// The Stitch REPL with **trained** completion: the drivel-backed server plus
+        /// the REPL holding `SEND` on it, so Tab at the prompt is answered by weights
+        /// rather than by a uniform walk. `StitchKvetch`'s twin, and the comparison
+        /// the ladder exists to make.
+        StitchDrivel,
         /// The Stitch REPL with a filesystem: a seeded FS server plus the REPL
         /// holding the FS endpoint cap, so `:load <name>` reads a baked-in `.st`
         /// file off the ramfs and runs it.
@@ -740,6 +751,19 @@ mod tests {
     #[test]
     fn selects_fp_churn() {
         assert_eq!(select("workload=fp-churn"), Some(WorkloadKind::FpChurn));
+    }
+
+    #[test]
+    fn selects_kvetch_drivel() {
+        assert_eq!(select("workload=kvetch-drivel"), Some(WorkloadKind::KvetchDrivel));
+        // The two rungs must not alias: they are the comparison.
+        assert_ne!(select("workload=kvetch-drivel"), Some(WorkloadKind::KvetchBabble));
+    }
+
+    #[test]
+    fn selects_stitch_drivel() {
+        assert_eq!(select("workload=stitch-drivel"), Some(WorkloadKind::StitchDrivel));
+        assert_ne!(select("workload=stitch-drivel"), Some(WorkloadKind::StitchKvetch));
     }
 
     #[test]

@@ -995,7 +995,10 @@ name = "kvetch"
 version = "0.0.1"
 dependencies = [
  "babble",
+ "kvetch-model",
  "kvetch-proto",
+ "kvetch-serve",
+ "kvetch-vocab",
  "snitchos-std",
  "snitchos-user",
 ]
@@ -1012,6 +1015,17 @@ name = "kvetch-proto"
 version = "0.0.1"
 dependencies = [
  "snitchos-abi",
+]
+
+[[package]]
+name = "kvetch-serve"
+version = "0.0.1"
+dependencies = [
+ "kvetch-model",
+ "kvetch-proto",
+ "kvetch-vocab",
+ "libm",
+ "stitch",
 ]
 
 [[package]]

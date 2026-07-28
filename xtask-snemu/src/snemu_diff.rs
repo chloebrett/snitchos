@@ -860,6 +860,15 @@ pub fn ram_mb_for(workload: Option<&str>) -> u32 {
         // teeth that clearly exceed the machine rather than leaning on kernel
         // overhead (the old 30 × 4 = 120 barely under 128). See `reaper.rs`.
         Some("spawn-reap") => 48,
+        // The drivel rung carries its weights in its image: a ~4.5 MiB ELF, copied
+        // into user frames at load, then decoded into ~4.2 MiB of `Vec<f32>` on the
+        // process heap — ~13 MiB before the kernel's own image, page tables and
+        // heap, which does not fit a 16 MiB machine (it fails as `OutOfFrames` at
+        // load, not as an allocation failure at run time). 64 MiB gives the two
+        // copies room without pretending this is a small program. Removing the heap
+        // copy — borrowing the weights straight from the mapped image — is the
+        // change that would win most of this back; see the plan's step 7.
+        Some("kvetch-drivel" | "stitch-drivel") => 64,
         _ => DEFAULT_MB,
     }
 }

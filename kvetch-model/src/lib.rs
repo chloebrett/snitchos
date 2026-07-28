@@ -276,10 +276,30 @@ const CHECKPOINT_MAGIC: [u8; 8] = *b"KVETCHCK";
 
 /// Bumped whenever the header or weight layout changes. Old checkpoints are
 /// then refused rather than silently misread.
-const CHECKPOINT_VERSION: u32 = 1;
+///
+/// **Version 2 appends the vocab fingerprint** (two `u32`s, low half first). Version
+/// 1 is still *read* — it decodes with a fingerprint of `0`, meaning "unstamped" —
+/// because refusing it would have stranded every checkpoint trained before the field
+/// existed and forced a retrain to recover numbers that are still valid. Writing is
+/// always version 2, so a stamp is one decode-and-re-encode away. New versions may
+/// drop old readers; this one had a cheap reason not to.
+const CHECKPOINT_VERSION: u32 = 2;
 
-/// Magic plus seven `u32` header fields.
+/// The first version this build can read. See [`CHECKPOINT_VERSION`].
+const CHECKPOINT_MIN_VERSION: u32 = 1;
+
+/// Magic plus seven `u32` header fields (version 1).
 const CHECKPOINT_HEADER: usize = 8 + 7 * 4;
+
+/// Version 2 adds the fingerprint's two `u32` halves.
+const CHECKPOINT_HEADER_V2: usize = CHECKPOINT_HEADER + 2 * 4;
+
+/// A checkpoint that predates the vocab fingerprint reads back as this.
+///
+/// Distinguishable from every real fingerprint because [`Vocab::fingerprint`] is
+/// FNV-1a over a non-empty serialization, which cannot produce zero for any vocab —
+/// so "unstamped" is a state a caller can act on rather than a value it must guess at.
+pub const UNSTAMPED: u64 = 0;
 
 /// `RMSNorm`'s denominator guard.
 const NORM_EPS: f32 = 1e-5;
@@ -303,6 +323,9 @@ pub struct Model {
     config: ModelConfig,
     vocab: usize,
     weights: Vec<f32>,
+    /// Identity of the vocab this model was trained against, or [`UNSTAMPED`].
+    /// See [`Model::vocab_fingerprint`].
+    vocab_fingerprint: u64,
 }
 
 impl Model {
@@ -315,7 +338,31 @@ impl Model {
             config,
             vocab,
             weights,
+            vocab_fingerprint: UNSTAMPED,
         })
+    }
+
+    /// Record which vocab this model was trained against.
+    ///
+    /// A builder rather than a `new` parameter so the trainer opts in at the one
+    /// place that knows the answer, and every existing caller keeps compiling with
+    /// the honest default ([`UNSTAMPED`]) rather than being handed a plausible
+    /// wrong value to satisfy a signature.
+    #[must_use]
+    pub fn stamped_with(mut self, vocab_fingerprint: u64) -> Self {
+        self.vocab_fingerprint = vocab_fingerprint;
+        self
+    }
+
+    /// The fingerprint of the vocab this model was trained against, or
+    /// [`UNSTAMPED`] for a checkpoint written before the field existed.
+    ///
+    /// A server should refuse both a mismatch *and* `UNSTAMPED`: unverifiable is not
+    /// the same as verified, and the failure it guards against — fluent nonsense from
+    /// a same-size stranger vocab — is silent everywhere else.
+    #[must_use]
+    pub const fn vocab_fingerprint(&self) -> u64 {
+        self.vocab_fingerprint
     }
 
     pub const fn config(&self) -> ModelConfig {
@@ -346,9 +393,11 @@ impl Model {
             self.config.ffn as u32,
             self.vocab as u32,
             self.weights.len() as u32,
+            self.vocab_fingerprint as u32,
+            (self.vocab_fingerprint >> 32) as u32,
         ];
 
-        let mut out = Vec::with_capacity(CHECKPOINT_HEADER + self.weights.len() * 4);
+        let mut out = Vec::with_capacity(CHECKPOINT_HEADER_V2 + self.weights.len() * 4);
         out.extend_from_slice(&CHECKPOINT_MAGIC);
         for field in header {
             out.extend_from_slice(&field.to_le_bytes());
@@ -379,7 +428,8 @@ impl Model {
             ) as usize)
         };
 
-        if field(0)? != CHECKPOINT_VERSION as usize {
+        let version = field(0)? as u32;
+        if !(CHECKPOINT_MIN_VERSION..=CHECKPOINT_VERSION).contains(&version) {
             return None;
         }
         let config = ModelConfig {
@@ -391,7 +441,16 @@ impl Model {
         let vocab = field(5)?;
         let declared = field(6)?;
 
-        let payload = bytes.get(CHECKPOINT_HEADER..)?;
+        // Version 1 has no fingerprint and no room for one; it reads as `UNSTAMPED`.
+        let (header_len, vocab_fingerprint) = if version >= 2 {
+            let low = field(7)? as u64;
+            let high = field(8)? as u64;
+            (CHECKPOINT_HEADER_V2, low | (high << 32))
+        } else {
+            (CHECKPOINT_HEADER, UNSTAMPED)
+        };
+
+        let payload = bytes.get(header_len..)?;
         if payload.len() != declared * 4 {
             return None;
         }
@@ -403,7 +462,7 @@ impl Model {
 
         // `new` re-derives the expected count from the config, so a header
         // whose dimensions disagree with its own weight count is caught here.
-        Self::new(config, vocab, weights)
+        Self::new(config, vocab, weights).map(|model| model.stamped_with(vocab_fingerprint))
     }
 
     /// Logits for every position, using the reference multiply.
@@ -944,6 +1003,44 @@ mod tests {
             "weights must survive bit-for-bit; a lossy checkpoint silently \
              changes the model between training and serving"
         );
+    }
+
+    #[test]
+    fn a_checkpoint_carries_the_fingerprint_of_the_vocab_it_was_trained_with() {
+        // The whole point: weights and vocab travel together, so a server can refuse
+        // a pairing nobody trained rather than serve fluent nonsense from it.
+        let stamped = tiny_model().stamped_with(0xfeed_face_dead_beef);
+
+        let restored = Model::decode(&stamped.encode()).expect("own output must decode");
+
+        assert_eq!(restored.vocab_fingerprint(), 0xfeed_face_dead_beef);
+    }
+
+    #[test]
+    fn a_checkpoint_written_before_fingerprints_still_loads_as_unstamped() {
+        // Version 1 is still readable on purpose: refusing it would have stranded
+        // every checkpoint trained before the field existed and forced a retrain to
+        // recover numbers that are still valid. It reads as `UNSTAMPED`, which a
+        // server can refuse on its own terms — unverifiable is not verified.
+        let model = tiny_model();
+        let mut v1 = model.encode();
+        // Rewrite the header as version 1: drop the two fingerprint words and set the
+        // version field back.
+        v1.splice(CHECKPOINT_HEADER..CHECKPOINT_HEADER_V2, core::iter::empty());
+        v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+
+        let restored = Model::decode(&v1).expect("version 1 must still load");
+
+        assert_eq!(restored.vocab_fingerprint(), UNSTAMPED);
+        assert_eq!(restored.weights(), model.weights());
+    }
+
+    #[test]
+    fn a_checkpoint_from_a_future_version_is_refused_rather_than_guessed_at() {
+        let mut future = tiny_model().encode();
+        future[8..12].copy_from_slice(&(CHECKPOINT_VERSION + 1).to_le_bytes());
+
+        assert!(Model::decode(&future).is_none());
     }
 
     #[test]

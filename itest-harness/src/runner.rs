@@ -67,20 +67,28 @@ pub struct Scenario {
     /// read one boot. Declared on the catalog row via `on_workload`; see
     /// `plans/legacy/itest-shared-boot-mode.md`.
     pub workload: Option<&'static str>,
+    /// Excluded from an unfiltered run; included when named or tag-selected.
+    ///
+    /// For scenarios whose *cost* — not whose correctness — makes them unfit for a
+    /// gate that must stay in the seconds. The whole suite is ~7s; one minutes-long
+    /// scenario would dominate it and make the gate something people avoid running,
+    /// which costs more coverage than the scenario provides. Opting out keeps it a
+    /// first-class, named, runnable test instead of a commented-out one.
+    pub opt_in: bool,
 }
 
 impl Scenario {
     /// New `Wfi`-profile scenario. Const-fn so it composes inside
     /// `const SCENARIOS: &[Scenario]` arrays.
     pub const fn new(name: &'static str, run: fn() -> Result<(), String>) -> Self {
-        Self { name, run, cpu_profile: CpuProfile::Wfi, tags: &[], workload: None }
+        Self { name, run, cpu_profile: CpuProfile::Wfi, tags: &[], workload: None, opt_in: false }
     }
 
     /// New `Cpu`-profile scenario. For scenarios that run real
     /// guest CPU work between heartbeats — allocator pressure
     /// loops, context-switch storms, etc. Same const-fn property.
     pub const fn cpu_bound(name: &'static str, run: fn() -> Result<(), String>) -> Self {
-        Self { name, run, cpu_profile: CpuProfile::Cpu, tags: &[], workload: None }
+        Self { name, run, cpu_profile: CpuProfile::Cpu, tags: &[], workload: None, opt_in: false }
     }
 
     /// Annotate with selection tags. Chainable and const so it composes
@@ -100,6 +108,13 @@ impl Scenario {
         self.workload = Some(workload);
         self
     }
+
+    /// Keep this scenario out of an unfiltered run. See [`Scenario::opt_in`].
+    #[must_use]
+    pub const fn opt_in(mut self) -> Self {
+        self.opt_in = true;
+        self
+    }
 }
 
 /// Select scenarios carrying any of the requested `tags` (set union):
@@ -115,7 +130,10 @@ pub fn select_by_tags<'a>(
     tags: &[String],
 ) -> Result<Vec<&'a Scenario>, String> {
     if tags.is_empty() {
-        return Ok(scenarios.to_vec());
+        // An unfiltered run is the gate, and the gate is what people run before every
+        // commit — so it excludes the opt-in scenarios. Asking for a tag (or a name)
+        // is an explicit choice to pay for them.
+        return Ok(scenarios.iter().copied().filter(|s| !s.opt_in).collect());
     }
     if let Some(unknown) = tags
         .iter()
@@ -1721,6 +1739,34 @@ mod tests {
 
     fn names(scns: &[&Scenario]) -> Vec<&'static str> {
         scns.iter().map(|s| s.name).collect()
+    }
+
+    /// An unfiltered run is the gate. A scenario that costs minutes must not be in
+    /// it: the whole suite is seconds, and a gate people avoid running because it is
+    /// slow protects nothing.
+    #[test]
+    fn an_unfiltered_run_leaves_out_the_opt_in_scenarios() {
+        let catalog = [
+            Scenario::new("fast", always_pass),
+            Scenario::new("slow", always_pass).tagged(&["kvetch"]).opt_in(),
+        ];
+        let refs: Vec<&Scenario> = catalog.iter().collect();
+
+        assert_eq!(names(&select_by_tags(&refs, &[]).unwrap()), vec!["fast"]);
+    }
+
+    /// ...but asking for it by tag is an explicit choice to pay for it, so it runs.
+    /// Excluded-by-default must not mean unreachable — that is a commented-out test
+    /// wearing a flag.
+    #[test]
+    fn asking_for_an_opt_in_scenarios_tag_runs_it() {
+        let catalog = [
+            Scenario::new("fast", always_pass),
+            Scenario::new("slow", always_pass).tagged(&["kvetch"]).opt_in(),
+        ];
+        let refs: Vec<&Scenario> = catalog.iter().collect();
+
+        assert_eq!(names(&select_by_tags(&refs, &["kvetch".to_string()]).unwrap()), vec!["slow"]);
     }
 
     #[test]

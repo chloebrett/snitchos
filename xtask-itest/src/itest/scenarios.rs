@@ -1151,6 +1151,92 @@ pub fn kvetch_babble_serves(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Rung 1 on the same endpoint (`workload=kvetch-drivel`): the completion server
+/// backed by the trained `drivel-all-30k` checkpoint answers the same fixed request
+/// babble answers.
+///
+/// What a pass actually proves, none of which the host tests can:
+///
+/// - a **4.5 MB** user ELF — 7× the largest before it — loads, maps W^X and runs;
+/// - `Model::decode` fits inside the 16 MiB per-process heap alongside its own
+///   rodata copy;
+/// - the embedded checkpoint and vocab agree, since a mismatch would refuse every
+///   request instead of serving one;
+/// - a transformer forward pass runs in U-mode on the emulated hardware at all,
+///   which needs the FP unit this morning's context-switching work handed out.
+///
+/// Byte-exactness against a host recomputation is step 5's job; this asserts the
+/// path exists and answers.
+pub fn kvetch_drivel_serves(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 60, is_span_start_named("kvetch.complete")).ok_or(
+        "no 'kvetch.complete' span — the drivel server never received a request. If it \
+         refused the pairing, the checkpoint and vocab in checkpoints/ disagree (see \
+         `cargo xtask cram --stamp`); if it never started, the 4.5 MB image did not load",
+    )?;
+
+    h.wait_for(SEC * 60, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.kvetch.client.written")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "the client got no bytes back — the server opened a span but the sampler produced \
+         nothing, which means every candidate the model proposed was refused by the oracle",
+    )?;
+
+    Ok(())
+}
+
+/// `workload=stitch-drivel`: Tab at the Stitch prompt is answered by **weights**.
+///
+/// The payoff scenario — the first place a person meets a trained rung rather than a
+/// uniform walk — and structurally `stitch-kvetch-completes` with a different server
+/// behind the same endpoint. Keeping the two bodies parallel is deliberate: a
+/// difference in outcome is then a difference in the model, which is the comparison
+/// the whole ladder exists to make.
+pub fn stitch_drivel_completes(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 60, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test")?;
+
+    h.send_input(b"let x =\t").map_err(|e| format!("inject REPL input: {e}"))?;
+
+    h.wait_for(SEC * 60, |f, strings| match f {
+        OwnedFrame::Metric { name_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.stitch.completions_asked")
+        }
+        _ => false,
+    })
+    .ok_or("the REPL never asked — the grammar settled the position, or Tab was dropped")?;
+
+    h.wait_for(SEC * 60, is_span_start_named("kvetch.complete")).ok_or(
+        "no 'kvetch.complete' span — Tab never reached the drivel server: it refused its \
+         checkpoint/vocab pairing, or the REPL fell back to its grammar-only menu",
+    )?;
+
+    h.wait_for(SEC * 60, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.kvetch.bytes_emitted_total")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "the server answered with no bytes — every token the model proposed was refused by \
+         the oracle, which means the mask and the checkpoint disagree about this prefix",
+    )?;
+
+    // The suggestion has to reach the *terminal*, not merely the wire: the client
+    // re-validates it and shows the grammar menu instead if it refuses, which looks
+    // identical from the frame stream. Waiting on the prompt line is what tells the
+    // two apart — and it puts the completion in the failure log, where a human can
+    // see what the rung actually said.
+    h.wait_for_log(SEC * 30, "stitch> let x =")?;
+
+    Ok(())
+}
+
 /// The client's request, mirrored from `user/kvetch/src/bin/kvetch-client.rs`.
 /// Changing either side without the other is what the scenario exists to catch.
 const KVETCH_PREFIX: &str = "greet(name) {";

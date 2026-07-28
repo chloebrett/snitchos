@@ -1,0 +1,29 @@
+[package]
+name = "kvetch-serve"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Answering a completion request *from weights* — babble's opposite number. babble
+# is the same shape with no model behind it, and the two are deliberately
+# interchangeable: same request, same guarantee, different rung.
+[dependencies]
+# The forward pass and the checkpoint format.
+kvetch-model = { path = "../kvetch-model" }
+# The frozen tokenizer. A checkpoint means nothing without the vocab it was
+# trained against — see `Fingerprint`.
+kvetch-vocab = { path = "../kvetch-vocab" }
+# The continuation oracle. The model chooses among legal continuations; it never
+# decides what is legal. Same dependency, and the same reason, as babble's.
+stitch = { path = "../stitch" }
+# The completion-endpoint wire types.
+kvetch-proto = { path = "../kvetch-proto" }
+# `exp` for the softmax. `core` has no transcendentals, and this is the same
+# dependency (and the same justification) `kvetch-model` already carries.
+libm = "0.2"
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false

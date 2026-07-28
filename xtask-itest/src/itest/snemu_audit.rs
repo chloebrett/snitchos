@@ -1347,6 +1347,13 @@ fn budget_for(name: &str, default: u64) -> u64 {
         // trivial in release (~8M) but ~407M in the debug kernel, just over the
         // default. Budget it for the debug fidelity run; release finishes far under.
         "stim-edits-a-file-and-saves" => 600_000_000,
+        // One drivel completion is a transformer forward pass per token, over a
+        // growing prefix, with no KV cache — measured at 4-8B guest instructions
+        // (~90s under snemu), against an estimate of 0.2-0.5B that was wrong by more
+        // than an order of magnitude. Both scenarios are `slow` (opt-in) for exactly
+        // this reason; the budget is what lets them pass when asked for. Step 7 of
+        // plans/kvetch-drivel-on-target.md is what brings this number down.
+        "kvetch-drivel-serves" | "stitch-drivel-completes" => 8_000_000_000,
         // `stitch-fs-loads-and-runs` no longer needs an override: `primes(5)`
         // (down from `(10)`) reaches its assertion in ~310M instructions, under
         // the default budget.

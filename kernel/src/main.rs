@@ -560,7 +560,9 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::StitchRepl
             | WorkloadKind::StitchFs
             | WorkloadKind::KvetchBabble
+            | WorkloadKind::KvetchDrivel
             | WorkloadKind::StitchKvetch
+            | WorkloadKind::StitchDrivel
             | WorkloadKind::SpawnImage
             | WorkloadKind::ManifestIface
             | WorkloadKind::ManifestSatisfy
@@ -685,7 +687,9 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::StitchRepl
                     | WorkloadKind::StitchFs
                     | WorkloadKind::KvetchBabble
-            | WorkloadKind::StitchKvetch
+                    | WorkloadKind::KvetchDrivel
+                    | WorkloadKind::StitchKvetch
+                    | WorkloadKind::StitchDrivel
                     | WorkloadKind::SpawnImage
                     | WorkloadKind::ManifestIface
                     | WorkloadKind::ManifestSatisfy

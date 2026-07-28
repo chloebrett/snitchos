@@ -14,6 +14,8 @@
 
 use babble::serve::handle_request;
 use kvetch_proto::{Complete, Reply, Status, request_seed};
+use kvetch_serve::model::ModelLogits;
+use kvetch_serve::serve::Server;
 use snitchos_user::{
     Endpoint, Metric, copy_from_caller, copy_to_caller, delegated_handle, register_counter, reply,
     tracer,
@@ -41,8 +43,52 @@ const SCRATCH: usize = 512;
 /// QEMU and hardware.
 const BOOT_SEED: u64 = 0;
 
-/// Serve completions over this process's endpoint forever.
+/// Serve completions from babble — the weight-free rung 0.
 pub fn serve() -> ! {
+    serve_with(handle_request)
+}
+
+/// Serve completions from a trained checkpoint.
+///
+/// `checkpoint` and `vocab` are the embedded pair. If they were not trained
+/// together — or the checkpoint predates the fingerprint field — this **does not
+/// die**: it serves `Malformed` to every request, loudly, forever.
+///
+/// Dying would be the tidier-looking choice and it is the wrong one. A completion
+/// client blocks in `call` on an endpoint whose server is gone, with no refusal and
+/// no timeout; the symptom surfaces two processes away as "the REPL stopped
+/// responding". (That is not hypothetical — it is exactly how the FP one-holder guard
+/// presented before it was found. See `plans/legacy/fp-context-switching.md`.) A
+/// server that cannot do its job should answer, not vanish.
+pub fn serve_model(checkpoint: &[u8], vocab: &[u8]) -> ! {
+    let paired = kvetch_vocab::Vocab::decode_vocab(vocab)
+        .zip(kvetch_model::Model::decode(checkpoint))
+        .and_then(|(vocab, model)| {
+            let logits = ModelLogits::new(model);
+            let fingerprint = logits.vocab_fingerprint();
+            Server::new(logits, vocab, fingerprint)
+        });
+
+    let Some(server) = paired else {
+        register_counter("snitchos.kvetch.pairing_refused").emit(1);
+        snitchos_user::debug_write(
+            b"kvetch: refusing to serve - the embedded checkpoint and vocab were not \
+              trained together (or the checkpoint is unstamped)",
+        );
+        serve_with(|_, _, _, _| malformed());
+    };
+
+    serve_with(move |buf, prefix_len, max_tokens, seed| {
+        server.handle_request(buf, prefix_len, max_tokens, seed)
+    })
+}
+
+/// The receive loop, over whatever answers a request.
+///
+/// One loop for both rungs so the endpoint behaviour — spans, counters, the
+/// copy-in/copy-out dance, the seed sequence — cannot drift between them. A drivel
+/// completion and a babble completion differ in the opinion, not the protocol.
+fn serve_with<F: FnMut(&mut [u8], usize, u32, u64) -> Reply>(mut answer: F) -> ! {
     let requests: Metric = register_counter("snitchos.kvetch.requests_total");
     let tokens: Metric = register_counter("snitchos.kvetch.bytes_emitted_total");
     // The seed each completion was drawn with, on the wire. This is what makes a
@@ -97,7 +143,7 @@ pub fn serve() -> ! {
         // The client's buffer bounds what we may write back, so the sampler is
         // given exactly that much room.
         let room = (request.cap as usize).min(SCRATCH);
-        let answer = handle_request(&mut scratch[..room], prefix_len, request.max_tokens, seed);
+        let answer = answer(&mut scratch[..room], prefix_len, request.max_tokens, seed);
 
         if answer.status == Status::Ok && answer.written > 0 {
             let written = answer.written as usize;

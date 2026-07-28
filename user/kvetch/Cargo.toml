@@ -16,6 +16,11 @@ snitchos-user = { path = "../runtime" }
 snitchos-std = { path = "../std" }
 babble = { path = "../../babble" }
 kvetch-proto = { path = "../../kvetch-proto" }
+# Rung 1: the same endpoint answered from a trained checkpoint. The two servers
+# share `serve_with`, so the protocol cannot drift between rungs.
+kvetch-serve = { path = "../../kvetch-serve" }
+kvetch-model = { path = "../../kvetch-model" }
+kvetch-vocab = { path = "../../kvetch-vocab" }
 
 [lints]
 workspace = true

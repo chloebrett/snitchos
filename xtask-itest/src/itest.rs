@@ -158,6 +158,10 @@ fn unreached_run() -> Result<(), String> {
 /// real guest work (a serial pass); tags feed `--tag` selection; the
 /// braced workload is the `workload=` bootarg + the shared-boot grouping
 /// key. (`cpu_bound` classification per plans/legacy/itest-parallel-scenarios.md.)
+///
+/// A third profile, `slow`, is cpu-bound **and opt-in**: excluded from an
+/// unfiltered run, still runnable by name or by tag. For scenarios whose cost, not
+/// whose value, makes them unfit for a gate that has to stay in the seconds.
 macro_rules! catalog {
     ( $(
         $profile:ident $name:literal $func:path
@@ -179,6 +183,7 @@ macro_rules! catalog {
     };
     (@meta wfi $name:literal) => { Scenario::new($name, unreached_run) };
     (@meta cpu $name:literal) => { Scenario::cpu_bound($name, unreached_run) };
+    (@meta slow $name:literal) => { Scenario::cpu_bound($name, unreached_run).opt_in() };
 }
 
 catalog! {
@@ -205,6 +210,11 @@ catalog! {
     cpu "glitch-beep-plays"               scenarios::glitch_beep_plays              [audio]         {"glitch-beep"};
     cpu "kvetch-babble-serves"            scenarios::kvetch_babble_serves           [kvetch]        {"kvetch-babble"};
     cpu "fp-survives-context-switch"      scenarios::fp_survives_context_switch     [fp, sched]     {"fp-churn"};
+    // Opt-in: one drivel completion is 4-8B guest instructions (~90s under snemu),
+    // against a whole-suite budget of ~7s. Run it with `--tag kvetch` or by name.
+    // Step 7 of plans/kvetch-drivel-on-target.md is what earns it a place in the gate.
+    slow "kvetch-drivel-serves"           scenarios::kvetch_drivel_serves           [kvetch]        {"kvetch-drivel"};
+    slow "stitch-drivel-completes"        scenarios::stitch_drivel_completes        [kvetch, stitch] {"stitch-drivel"};
     cpu "stitch-kvetch-completes"         scenarios::stitch_kvetch_completes        [kvetch, stitch] {"stitch-kvetch"};
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};

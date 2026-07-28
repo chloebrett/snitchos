@@ -24,9 +24,15 @@ target
 # is also the worst thing to keep in git — many MB of f32 that re-diffs in full
 # on every run.
 #
-# One exception is coming: the plan enshrines a single tiny drivel checkpoint as
-# the deterministic eval fixture (plans/drivel.md). Force-add that one file when
-# it exists rather than un-ignoring the directory.
+# One exception, force-added rather than un-ignored so the directory stays a
+# scratch space: `drivel-all-30k.kvetch` + `.vocab`. Once a checkpoint is embedded
+# in a program the kernel boots it stops being a by-product and becomes a contract
+# — a fresh clone must build the same guest, and an itest asserts a byte-exact
+# completion against those weights. Both halves travel together: a checkpoint
+# without its vocab is not a fixture, it is a mispairing waiting to happen (the
+# vocab fingerprint in the checkpoint header is what catches that). Replace them
+# rarely and in one commit; each version costs 4.2 MB of history forever.
+# See plans/kvetch-drivel-on-target.md.
 /checkpoints
 
 # RustRover

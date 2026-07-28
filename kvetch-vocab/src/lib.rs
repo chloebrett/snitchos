@@ -165,6 +165,31 @@ impl Vocab {
         out
     }
 
+    /// A 64-bit identity for this vocab, over its serialized form.
+    ///
+    /// **What it is for.** A checkpoint's weights are meaningless without the vocab
+    /// they were trained against, and a mispairing is the worst kind of bug: every
+    /// array is the right size, every id is in range, and the model emits fluent
+    /// nonsense. `cram` stores this in the checkpoint header so the checkpoint
+    /// asserts its own provenance, rather than something downstream asserting a
+    /// coincidence of sizes.
+    ///
+    /// Over `encode_vocab()` rather than over `self.merges` directly, so it covers
+    /// exactly what a reader will reconstruct — including **merge order**, which is
+    /// half of what a vocab *is* and the half a token count silently ignores.
+    ///
+    /// FNV-1a: a dozen lines, no dependency, `no_std`. This guards against an
+    /// accident — a half-updated pair, a copied filename — not against an adversary,
+    /// and nothing here should be read as a security property.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        self.encode_vocab().iter().fold(OFFSET, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+        })
+    }
+
     /// Load a serialized vocab, or `None` if it is not one this build can read.
     ///
     /// Every rejection is `None` rather than a panic or a guess, for the same
@@ -368,6 +393,47 @@ fn collapse_pair(ids: &[TokenId], pair: (TokenId, TokenId), merged_id: TokenId) 
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    /// **The check a token count cannot make.** Vocab size is a frozen
+    /// hyper-parameter — 2048 across the whole ladder — so "both have N tokens" is
+    /// true of every mispairing anyone could actually make. What distinguishes two
+    /// vocabs is the merge list and its order, because that is what decides what a
+    /// token id *means*. Pair a checkpoint with a same-size stranger and every array
+    /// is the right length, every index is in range, and the output is fluent
+    /// nonsense with nothing reporting a problem.
+    #[test]
+    fn two_vocabs_of_the_same_size_but_different_merges_fingerprint_differently() {
+        let left = Vocab::with_merges(&[(101, 102), (103, 104)]);
+        let right = Vocab::with_merges(&[(105, 106), (107, 108)]);
+        assert_eq!(left.len(), right.len(), "the test is only interesting at equal size");
+        assert_ne!(left.fingerprint(), right.fingerprint());
+    }
+
+    /// Merge *order* is part of a vocab's identity: the same pairs learned in a
+    /// different order tokenize differently, so they must not share a fingerprint.
+    #[test]
+    fn the_same_merges_in_a_different_order_fingerprint_differently() {
+        let forward = Vocab::with_merges(&[(101, 102), (103, 104)]);
+        let reversed = Vocab::with_merges(&[(103, 104), (101, 102)]);
+        assert_eq!(forward.len(), reversed.len());
+        assert_ne!(forward.fingerprint(), reversed.fingerprint());
+    }
+
+    #[test]
+    fn a_vocab_fingerprints_the_same_every_time() {
+        // It is stored in a checkpoint and compared on another machine, so it has to
+        // be a pure function of the vocab — no addresses, no iteration order.
+        let vocab = Vocab::with_merges(&[(65, 66), (67, 68), (256, 67)]);
+        assert_eq!(vocab.fingerprint(), Vocab::with_merges(&[(65, 66), (67, 68), (256, 67)]).fingerprint());
+    }
+
+    #[test]
+    fn the_fingerprint_is_never_zero_because_zero_means_unstamped() {
+        // A checkpoint written before fingerprints existed reads back as 0, and the
+        // server refuses that. A real vocab must never collide with it.
+        assert_ne!(Vocab::byte_level().fingerprint(), 0);
+        assert_ne!(Vocab::with_merges(&[(65, 66)]).fingerprint(), 0);
+    }
 
     /// Inputs chosen to break a tokenizer that assumes ASCII, assumes
     /// non-empty, or loses whitespace — the three ways a roundtrip silently

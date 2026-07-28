@@ -208,6 +208,13 @@ pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE
 /// The `kvetch-babble` completion server: babble behind an IPC endpoint.
 pub static KVETCH_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KVETCH_SERVER_ELF"));
 
+/// The `workload=kvetch-drivel` / `stitch-drivel` server: the same endpoint answered
+/// from a trained checkpoint. ~4.4 MB, most of it weights — by a wide margin the
+/// largest program the kernel embeds, and the reason it is a *separate* binary from
+/// the babble server rather than a flag on it.
+pub static KVETCH_DRIVEL_SERVER_ELF: &[u8] =
+    include_bytes!(env!("SNITCHOS_KVETCH_DRIVEL_SERVER_ELF"));
+
 /// The `kvetch-babble` client: one fixed completion request, answer on the wire.
 pub static KVETCH_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KVETCH_CLIENT_ELF"));
 
@@ -492,6 +499,12 @@ pub static STITCH_REPL_KVETCH: ProgramSpec = ipc_user(STITCH_REPL_ELF, Rights::S
 /// the endpoint is babble — rung 0, no weights — so the serving path is proved
 /// before any checkpoint exists. See `docs/babble-design.md`.
 pub static KVETCH_SERVER: ProgramSpec = ipc_user(KVETCH_SERVER_ELF, Rights::RECV.bits());
+
+/// `workload=kvetch-drivel` / `stitch-drivel`: the weights-backed server (`RECV`).
+/// Same authority as its babble twin — a rung is a config plus a checkpoint, not a
+/// different set of privileges.
+pub static KVETCH_DRIVEL_SERVER: ProgramSpec =
+    ipc_user(KVETCH_DRIVEL_SERVER_ELF, Rights::RECV.bits());
 
 /// `workload=kvetch-babble`: a client that asks for one completion of a fixed
 /// prefix and puts its length + checksum on the wire (`SEND`).
@@ -797,6 +810,24 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         needs_endpoint: true,
         programs: &[
             ProgramSpawn { name: "kvetch_server", program: &KVETCH_SERVER, priority: Priority::Normal },
+            ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL_KVETCH, priority: Priority::Normal },
+        ],
+    }),
+    // Rung 1 of the same pair: identical layout, weights behind the endpoint. Kept
+    // deliberately identical so a difference in the answer is a difference in the
+    // model and nothing else.
+    (WorkloadKind::KvetchDrivel, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "kvetch_drivel", program: &KVETCH_DRIVEL_SERVER, priority: Priority::Normal },
+            ProgramSpawn { name: "kvetch_client", program: &KVETCH_CLIENT, priority: Priority::Normal },
+        ],
+    }),
+    // The Stitch REPL with a weights-backed Tab.
+    (WorkloadKind::StitchDrivel, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "kvetch_drivel", program: &KVETCH_DRIVEL_SERVER, priority: Priority::Normal },
             ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL_KVETCH, priority: Priority::Normal },
         ],
     }),

@@ -18,6 +18,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("faulter", "SNITCHOS_FAULTER_ELF"),
     ("illegal", "SNITCHOS_ILLEGAL_ELF"),
     ("fp-churn", "SNITCHOS_FP_CHURN_ELF"),
+    ("kvetch-drivel-server", "SNITCHOS_KVETCH_DRIVEL_SERVER_ELF"),
     ("bad-ptr", "SNITCHOS_BAD_PTR_ELF"),
     ("span-flood", "SNITCHOS_SPAN_FLOOD_ELF"),
     ("worker_a", "SNITCHOS_WORKER_A_ELF"),
