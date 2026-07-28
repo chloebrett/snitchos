@@ -53,8 +53,7 @@ pub mod demo_tasks;
 pub mod process;
 
 /// Saved callee-saved register set for a kernel thread that's
-/// off-CPU. Layout matches `sched.S` byte-for-byte — do not reorder
-/// or add fields without updating the asm offsets.
+/// off-CPU. Layout matches `sched.S` byte-for-byte.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TaskContext {
@@ -72,7 +71,86 @@ pub struct TaskContext {
     pub s9: u64,
     pub s10: u64,
     pub s11: u64,
+    /// This task's FP registers while it is off-CPU. See [`FpRegs`]; written and read
+    /// only by `sched.S` under `kernel_proc::fp::switch_action`.
+    pub fp: FpRegs,
 }
+
+/// The floating-point register file as a context switch stores it: `f0`–`f31` plus
+/// `fcsr`.
+///
+/// **Raw bits, not `f64`.** The kernel is zero-FP and must never interpret these — and
+/// interpreting them would be lossy anyway, since moving a signalling NaN through a
+/// host float can canonicalise its payload. `fcsr` travels with the registers because
+/// it holds the rounding mode and accrued flags: a task that selects a rounding mode
+/// must not have another task's arithmetic change it underneath.
+///
+/// **All 32, not just `fs0`–`fs11`.** The integer half of `switch` saves only the
+/// callee-saved set because it *is* a function call, and the ABI lets a compiler treat
+/// the rest as clobbered across one. That reasoning does not transfer: a task
+/// preempted by the timer never made a call, so no instruction boundary in it is a
+/// clobber point. The integer side survives this because `TrapFrame` already saves all
+/// 31 GPRs at trap entry; FP has no such frame, so the whole file lives here.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FpRegs {
+    /// `f0`–`f31`, as raw bit patterns.
+    pub f: [u64; 32],
+    /// `fcsr` — rounding mode (`frm`) and accrued exception flags (`fflags`).
+    pub fcsr: u64,
+}
+
+impl FpRegs {
+    /// Zeroed — and load-bearing that it is. A task's first restore loads *this*, so a
+    /// process that has just been granted FP starts from zeros rather than inheriting
+    /// whatever the previous holder left in the register file. `const` so a statically
+    /// declared context (the boot smoke's) gets the same guarantee as a heap one.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        Self { f: [0; 32], fcsr: 0 }
+    }
+}
+
+impl Default for FpRegs {
+    fn default() -> Self {
+        Self::zeroed()
+    }
+}
+
+/// The offsets `sched.S` loads and stores at, asserted against the Rust layout.
+///
+/// These two lists are a contract that nothing else checks: the asm names byte
+/// offsets, the struct names fields, and until now the only thing holding them
+/// together was a comment asking the next person not to reorder anything. Inserting
+/// a field would have silently shifted every register below it — a corruption whose
+/// symptom (a task resuming with another task's `sp`) arrives nowhere near its cause.
+/// A `const` block turns that into a build failure.
+///
+/// Verified falsifiable: inserting a `u64` before `s11` fails the build here rather
+/// than at the first context switch.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(TaskContext, ra) == 0);
+    assert!(offset_of!(TaskContext, sp) == 8);
+    assert!(offset_of!(TaskContext, s0) == 16);
+    assert!(offset_of!(TaskContext, s1) == 24);
+    assert!(offset_of!(TaskContext, s2) == 32);
+    assert!(offset_of!(TaskContext, s3) == 40);
+    assert!(offset_of!(TaskContext, s4) == 48);
+    assert!(offset_of!(TaskContext, s5) == 56);
+    assert!(offset_of!(TaskContext, s6) == 64);
+    assert!(offset_of!(TaskContext, s7) == 72);
+    assert!(offset_of!(TaskContext, s8) == 80);
+    assert!(offset_of!(TaskContext, s9) == 88);
+    assert!(offset_of!(TaskContext, s10) == 96);
+    assert!(offset_of!(TaskContext, s11) == 104);
+    // The FP file follows the integer set; `sched.S` reaches `f0` at 112 and `fcsr`
+    // at 368. Asserting the *end* too pins the array length, so dropping a register
+    // fails here rather than truncating a task's state.
+    assert!(offset_of!(TaskContext, fp) == 112);
+    assert!(offset_of!(FpRegs, fcsr) == 256);
+    assert!(core::mem::size_of::<TaskContext>() == 376);
+};
 
 unsafe extern "C" {
     /// Save callee-saved regs into `from`, load them from `to`,

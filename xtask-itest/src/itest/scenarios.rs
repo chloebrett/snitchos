@@ -1005,12 +1005,17 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
 /// `workload=stitch-kvetch`: Tab at the Stitch prompt reaches a real completion
 /// service — the first place a *person* meets the completion stack.
 ///
-/// **Not registered in `SCENARIOS` yet — it does not pass.** One `complete()`
-/// makes 232 probes (58 token classes × 2 grammar entries), each allocating a
-/// probe string, a token vector and an AST; that exhausts the 16 MiB
-/// per-process heap and the REPL hangs in talc's OOM path before it can ask
-/// the server anything. Kept here so the fix lands against a ready gate — see
-/// `plans/repl-completion.md`.
+/// **Not registered — it passes on the first Tab and wedges on a later one, for a
+/// reason outside this file.** Both processes lex Stitch: the REPL validates the
+/// suggestion, the server samples one. So both eventually parse a float literal
+/// (`babble`'s `FLOATS` table → `TokenKind::Float(f64)` → `dec2flt`), and only
+/// **one process at a time may hold the FP registers** — `FpEnableDecision::
+/// RefuseBusy`, the interim guard standing in for FP context switching. The REPL
+/// claims FP first, so the server is killed mid-request by an illegal
+/// instruction, and the REPL then blocks forever in `call` on an endpoint with no
+/// receiver. Needs `plans/floating-point.md` increment 4b. Measured 2026-07-28:
+/// tab 1 completes, tab 2 kills the server.
+///
 ///
 /// The chain: a keystroke arrives over the UART, the line editor sees Tab, the
 /// grammar decides it cannot settle this position alone, and only then does the
@@ -1021,8 +1026,8 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
 /// quietly falling back to its grammar-only menu.
 #[allow(
     dead_code,
-    reason = "FP no longer blocks it, but the REPL still never reaches the completion call \
-              and the body carries bisect scaffolding — see the note in itest.rs"
+    reason = "blocked on FP context switching (floating-point.md 4b): the server is \
+              killed by RefuseBusy the first time a sampled completion contains a float"
 )]
 pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
     // The boot self-test confirms the REPL is up and polling the console, so
@@ -1035,22 +1040,17 @@ pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
     // one legal spelling would be answered locally and never reach the server —
     // that economy is the point, but it would make a poor test of the wire.)
     h.send_input(b"let x =\t").map_err(|e| format!("inject REPL input: {e}"))?;
-    #[allow(unreachable_code)]
-    h.wait_for(SEC * 30, |f, strings| match f {
-        OwnedFrame::Metric { name_id, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("probe")
-        }
-        _ => false,
-    });
+
+    // The client half of the round trip. Asserted *before* the server span so a
+    // failure has a side: no counter ⇒ the REPL never asked (grammar, editor or
+    // cap); counter but no span ⇒ the request never arrived.
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, .. } => {
             strings.get(name_id).map(String::as_str) == Some("snitchos.stitch.completions_asked")
         }
         _ => false,
     })
-    .ok_or("DIAGNOSTIC: the REPL never reached the call")?;
-    return Err("DIAGNOSTIC: the REPL DID reach the call".to_string());
-    #[allow(unreachable_code)]
+    .ok_or("the REPL never asked: no 'snitchos.stitch.completions_asked' within 30s")?;
 
     h.wait_for(SEC * 30, is_span_start_named("kvetch.complete")).ok_or(
         "no 'kvetch.complete' span within 30s — Tab never reached the completion \

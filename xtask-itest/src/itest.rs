@@ -204,16 +204,15 @@ catalog! {
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"cooperative"};
     cpu "glitch-beep-plays"               scenarios::glitch_beep_plays              [audio]         {"glitch-beep"};
     cpu "kvetch-babble-serves"            scenarios::kvetch_babble_serves           [kvetch]        {"kvetch-babble"};
-    // `stitch-kvetch-completes` is written but still NOT registered — though **the FP
-    // blocker is gone** (plans/floating-point.md increment 4: userspace FP works, and
-    // typing a float at the REPL now evaluates). Tried registering it 2026-07-26: the
-    // guest no longer wedges or faults, and the run reaches the scenario's own
-    // diagnostic, which reports "the REPL never reached the call" —
-    // `snitchos.stitch.completions_asked` is never emitted and the console shows the
-    // grammar-only menu. So there is a *second*, independent gap in the completion
-    // path, and the body still carries its bisect scaffolding (an unconditional
-    // `return Err("DIAGNOSTIC: …")`) so it cannot pass as written. FP was necessary,
-    // not sufficient. See plans/repl-completion.md.
+    // `stitch-kvetch-completes` is written but NOT registered. Diagnosed 2026-07-28:
+    // Tab *works* — the first completion round-trips and is inserted at the prompt.
+    // The wedge is FP. Both processes lex Stitch (the REPL validates the suggestion,
+    // the server samples one), so both parse a float literal sooner or later, and
+    // `FpEnableDecision::RefuseBusy` allows only one FP process at a time. The REPL
+    // claims FP first; the server is killed mid-request by an illegal instruction;
+    // the REPL then blocks forever in `call` on an endpoint with no receiver.
+    // Unblocked by plans/floating-point.md increment 4b (FP context switching), which
+    // deletes `RefuseBusy` — not by anything in the completion path.
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};

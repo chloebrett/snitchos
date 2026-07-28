@@ -92,12 +92,14 @@ static SMOKE_MAIN_CTX: SmokeCtx = SmokeCtx(core::cell::UnsafeCell::new(TaskConte
     ra: 0, sp: 0,
     s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0,
     s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+    fp: super::FpRegs::zeroed(),
 }));
 
 static SMOKE_MARKER_CTX: SmokeCtx = SmokeCtx(core::cell::UnsafeCell::new(TaskContext {
     ra: 0, sp: 0,
     s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0,
     s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+    fp: super::FpRegs::zeroed(),
 }));
 
 /// One-time context-switch round-trip smoke. Call once after
