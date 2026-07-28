@@ -204,15 +204,8 @@ catalog! {
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"cooperative"};
     cpu "glitch-beep-plays"               scenarios::glitch_beep_plays              [audio]         {"glitch-beep"};
     cpu "kvetch-babble-serves"            scenarios::kvetch_babble_serves           [kvetch]        {"kvetch-babble"};
-    // `stitch-kvetch-completes` is written but NOT registered. Diagnosed 2026-07-28:
-    // Tab *works* — the first completion round-trips and is inserted at the prompt.
-    // The wedge is FP. Both processes lex Stitch (the REPL validates the suggestion,
-    // the server samples one), so both parse a float literal sooner or later, and
-    // `FpEnableDecision::RefuseBusy` allows only one FP process at a time. The REPL
-    // claims FP first; the server is killed mid-request by an illegal instruction;
-    // the REPL then blocks forever in `call` on an endpoint with no receiver.
-    // Unblocked by plans/floating-point.md increment 4b (FP context switching), which
-    // deletes `RefuseBusy` — not by anything in the completion path.
+    cpu "fp-survives-context-switch"      scenarios::fp_survives_context_switch     [fp, sched]     {"fp-churn"};
+    cpu "stitch-kvetch-completes"         scenarios::stitch_kvetch_completes        [kvetch, stitch] {"stitch-kvetch"};
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};

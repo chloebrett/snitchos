@@ -38,6 +38,10 @@ pub static FAULTER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FAULTER_ELF"));
 pub static ILLEGAL_ELF: &[u8] = include_bytes!(env!("SNITCHOS_ILLEGAL_ELF"));
 pub static BAD_PTR_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BAD_PTR_ELF"));
 
+/// The `workload=fp-churn` program: fills all 32 FP registers, spins to be
+/// preempted, and reports how many came back changed.
+pub static FP_CHURN_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FP_CHURN_ELF"));
+
 /// The `workload=userspace-span-flood` program: opens spans with many distinct
 /// names to exceed the per-process span-name quota.
 pub static SPAN_FLOOD_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAN_FLOOD_ELF"));
@@ -347,6 +351,11 @@ pub static ILLEGAL: ProgramSpec = ProgramSpec { elf: ILLEGAL_ELF, launch: Launch
 /// `workload=userspace-bad-ptr`: the user-pointer validation probe (passes an
 /// unmapped user VA to `DebugWrite` — the kernel must refuse, not fault).
 pub static BAD_PTR: ProgramSpec = ProgramSpec { elf: BAD_PTR_ELF, launch: Launch::Plain };
+
+/// `workload=fp-churn`: the FP context-switch oracle. Spawned **twice** — the whole
+/// point is two processes contending for one register file, which is the only
+/// arrangement in which a lost save is observable at all.
+pub static FP_CHURN: ProgramSpec = ProgramSpec { elf: FP_CHURN_ELF, launch: Launch::Plain };
 
 /// `workload=userspace-span-flood`: the span-quota probe.
 pub static SPAN_FLOOD: ProgramSpec = ProgramSpec { elf: SPAN_FLOOD_ELF, launch: Launch::Plain };
@@ -729,6 +738,16 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::UserspaceIllegal, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "user_illegal", program: &ILLEGAL, priority: Priority::Normal }],
+    }),
+    // Two processes, same program, both wanting the FP registers. One would prove
+    // nothing: the kernel is zero-FP, so with a single FP process there is nobody to
+    // clobber it and the test passes whether or not the switch saves anything.
+    (WorkloadKind::FpChurn, UserLayout {
+        needs_endpoint: false,
+        programs: &[
+            ProgramSpawn { name: "fp_churn_a", program: &FP_CHURN, priority: Priority::Normal },
+            ProgramSpawn { name: "fp_churn_b", program: &FP_CHURN, priority: Priority::Normal },
+        ],
     }),
     (WorkloadKind::UserspaceSpanFlood, UserLayout {
         needs_endpoint: false,

@@ -21,15 +21,6 @@ pub enum FpEnableDecision {
     /// binary is built `lp64d`), which is why it is a *test-covered* path rather than
     /// a demonstrated one.
     RefuseUnauthorised,
-    /// Another process already holds live FP register state and the kernel cannot yet
-    /// save/restore FP registers across a context switch. Refuse loudly rather than
-    /// let two processes silently share 32 registers.
-    ///
-    /// **Interim.** The right answer is FP context switching, at which point this
-    /// variant disappears; until then this converts silent cross-process corruption
-    /// into an observable refusal, which is the trade this codebase makes everywhere
-    /// else (refusals snitch, never silent).
-    RefuseBusy,
     /// Not an FP-enable situation: `FS` is already on, so the instruction really is
     /// illegal — or it's an FP instruction this hardware doesn't implement. Falls
     /// through to the ordinary "unhandled user trap kills the process" path.
@@ -41,21 +32,22 @@ pub enum FpEnableDecision {
 /// - `authorised`: the process's ELF declares a hard-float ABI
 ///   ([`crate::elf::FloatAbi::uses_hardware_fp`]).
 /// - `fs_off`: `sstatus.FS` is `Off` for the faulting context.
-/// - `other_holders`: how many *other* processes currently have FP enabled.
 ///
 /// Note the ordering: `fs_off` is checked first. A process that already has FP on
 /// cannot reach the enable path at all — its `FS` travels with its trap frame — so a
 /// trap with `FS` on is a genuine fault, not a request.
+///
+/// **No count of existing holders.** There used to be one: FP was granted to a single
+/// process at a time, because a context switch could not carry the register file.
+/// [`switch_action`] carries it, so the number of holders stopped being anyone's
+/// business.
 #[must_use]
-pub fn enable_decision(authorised: bool, fs_off: bool, other_holders: usize) -> FpEnableDecision {
+pub fn enable_decision(authorised: bool, fs_off: bool) -> FpEnableDecision {
     if !fs_off {
         return FpEnableDecision::NotFpRelated;
     }
     if !authorised {
         return FpEnableDecision::RefuseUnauthorised;
-    }
-    if other_holders > 0 {
-        return FpEnableDecision::RefuseBusy;
     }
     FpEnableDecision::Enable
 }
@@ -117,7 +109,7 @@ mod tests {
     /// retries. Nothing was declared or asked for — the trap *is* the request.
     #[test]
     fn an_authorised_process_with_fp_off_gets_it_enabled() {
-        assert_eq!(enable_decision(true, true, 0), FpEnableDecision::Enable);
+        assert_eq!(enable_decision(true, true), FpEnableDecision::Enable);
     }
 
     /// A soft-float program executing an FP instruction is refused, not accommodated.
@@ -125,7 +117,7 @@ mod tests {
     /// mis-build or an attempt to use authority it never claimed.
     #[test]
     fn a_soft_float_process_is_refused() {
-        assert_eq!(enable_decision(false, true, 0), FpEnableDecision::RefuseUnauthorised);
+        assert_eq!(enable_decision(false, true), FpEnableDecision::RefuseUnauthorised);
     }
 
     /// **`FS` already on ⇒ the fault is real.** This is the ordering that matters: if
@@ -134,27 +126,29 @@ mod tests {
     /// livelock instead of a dead process.
     #[test]
     fn an_illegal_instruction_with_fp_already_on_is_a_real_fault() {
-        assert_eq!(enable_decision(true, false, 0), FpEnableDecision::NotFpRelated);
+        assert_eq!(enable_decision(true, false), FpEnableDecision::NotFpRelated);
         // ...and being unauthorised doesn't change that: the FP question is settled.
-        assert_eq!(enable_decision(false, false, 0), FpEnableDecision::NotFpRelated);
+        assert_eq!(enable_decision(false, false), FpEnableDecision::NotFpRelated);
     }
 
-    /// While another process holds FP state, a second request is refused rather than
-    /// granted — the interim guard standing in for FP context switching. Without it
-    /// the two processes would share one register file and corrupt each other
-    /// silently, which is strictly worse than a loud refusal.
+    /// **Every authorised process gets FP, however many already have it.** The old
+    /// one-at-a-time guard existed only because a switch could not carry the register
+    /// file; [`switch_action`] now does, so being second is not a reason to refuse.
+    ///
+    /// This is not a hypothetical relaxation: two processes running the same Stitch
+    /// lexer (a completion server and its client) *both* parse float literals, so the
+    /// guard made that feature unbuildable rather than merely slow.
     #[test]
-    fn a_second_fp_process_is_refused_while_another_holds_the_registers() {
-        assert_eq!(enable_decision(true, true, 1), FpEnableDecision::RefuseBusy);
-        assert_eq!(enable_decision(true, true, 7), FpEnableDecision::RefuseBusy);
+    fn a_second_fp_process_is_enabled_rather_than_refused() {
+        assert_eq!(enable_decision(true, true), FpEnableDecision::Enable);
+        assert_eq!(enable_decision(true, true), FpEnableDecision::Enable);
     }
 
-    /// Authorisation outranks the busy check: an unauthorised process is refused for
-    /// *its own* reason regardless of who holds the registers, so the snitched reason
-    /// names the real problem rather than a coincidence of timing.
+    /// The one refusal that survives: an unauthorised process is refused for its own
+    /// reason, so the snitched message names the real problem.
     #[test]
-    fn an_unauthorised_process_is_refused_for_being_unauthorised_not_for_being_second() {
-        assert_eq!(enable_decision(false, true, 3), FpEnableDecision::RefuseUnauthorised);
+    fn an_unauthorised_process_is_still_refused() {
+        assert_eq!(enable_decision(false, true), FpEnableDecision::RefuseUnauthorised);
     }
 
     /// Only a task that has *written* FP registers needs them copied out. `Dirty` is

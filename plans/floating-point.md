@@ -324,9 +324,19 @@ counter and the `release` hooks on both death paths all disappear. ~~Today only 
 uses FP, so nothing hits it.~~ **Measured false, 2026-07-28: the completion feature hits
 it every time.** See below.
 
-## Increment 4b — FP context switching (NOT DONE) — **now blocking a shipped feature**
+## Increment 4b — FP context switching — **DONE (2026-07-28)**
 
-Planned in detail in [fp-context-switching.md](fp-context-switching.md).
+`TaskContext` carries `f0`–`f31` + `fcsr`; `sched::fpswitch` saves before a switch and
+restores after one, under the host-tested `kernel_proc::fp::switch_action`. `sched.S`
+is untouched — the copy lives in Rust either side of the `switch` call, which works
+because `switch` returns *in the task that called it*, making "save the outgoing" and
+"restore the incoming" one task's before-and-after. `RefuseBusy`, `FP_HOLDERS` and the
+`release` hooks are gone. Gated by `fp-survives-context-switch` (two processes, distinct
+patterns in all 32 registers, mismatch count asserted — it failed with 32 mismatches
+before the fix) and by the negative oracle in `default-boot-starts-init`.
+
+The plan, its two design calls, and the firmware finding that came out of it:
+[fp-context-switching.md](legacy/fp-context-switching.md).
 
 Needed before two processes can use FP simultaneously. `TaskContext` grows the 32 FP
 registers, saved/restored **only** for tasks whose `FS` is not Off — which is what

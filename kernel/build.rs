@@ -17,6 +17,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("hello", "SNITCHOS_USER_ELF"),
     ("faulter", "SNITCHOS_FAULTER_ELF"),
     ("illegal", "SNITCHOS_ILLEGAL_ELF"),
+    ("fp-churn", "SNITCHOS_FP_CHURN_ELF"),
     ("bad-ptr", "SNITCHOS_BAD_PTR_ELF"),
     ("span-flood", "SNITCHOS_SPAN_FLOOD_ELF"),
     ("worker_a", "SNITCHOS_WORKER_A_ELF"),

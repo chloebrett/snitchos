@@ -80,6 +80,9 @@ static COUNTERS: &[&DeferredCounter] = &[
     &crate::sched::CONTEXT_SWITCHES,
     &crate::sched::PREEMPTIONS,
     &crate::sched::SCHED_LOOKUP_PROBES,
+    // floating point: what a switch that carries FP state actually costs
+    &crate::sched::FP_SAVES,
+    &crate::sched::FP_RESTORES,
     &crate::sched::SMOKE_MARKER_HITS,
     &crate::sched::EXIT_SMOKE_HITS,
     &crate::sched::WAKE_RESUMED,

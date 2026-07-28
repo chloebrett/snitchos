@@ -1005,16 +1005,13 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
 /// `workload=stitch-kvetch`: Tab at the Stitch prompt reaches a real completion
 /// service — the first place a *person* meets the completion stack.
 ///
-/// **Not registered — it passes on the first Tab and wedges on a later one, for a
-/// reason outside this file.** Both processes lex Stitch: the REPL validates the
-/// suggestion, the server samples one. So both eventually parse a float literal
-/// (`babble`'s `FLOATS` table → `TokenKind::Float(f64)` → `dec2flt`), and only
-/// **one process at a time may hold the FP registers** — `FpEnableDecision::
-/// RefuseBusy`, the interim guard standing in for FP context switching. The REPL
-/// claims FP first, so the server is killed mid-request by an illegal
-/// instruction, and the REPL then blocks forever in `call` on an endpoint with no
-/// receiver. Needs `plans/floating-point.md` increment 4b. Measured 2026-07-28:
-/// tab 1 completes, tab 2 kills the server.
+/// **Two Tabs, deliberately.** One Tab passed for a year while the feature was
+/// broken: both processes lex Stitch (the REPL validates the suggestion, the server
+/// samples one), so both eventually parse a float literal, and while only one
+/// process at a time could hold the FP registers the *second* Tab killed the server
+/// — after which the REPL blocked forever in `call` on an endpoint with no receiver.
+/// A single-Tab assertion cannot see any of that. See
+/// `plans/legacy/fp-context-switching.md`.
 ///
 ///
 /// The chain: a keystroke arrives over the UART, the line editor sees Tab, the
@@ -1024,11 +1021,6 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
 /// span appearing on the *server's* task id: the trace crossing the process
 /// boundary is what proves the round trip happened, rather than the REPL
 /// quietly falling back to its grammar-only menu.
-#[allow(
-    dead_code,
-    reason = "blocked on FP context switching (floating-point.md 4b): the server is \
-              killed by RefuseBusy the first time a sampled completion contains a float"
-)]
 pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
     // The boot self-test confirms the REPL is up and polling the console, so
     // injected keystrokes aren't dropped.
@@ -1066,6 +1058,17 @@ pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
         _ => false,
     })
     .ok_or("the server never counted a request, despite opening a span for one")?;
+
+    // A second Tab, on a fresh line. This is the one that used to kill the server:
+    // by now both processes have lexed enough Stitch to have wanted the FP unit, and
+    // under the old one-holder rule the loser died here. Asserting the *server* span
+    // again is what proves it is still alive to answer.
+    h.send_input(b"\r").map_err(|e| format!("inject REPL input: {e}"))?;
+    h.send_input(b"let y =\t").map_err(|e| format!("inject REPL input: {e}"))?;
+    h.wait_for(SEC * 30, is_span_start_named("kvetch.complete")).ok_or(
+        "the second Tab never reached the server — it answered once and then stopped, \
+         which is what a dead completion server looks like from the client side",
+    )?;
     Ok(())
 }
 
@@ -2798,6 +2801,99 @@ pub fn unhandled_user_trap_kills_only_the_process(h: &mut View) -> Result<(), St
     Ok(())
 }
 
+/// FP context switching (`workload=fp-churn`): two processes each fill all 32 FP
+/// registers with their own pattern, get preempted mid-window, and read them back.
+///
+/// The assertion is the **mismatch count**, so a lost save is a wrong number rather
+/// than a silence — a liveness check ("neither process died") would pass happily
+/// while the two silently corrupted each other, which is precisely the failure
+/// `FpEnableDecision::RefuseBusy` was standing in front of.
+///
+/// Both halves matter: context switches must actually have happened (otherwise the
+/// spin was too short and the test proves nothing), and no register may have
+/// changed across them.
+pub fn fp_survives_context_switch(h: &mut View) -> Result<(), String> {
+    // One forward pass over the stream, because these facts are *interleaved*: each
+    // process emits its seed, then a mismatch count per round. Checking mismatches
+    // after waiting for the rounds would scan a stream whose interesting frames are
+    // already behind the cursor — a negative oracle that cannot see the thing it
+    // denies is a guaranteed pass.
+    let mut seeds = std::collections::BTreeSet::new();
+    let mut finished = 0;
+    while finished < 2 {
+        let frame = h
+            .wait_for(SEC * 30, |f, strings| match f {
+                OwnedFrame::Metric { name_id, value, .. } => {
+                    match strings.get(name_id).map(String::as_str) {
+                        Some("snitchos.fp_churn.mismatches_total") => *value > 0,
+                        Some("snitchos.fp_churn.rounds_total") => *value >= 64,
+                        Some("snitchos.fp_churn.seed") => true,
+                        _ => false,
+                    }
+                }
+                _ => false,
+            })
+            .ok_or(
+                "a fp-churn process never finished its 64 rounds — if one was killed by an \
+                 illegal instruction, FP is still being refused to the second process",
+            )?;
+        let OwnedFrame::Metric { name_id, value, .. } = frame else { continue };
+        match h.name_of(name_id) {
+            Some("snitchos.fp_churn.mismatches_total") => {
+                return Err(format!(
+                    "{value} FP register(s) came back changed across a context switch: the \
+                     switch is not saving/restoring the register file, so two FP processes \
+                     are sharing it"
+                ));
+            }
+            Some("snitchos.fp_churn.seed") => {
+                seeds.insert(value);
+            }
+            _ => finished += 1,
+        }
+    }
+
+    // The two processes must have been telling themselves apart. Same ELF, same
+    // virtual addresses — they seed from the clock, and had they agreed on a seed
+    // each would be writing the other's pattern, making a clobber invisible. A
+    // vacuous pass is worse here than a failure.
+    if seeds.len() < 2 {
+        return Err(format!(
+            "the two fp-churn processes reported {} distinct seed(s): with a shared pattern \
+             neither could detect the other's clobber, so a clean run proves nothing",
+            seeds.len()
+        ));
+    }
+
+    // The switches the test is about. Without these the spin never spanned a tick and
+    // a clean mismatch count would mean nothing.
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.sched.context_switches_total")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or("no context switches — the churn window never spanned a preemption")?;
+
+    // ...and the cost of carrying FP is on the wire, which is the argument for the
+    // whole lazy design: integer-only tasks pay nothing, and the moment they stop
+    // being integer-only, the counter says so.
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.fp.context_saves_total")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no 'snitchos.fp.context_saves_total' — the registers came back intact without any \
+         switch having saved them, which means the churn window never actually spanned one",
+    )?;
+
+    Ok(())
+}
+
 /// v0.7b denial payoff (`workload=userspace`): after invoking the
 /// `TelemetrySink` it *was* granted (handle 0), `hello` deliberately
 /// invokes a handle it was **never granted** (handle 1 — its table holds
@@ -4219,7 +4315,25 @@ pub fn default_boot_starts_init(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
         .ok_or("no kernel.heartbeat after init ran — default boot isn't healthy")?;
 
-    Ok(())
+    // **Integer-only work pays nothing for floating point.** This is the other half
+    // of the lazy-FP claim, and the half a feature test cannot make: `fp-churn`
+    // proves the register file is carried when it must be, and this proves it is not
+    // carried when it needn't be. Without it, a switch that saved unconditionally
+    // would look identical from every other scenario — 264 bytes on every switch,
+    // charged to processes that never executed an FP instruction.
+    h.assert_absent(
+        SEC * 5,
+        "fp context save on an integer-only boot",
+        "a context switch saved FP registers during a boot where no process uses \
+         floating point — the save is firing unconditionally rather than on `FS = Dirty`",
+        |f, strings| match f {
+            OwnedFrame::Metric { name_id, value, .. } => {
+                strings.get(name_id).map(String::as_str) == Some("snitchos.fp.context_saves_total")
+                    && *value > 0
+            }
+            _ => false,
+        },
+    )
 }
 
 /// v0.12 process teardown — Exit **reclaims** the child's address space

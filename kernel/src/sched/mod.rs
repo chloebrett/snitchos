@@ -38,6 +38,11 @@ use crate::sync::Mutex;
 
 global_asm!(include_str!("sched.S"));
 
+/// Carrying the FP register file across a switch — the half of a context switch
+/// `sched.S` deliberately does not do. See [`fpswitch`].
+mod fpswitch;
+pub use fpswitch::{FP_RESTORES, FP_SAVES, init_hart as fp_init_hart};
+
 /// Scheduler smokes + demo task bodies (test scaffolding). Re-exported below so
 /// call sites stay `sched::smoke()`, `sched::exit_smoke_entry`, etc.
 mod smoke;
@@ -144,9 +149,11 @@ const _: () = {
     assert!(offset_of!(TaskContext, s9) == 88);
     assert!(offset_of!(TaskContext, s10) == 96);
     assert!(offset_of!(TaskContext, s11) == 104);
-    // The FP file follows the integer set; `sched.S` reaches `f0` at 112 and `fcsr`
-    // at 368. Asserting the *end* too pins the array length, so dropping a register
-    // fails here rather than truncating a task's state.
+    // The FP file follows the integer set. `sched.S` does not touch it — `fpswitch`
+    // does, from Rust — but its `asm!` blocks still name byte offsets off a single
+    // base pointer, so the same drift hazard applies and the same assertion answers
+    // it. Pinning `fcsr`'s offset and the total size also pins the array length, so
+    // dropping a register fails here rather than truncating a task's state.
     assert!(offset_of!(TaskContext, fp) == 112);
     assert!(offset_of!(FpRegs, fcsr) == 256);
     assert!(core::mem::size_of::<TaskContext>() == 376);
@@ -1157,8 +1164,13 @@ fn reschedule(reason: SwitchReason) {
         // stable `Box<Task>` allocations owned by `SCHEDULER.tasks`. The asm
         // has exclusive access for the duration of the call (cooperative
         // single-hart; no preemption mid-switch). We resume here on a later
-        // switch back into us.
-        unsafe { switch(current_ctx, next_ctx) };
+        // switch back into us — which is why the FP restore is *after* the
+        // call: it runs when we come back, not when we leave.
+        unsafe {
+            fpswitch::save_before_switch(current_ctx);
+            switch(current_ctx, next_ctx);
+            fpswitch::restore_after_switch(current_ctx);
+        }
     }
 }
 
@@ -1272,6 +1284,13 @@ fn exit_now_inner(auto_reap: bool) -> ! {
     let (_current_ctx, next_ctx) = prepare_switch(CurrentDisposition::Exit, SwitchReason::Exit, false)
         .expect("prepare_switch with empty_ok=false returns Some or panics");
 
+    // No FP save: the task is dying, so its registers are worth nothing. The unit is
+    // still handed over neutral (`FS = Off`) — a task resuming at its *entry point*
+    // rather than inside `switch` never runs the restore, so if we left `FS` on, a
+    // fresh task would inherit both the FP unit and the dead task's registers, and
+    // its first FP instruction would not trap into the authority check.
+    fpswitch::release_before_exit();
+
     // SAFETY: `next_ctx` points at the `UnsafeCell<TaskContext>` of a live
     // `Box<Task>` in `SCHEDULER.tasks`. The exiting task's stack is abandoned but
     // still mapped until the sweep reclaims it; no dangling reference. The load-only
@@ -1336,7 +1355,11 @@ pub fn block_current() {
         // sp into `current_ctx`, so when a later `wake` re-enqueues us and the
         // scheduler picks us, control returns right here. Single-hart
         // cooperative; no preemption mid-switch.
-        unsafe { switch(current_ctx, next_ctx) };
+        unsafe {
+            fpswitch::save_before_switch(current_ctx);
+            switch(current_ctx, next_ctx);
+            fpswitch::restore_after_switch(current_ctx);
+        }
     }
     // Resumed (a `wake` picked us), or nothing was ready and we kept running.
 }

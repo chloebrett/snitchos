@@ -337,10 +337,6 @@ fn terminate_faulting_process(code: u64) -> ! {
         exception_name(code),
     ));
 
-    // A faulting process can be holding FP just as an exiting one can, so release the
-    // claim on this path too — otherwise a process killed mid-FP takes FP with it.
-    crate::syscall::process::release_fp_claim();
-
     // The process is gone; this hart is no longer running it. Mirrors
     // `handle_exit` — the pointer must not outlive the address space.
     crate::process::CURRENT_PROCESS

@@ -128,6 +128,13 @@ workloads! {
         /// via the `EndpointCreate` syscall and proves the returned cap is a real
         /// owning `RECV | MINT` by minting a badged `SEND` on it.
         EndpointCreate,
+        /// FP context-switch oracle: **two** processes, each filling all 32 FP
+        /// registers with a distinct pattern, spinning long enough to be preempted,
+        /// then reading them back and reporting mismatches. Two processes because one
+        /// proves nothing — the kernel is zero-FP, so with a single FP process nobody
+        /// can clobber the register file. The mismatch count is the assertion, so a
+        /// broken save/restore is a *wrong number* rather than a silence.
+        FpChurn,
         /// Frame-allocator OOM: keep the default demo tasks, but the
         /// heartbeat leaks frames each tick until the pool exhausts.
         FrameOom,
@@ -728,6 +735,11 @@ mod tests {
     #[test]
     fn selects_kvetch_babble() {
         assert_eq!(select("workload=kvetch-babble"), Some(WorkloadKind::KvetchBabble));
+    }
+
+    #[test]
+    fn selects_fp_churn() {
+        assert_eq!(select("workload=fp-churn"), Some(WorkloadKind::FpChurn));
     }
 
     #[test]

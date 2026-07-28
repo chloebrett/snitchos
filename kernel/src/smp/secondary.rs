@@ -182,6 +182,10 @@ pub extern "C" fn secondary_main(mhartid: usize, hartid: usize) -> ! {
     // exactly once per hart at bring-up.
     unsafe { percpu::init(hartid) };
 
+    // Per *hart*: `sstatus` is per-hart state, so a secondary coming out of firmware
+    // needs the same guarantee hart 0 gave itself. See `sched::fp_init_hart`.
+    crate::sched::fp_init_hart();
+
     // Announce on the wire. The collector resolves the hart_id on
     // subsequent frames to this register.
     tracing::emit_hart_register(

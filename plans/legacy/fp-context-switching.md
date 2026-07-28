@@ -1,7 +1,32 @@
 # Plan: FP context switching (floating-point.md increment 4b)
 
 **Branch**: main (house rule — no feature branches)
-**Status**: Active
+**Status**: ✅ **COMPLETE (2026-07-28).** All six steps landed. Two processes run
+hardware FP concurrently, `RefuseBusy` is gone, and `stitch-kvetch-completes` is
+registered and green on both engines. snemu 130/130 plain and `--scramble`.
+
+### What the plan did not predict
+
+**Firmware does not hand the kernel `sstatus.FS = Off`.** Step 5's negative oracle —
+the boring half, "an integer-only boot saves nothing" — failed on the first QEMU run
+with `context_saves_total = 2`, one spurious save per hart. OpenSBI leaves `FS` set;
+snemu resets it to `Off`. Harmless in itself, but the same assumption is load-bearing
+somewhere that is not harmless: a user task inherits `FS` from the kernel context that
+enters it, so on a machine whose firmware leaves the unit on, **userspace would get FP
+as ambient authority** — no trap, no `enable_decision`, no `Log` naming the grant. The
+lazy-enable design silently depended on a fact nobody had checked. Fixed by
+`sched::fp_init_hart()`, called per hart in `kmain` and secondary bring-up.
+
+Worth noting *which* engine found it. snemu resets `FS` to `Off`, which is faithful to
+the hardware reset value — it is not an snemu bug, it is a scope boundary: snemu models
+a machine, not a firmware handoff. The VF2 boots through OpenSBI too, so this was a
+real-board bug that only the QEMU path could surface. The kernel no longer depends on
+either behaviour, which is what makes the difference stop mattering.
+
+**And the step it validated:** the negative oracle was the cheap half of step 5 and the
+only reason this was found. A feature test proves the register file is carried when it
+must be; only the negative proves it isn't carried when it needn't be — and that is the
+assertion that noticed the FP unit was already on.
 
 ## Goal
 
@@ -180,10 +205,14 @@ rather than a running total.
 
 ## Known unknowns
 
-- **Is FP state per-task or per-process?** It is per-task — the registers belong to an
-  execution context. `Process::fp_enabled` is per-*process* today, which is only
-  equivalent while a process has exactly one task. Verify before step 3; if multi-task
-  processes exist, the ownership flag moves to the task.
+- **Is FP state per-task or per-process? — STILL OPEN, and now load-bearing.**
+  `fpswitch::current_owns_fp` reads `Process::fp_enabled`, which is per-*process*,
+  while the registers belong to an execution *context*. These are the same thing only
+  while each process has exactly one task, which is true today and was not verified.
+  If a process ever gets two tasks, both will claim to own one register file and each
+  will restore the other's saved state. The fix is a flag on the `Task`; the reason it
+  was not done now is that setting it lives in `try_enable`, which runs in trap context
+  and would have to reach the scheduler lock to find the current task.
 - **Where `FS` lives across the trap.** For a user task the value that reaches U-mode
   comes from `frame.sstatus` on `sret`, not from the live CSR, so `FS` already follows
   the task via its own frame. The switch manipulates the live CSR for the copy and for

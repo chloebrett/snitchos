@@ -189,6 +189,10 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
     // per-hart-aware code has run yet.
     unsafe { percpu::init(0) };
 
+    // Firmware does not promise us an FP unit that is off, and the lazy-enable
+    // authority check only works while it is. See `sched::fp_init_hart`.
+    sched::fp_init_hart();
+
     // Enumerate the harts the DTB advertises and assign dense logical ids: the
     // boot hart (mhartid `hart_id`) becomes logical 0, the other *usable* harts
     // follow in ascending mhartid order. `ipi::send(logical_id)` then translates
@@ -547,6 +551,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::UserspaceIllegal
             | WorkloadKind::UserspaceBadPtr
             | WorkloadKind::UserspaceSpanFlood
+            | WorkloadKind::FpChurn
             | WorkloadKind::Workers
             | WorkloadKind::HeapGrow
             | WorkloadKind::UserHog
