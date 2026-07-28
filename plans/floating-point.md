@@ -320,16 +320,52 @@ silently share the first's register file. `FpEnableDecision::RefuseBusy` convert
 into an observable refusal — one FP process at a time, snitched. This is the trade this
 codebase makes everywhere else (refusals snitch, never silent), but it **is** interim:
 the real fix is FP context switching, at which point the variant, the `FP_HOLDERS`
-counter and the `release` hooks on both death paths all disappear. Today only the REPL
-uses FP, so nothing hits it.
+counter and the `release` hooks on both death paths all disappear. ~~Today only the REPL
+uses FP, so nothing hits it.~~ **Measured false, 2026-07-28: the completion feature hits
+it every time.** See below.
 
-## Increment 4b — FP context switching (NOT DONE)
+## Increment 4b — FP context switching (NOT DONE) — **now blocking a shipped feature**
+
+Planned in detail in [fp-context-switching.md](fp-context-switching.md).
 
 Needed before two processes can use FP simultaneously. `TaskContext` grows the 32 FP
 registers, saved/restored **only** for tasks whose `FS` is not Off — which is what
 `sstatus.FS`'s Clean/Dirty tracking (increment 3b step 5) exists to make cheap. Touches
 the asm `switch` primitive, so it is a real piece of work rather than a follow-up.
 Removes the `RefuseBusy` guard above.
+
+**It has a customer now.** `RefuseBusy` was written as a guard against a case nobody
+had, on the reading that "only the REPL uses FP". Tab completion breaks that reading
+*structurally*, not incidentally: the oracle lives on **both** sides of the wire — the
+kvetch server samples a completion through it, and `ModelCompleter` re-validates the
+suggestion through it, because trusting another process to police its own output is the
+one thing a client must not do. Two processes running the Stitch lexer means two
+processes that will parse a float literal (`babble`'s `FLOATS` → `TokenKind::Float(f64)`
+→ `dec2flt`) — so *no* ordering satisfies a one-holder rule. Measured 2026-07-28 under
+both engines:
+
+```
+Log { "fp refused: task 4 — another process holds the FP registers and the kernel
+       cannot yet save them across a context switch" }
+Log { "user fault: task 4 killed by illegal instruction (scause=2 sepc=0x100280bc)" }
+```
+
+`0x100280bc` disassembles to float-decimal conversion (`fmv.d.x fa5, a0` materialising
+`0x7ff0…` — an infinity constant). The REPL claims FP first, the server dies mid-request,
+and the REPL then blocks forever in `call` on an endpoint whose only receiver is gone —
+which is why the symptom reads as "the REPL stopped responding" rather than "a process
+died". A failure two processes away from its cause.
+
+Two consequences worth carrying into 4b:
+
+- **A server's death should be visible to its clients.** The REPL blocked indefinitely
+  on an endpoint with no receiver and no diagnostic; `snitchos.stitch.completions_asked`
+  fires but nothing ever answers. Whatever 4b does about FP, "call an endpoint whose
+  server is dead" wants a refusal rather than a silent hang. Arguably the more serious
+  of the two findings, and independent of FP.
+- **The one-holder guard is now load-bearing in the wrong direction.** It converts a
+  correctness problem (two processes sharing a register file) into a liveness problem
+  (a dead server and a hung client). That is the right trade only while nothing hits it.
 
 ## Increment 5 — Stitch floats work on target — **DONE for arithmetic**
 
@@ -342,13 +378,21 @@ deliberate tripwire and duly failed on the first run after increment 4 — that 
 the evidence the enable path genuinely reaches the REPL, rather than the assertion
 having been written to match whatever the code did.
 
-**`stitch-kvetch-completes` is still not registered — but FP is no longer why.** Tried
-2026-07-26: the guest no longer wedges or faults, and the run reaches the scenario's own
-bisect diagnostic, which reports *"the REPL never reached the call"* —
-`snitchos.stitch.completions_asked` never appears and the console shows the grammar-only
-menu. So the completion path has a **second, independent gap**, and the scenario body
-still carries an unconditional `return Err("DIAGNOSTIC: …")` from that bisect, so it
-cannot pass as written. FP was necessary, not sufficient. Out of scope here; see
+**`stitch-kvetch-completes` is still not registered — and FP *is* still why.** The
+2026-07-26 reading ("a second, independent gap": the REPL never reaches the call, only
+the grammar menu shows) was **wrong**, and wrong in an instructive way: it was inferred
+from the bisect scaffolding's own diagnostic rather than from the frame stream. Re-run
+2026-07-28 with the scaffolding removed: the REPL *does* reach the call, the server
+answers, and a babble completion is inserted at the prompt —
+
+```
+stitch> let x = .. and ..= < "score" +
+```
+
+— and then the **second** Tab kills the server on `RefuseBusy` (see increment 4b above).
+The earlier run saw a grammar-only menu because it was reading the console *after* the
+wedge, where the last completed line is all there is. So: FP was necessary, and is also
+sufficient — via 4b, not via 4. Out of scope here; see
 [repl-completion.md](repl-completion.md).
 
 ## Increment 5 — Stitch floats work on target

@@ -1,7 +1,11 @@
 # Tab completion in the Stitch REPL (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increments 1, 2, 3 done, and increment 4's seam
-with it.** `LineEditor::feed_with(bytes, &dyn Completer)` handles Tab; `feed`
+**Status:** 🚧 **IN PROGRESS — all seven increments built and working end to end;
+the gate scenario is blocked on a kernel gap (FP context switching), not on
+anything here. See "RESOLVED 2026-07-28" below.**
+
+**Status:** increments 1, 2, 3 done, and increment 4's seam
+with it. `LineEditor::feed_with(bytes, &dyn Completer)` handles Tab; `feed`
 delegates to it with a `NoCompleter`, so every existing caller behaves exactly
 as before (Tab was already dropped with the other control bytes). 12
 line-editor tests, 752/752 across the crate, clippy clean.
@@ -187,10 +191,49 @@ the exact "(N total)" count.
 but in a target-only failure discovered three increments later, with the whole
 stack built on top of it.
 
+### ✅ RESOLVED 2026-07-28: Tab works. The blocker is FP context switching.
+
+The whole chain runs. A keystroke reaches the line editor, the grammar declines to
+settle the position, the REPL calls the kvetch server, babble samples, and the answer
+comes back and is inserted at the prompt:
+
+```
+stitch> let x = .. and ..= < "score" +
+```
+
+Verified under **both** engines (snemu and `--engine qemu`), with a negative control:
+flipping the asserted span name to one that is never emitted fails the scenario, so the
+assertions are not vacuous.
+
+**What actually blocks registration is the *second* Tab**, and it is not in the
+completion path at all. Both processes lex Stitch — the server to sample, the client to
+re-validate what it was sent — so both eventually parse a float literal, and
+`FpEnableDecision::RefuseBusy` permits one FP process at a time. The REPL wins the race,
+the server is killed by an illegal instruction mid-request, and the REPL blocks forever
+in `call` on an endpoint with no receiver. Full evidence and consequences:
+[floating-point.md](floating-point.md) increment 4b.
+
+**The lesson, again, and it is the same one.** The 2026-07-26 conclusion — "a second,
+independent gap: the REPL never reaches the call" — was read off the bisect
+scaffolding's own diagnostic and the console tail, both of which were sampled *after*
+the wedge. The frame stream said otherwise the whole time: `completions_asked` fires,
+`kvetch.complete` opens on the server's task id, and two `Log` frames name the kill.
+Read the wire before believing the console.
+
+**Two defects found on the way, neither blocking:**
+
+1. `RuntimePlatform::complete` calls `register_counter` on **every** Tab. Metric names
+   are a per-process quota of 16 (`MetricTable::MAX_METRIC_NAMES`) with no dedup, so
+   after ~13 Tabs the registration is refused and `Metric::emit` silently no-ops — the
+   client half of the round trip disappears from the wire exactly when a long session
+   would want it. Register once, hold the handle (`kvetch::serve` already does this).
+2. The same counter emits a constant `1` rather than a running total, so the wire
+   cannot distinguish one completion from fifty.
+
 **Status of the pieces:** the workload, the server, the protocol, the client
-platform method and the scenario body all exist and are correct as far as they
-go; only `stitch-kvetch-completes` is unregistered (it cannot pass) so the gate
-stays green. The fix has a ready gate waiting.
+platform method and the scenario body all exist and work. `stitch-kvetch-completes`
+stays unregistered (it wedges on tab 2) so the gate stays green — the fix has a ready
+gate waiting, and it lives in the kernel.
  `stitch::complete` returns
 `Forced` / `Choices` / `None` over the union of both entries; 6 tests green,
 clippy clean, full stitch suite 723/723. Real output:
