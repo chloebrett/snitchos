@@ -100,7 +100,7 @@ fn the_canon_carries_native_tests() {
         .map(|path| run_tests(&parse_program(&read(path)).expect("canon parses")).len())
         .sum();
 
-    assert!(found >= 69, "expected the canon's native suites, found {found}");
+    assert!(found >= 89, "expected the canon's native suites, found {found}");
 }
 
 /// The gate above passes on arrival, which is only reassuring if it can fail —

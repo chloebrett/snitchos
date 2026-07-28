@@ -31,6 +31,13 @@ pub(crate) const NOT_HOST_TESTED: &[(&str, &str)] = &[
 /// `ecall(nr, [usize; 7])` helper in `user/runtime`, which declares every
 /// argument register `inlateout` so "this register survives the call" is not
 /// expressible — the promise that produced seven bugs in one day.
+#[allow(
+    dead_code,
+    reason = "a policy table, enforced by `raw_ecall_ratchet_tests` below rather than \
+              by any command — so the binary build sees it as dead. Deliberately not \
+              `#[cfg(test)]`: these tables exist to be *read*, and the reason column is \
+              only rendered by `cargo doc` if they compile outside the test cfg."
+)]
 pub(crate) const RAW_ECALL_INTENTIONAL: &[(&str, &str)] = &[
     ("ecall", "the helper itself — the one place the syscall register ABI is written down"),
     ("exit_with", "divergent (`options(noreturn)`); nothing returns, so nothing can be clobbered"),
@@ -41,6 +48,7 @@ pub(crate) const RAW_ECALL_INTENTIONAL: &[(&str, &str)] = &[
 /// yet. **This number may only ever go down.** It is a ratchet, not a budget: it
 /// grandfathers what exists so an *eighth* instance of the clobber bug can't be
 /// added silently, without demanding a big-bang rewrite of correct code.
+#[allow(dead_code, reason = "test-enforced policy; see `RAW_ECALL_INTENTIONAL`")]
 pub(crate) const RAW_ECALL_GRANDFATHERED: usize = 22;
 
 /// Names of the functions containing a hand-rolled `asm!("ecall", …)` in `src`.
@@ -49,6 +57,7 @@ pub(crate) const RAW_ECALL_GRANDFATHERED: usize = 22;
 /// `"ecall"` string literal (which only ever appears as asm text; prose uses
 /// backticks). A real parser would be more precise and far more machinery than a
 /// ratchet warrants.
+#[allow(dead_code, reason = "test-enforced policy; see `RAW_ECALL_INTENTIONAL`")]
 pub(crate) fn raw_ecall_sites(src: &str) -> Vec<&str> {
     let mut current = "";
     let mut found = Vec::new();
@@ -132,6 +141,11 @@ pub(crate) fn riscv_only_plan<'a>(
 /// its 104 hits turned out to be ~54 mechanical doc-backticks plus ordinary
 /// style, and it now opts in like everything else. Keep it empty unless a crate
 /// earns an entry with a *measured* reason — "it's bare-metal" is not one.
+///
+/// (Also linked from [`RUSTDOC_EXEMPT`], which is why this must stay outside the
+/// test cfg: `#[cfg(test)]` here breaks that intra-doc link, and broken intra-doc
+/// links are a gate failure.)
+#[allow(dead_code, reason = "test-enforced policy; see `RAW_ECALL_INTENTIONAL`")]
 pub(crate) const LINTS_EXEMPT: &[(&str, &str)] = &[];
 
 /// Whether a manifest inherits the workspace lint table.
@@ -140,6 +154,7 @@ pub(crate) const LINTS_EXEMPT: &[(&str, &str)] = &[];
 /// the only thing that would need one. The key must sit *inside* a `[lints]`
 /// section — `edition.workspace = true` under `[package]` is the common idiom
 /// and must not read as a lints opt-in.
+#[allow(dead_code, reason = "test-enforced policy; see `RAW_ECALL_INTENTIONAL`")]
 fn opts_into_workspace_lints(manifest: &str) -> bool {
     let mut in_lints = false;
     for line in manifest.lines() {
@@ -158,6 +173,7 @@ fn opts_into_workspace_lints(manifest: &str) -> bool {
 /// The crates that neither inherit the workspace lint table nor have a written
 /// reason not to, given each member's `(name, manifest text)`. Empty is the
 /// healthy state. A stale exemption is an error, as everywhere else.
+#[allow(dead_code, reason = "test-enforced policy; see `RAW_ECALL_INTENTIONAL`")]
 fn lints_optin_gaps<'a>(
     manifests: &[(&'a str, String)],
     exempt: &[(&str, &str)],
@@ -267,10 +283,13 @@ pub(crate) fn unit_test_plan<'a>(
 }
 
 /// Run every host-side check, in order: each workspace crate's unit tests, the
-/// loom model-checks, and the generated-diagram drift check. Returns `SUCCESS`
-/// only if all pass. Bails out on first failure (no point continuing if a
-/// foundation crate is broken).
-
+/// loom model-checks, the portability check, the doc-link check and rustdoc.
+/// Returns `SUCCESS` only if all pass. Bails out on first failure (no point
+/// continuing if a foundation crate is broken).
+///
+/// **Not** the generated-diagram drift check, despite what this said until
+/// 2026-07-29: that moved to `xtask-itest`'s nextest phase when the tool was
+/// split, so lean `xtask` need not link snemu to run the gate.
 pub fn run_unit_tests() -> ExitCode {
     let members = match workspace_members() {
         Ok(m) => m,

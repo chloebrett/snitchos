@@ -108,7 +108,11 @@ Both new snemu tests are behavioural (through `step()`), and the
 legal-but-unmodelled path keeps its own test — see 3a, which moved its witness to
 `mret` once the FS gate started (correctly) trapping `fadd.d`.
 
-## Increment 3 — snemu FP: register file, `fcsr`, decode/exec, `sstatus.FS`
+## Increment 3 — snemu FP: register file, `fcsr`, decode/exec, `sstatus.FS` — **DONE**
+
+All of 3a and 3b's seven steps are done. One cosmetic follow-up survives, in step 3:
+`StepError` has no `Display` impl, so `UnsupportedRoundingMode` reports its mode
+numerically.
 
 ### 3a — the `sstatus.FS` gate — **DONE**
 
@@ -179,9 +183,8 @@ observable behaviour until the kernel enables FP:
    rejects FP via its catch-all, so blocks end before one — but that invariant is
    pinned rather than inherited, since a mis-compiled FP block is the failure
    `snemu diff` cannot audit (both sides would be snemu's own code).
-   Still to do here: teach `expand` the compressed FP forms
-   (`c.fld`/`c.fsd`/`c.fldsp`/`c.fsdsp`). Until then they report as snemu gaps,
-   which is correct but will block real programs. Also, "reading an improperly boxed
+   ~~Still to do here: teach `expand` the compressed FP forms
+   (`c.fld`/`c.fsd`/`c.fldsp`/`c.fsdsp`).~~ **Done — see step 6 below.** Also, "reading an improperly boxed
    value yields canonical NaN" is an *arithmetic* rule — it lands with step 3, not
    here; step 2 only establishes the box on load.
 3. **OP-FP** — **DONE.** Arithmetic (`fadd`/`fsub`/`fmul`/`fdiv`/`fsqrt`), sign
@@ -314,15 +317,16 @@ FP instruction never traps, so never gets `FS` on and never pays. The flag only 
 refusing anything if some program is deliberately built soft-float. The
 `RefuseUnauthorised` path is therefore test-covered rather than demonstrated.
 
-**FP registers are still shared, so there is an interim guard.** The kernel cannot yet
-save/restore the 32 FP registers across a context switch, so a second FP process would
-silently share the first's register file. `FpEnableDecision::RefuseBusy` converts that
-into an observable refusal — one FP process at a time, snitched. This is the trade this
-codebase makes everywhere else (refusals snitch, never silent), but it **is** interim:
-the real fix is FP context switching, at which point the variant, the `FP_HOLDERS`
-counter and the `release` hooks on both death paths all disappear. ~~Today only the REPL
-uses FP, so nothing hits it.~~ **Measured false, 2026-07-28: the completion feature hits
-it every time.** See below.
+**~~FP registers are still shared, so there is an interim guard.~~ Retired by 4b.**
+While it stood: the kernel could not save/restore the 32 FP registers across a context
+switch, so a second FP process would silently share the first's register file.
+`FpEnableDecision::RefuseBusy` converted that into an observable refusal — one FP
+process at a time, snitched — which is the trade this codebase makes everywhere else
+(refusals snitch, never silent). It was always interim, and the real fix was FP context
+switching, at which point the variant, the `FP_HOLDERS` counter and the `release` hooks
+on both death paths all disappeared. They have. ~~Today only the REPL uses FP, so
+nothing hits it.~~ **Measured false, 2026-07-28: the completion feature hit it every
+time** — which is what forced 4b. See below.
 
 ## Increment 4b — FP context switching — **DONE (2026-07-28)**
 
@@ -338,13 +342,10 @@ before the fix) and by the negative oracle in `default-boot-starts-init`.
 The plan, its two design calls, and the firmware finding that came out of it:
 [fp-context-switching.md](legacy/fp-context-switching.md).
 
-Needed before two processes can use FP simultaneously. `TaskContext` grows the 32 FP
-registers, saved/restored **only** for tasks whose `FS` is not Off — which is what
-`sstatus.FS`'s Clean/Dirty tracking (increment 3b step 5) exists to make cheap. Touches
-the asm `switch` primitive, so it is a real piece of work rather than a follow-up.
-Removes the `RefuseBusy` guard above.
+**Why it became urgent** — kept because the reasoning is the interesting part, and
+because it is the evidence that the guard had to go rather than be tuned.
 
-**It has a customer now.** `RefuseBusy` was written as a guard against a case nobody
+**It had a customer.** `RefuseBusy` was written as a guard against a case nobody
 had, on the reading that "only the REPL uses FP". Tab completion breaks that reading
 *structurally*, not incidentally: the oracle lives on **both** sides of the wire — the
 kvetch server samples a completion through it, and `ModelCompleter` re-validates the
@@ -366,16 +367,19 @@ and the REPL then blocks forever in `call` on an endpoint whose only receiver is
 which is why the symptom reads as "the REPL stopped responding" rather than "a process
 died". A failure two processes away from its cause.
 
-Two consequences worth carrying into 4b:
+Two consequences came out of it. 4b settled the second; **the first is still open.**
 
-- **A server's death should be visible to its clients.** The REPL blocked indefinitely
-  on an endpoint with no receiver and no diagnostic; `snitchos.stitch.completions_asked`
-  fires but nothing ever answers. Whatever 4b does about FP, "call an endpoint whose
-  server is dead" wants a refusal rather than a silent hang. Arguably the more serious
-  of the two findings, and independent of FP.
-- **The one-holder guard is now load-bearing in the wrong direction.** It converts a
-  correctness problem (two processes sharing a register file) into a liveness problem
-  (a dead server and a hung client). That is the right trade only while nothing hits it.
+- **⚠ STILL OPEN — a server's death should be visible to its clients.** The REPL blocked
+  indefinitely on an endpoint with no receiver and no diagnostic;
+  `snitchos.stitch.completions_asked` fires but nothing ever answers. "Call an endpoint
+  whose server is dead" wants a refusal rather than a silent hang. Arguably the more
+  serious of the two findings, and independent of FP — 4b removed the *cause* that
+  exposed it (the FP kill), not the silent hang itself. In a codebase whose rule is that
+  refusals snitch, this is the one place a failure is silent.
+- **~~The one-holder guard is load-bearing in the wrong direction.~~** Resolved by 4b:
+  it converted a correctness problem (two processes sharing a register file) into a
+  liveness problem (a dead server and a hung client), which was the right trade only
+  while nothing hit it. `RefuseBusy` is gone.
 
 ## Increment 5 — Stitch floats work on target — **DONE for arithmetic**
 
@@ -388,8 +392,8 @@ deliberate tripwire and duly failed on the first run after increment 4 — that 
 the evidence the enable path genuinely reaches the REPL, rather than the assertion
 having been written to match whatever the code did.
 
-**`stitch-kvetch-completes` is still not registered — and FP *is* still why.** The
-2026-07-26 reading ("a second, independent gap": the REPL never reaches the call, only
+**`stitch-kvetch-completes` is registered as of 2026-07-28 — and FP was why it wasn't.**
+The 2026-07-26 reading ("a second, independent gap": the REPL never reaches the call, only
 the grammar menu shows) was **wrong**, and wrong in an instructive way: it was inferred
 from the bisect scaffolding's own diagnostic rather than from the frame stream. Re-run
 2026-07-28 with the scaffolding removed: the REPL *does* reach the call, the server
@@ -399,16 +403,11 @@ answers, and a babble completion is inserted at the prompt —
 stitch> let x = .. and ..= < "score" +
 ```
 
-— and then the **second** Tab kills the server on `RefuseBusy` (see increment 4b above).
+— and then the **second** Tab killed the server on `RefuseBusy` (see increment 4b above).
 The earlier run saw a grammar-only menu because it was reading the console *after* the
-wedge, where the last completed line is all there is. So: FP was necessary, and is also
-sufficient — via 4b, not via 4. Out of scope here; see
-[repl-completion.md](repl-completion.md).
-
-## Increment 5 — Stitch floats work on target
-
-`1.5 + 1.5` at the REPL evaluates instead of taking down the machine, and
-`stitch-kvetch-completes` registers (its oracle probes the `Float` class). See
+wedge, where the last completed line is all there is. So: FP was necessary, and was also
+sufficient — via 4b, not via 4. `stitch-kvetch-completes` and `stitch-drivel-completes`
+both sit in `xtask-itest/src/itest.rs:217-218` today. Details in
 [repl-completion.md](repl-completion.md).
 
 ## Open questions carried from the design doc

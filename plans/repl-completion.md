@@ -1,11 +1,16 @@
 # Tab completion in the Stitch REPL (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — all seven increments built and working end to end;
-the gate scenario is blocked on a kernel gap (FP context switching), not on
-anything here. See "RESOLVED 2026-07-28" below.**
+**Status:** ✅ **DONE — all seven increments built, working end to end, and gated.**
+`stitch-kvetch-completes` and `stitch-drivel-completes` are both registered
+(`xtask-itest/src/itest.rs:217-218`). The kernel gap that blocked registration —
+FP context switching — shipped as [floating-point.md](floating-point.md)
+increment 4b on 2026-07-28. Two non-blocking defects found on the way are still
+open; see "Two defects found on the way" below.
 
-**Status:** increments 1, 2, 3 done, and increment 4's seam
-with it. `LineEditor::feed_with(bytes, &dyn Completer)` handles Tab; `feed`
+## Increment log
+
+**Increments 1, 2, 3 done, and increment 4's seam
+with it.** `LineEditor::feed_with(bytes, &dyn Completer)` handles Tab; `feed`
 delegates to it with a `NoCompleter`, so every existing caller behaves exactly
 as before (Tab was already dropped with the other control bytes). 12
 line-editor tests, 752/752 across the crate, clippy clean.
@@ -232,9 +237,13 @@ Read the wire before believing the console.
 
 **Status of the pieces:** the workload, the server, the protocol, the client
 platform method and the scenario body all exist and work. `stitch-kvetch-completes`
-stays unregistered (it wedges on tab 2) so the gate stays green — the fix has a ready
-gate waiting, and it lives in the kernel.
- `stitch::complete` returns
+was held unregistered while it wedged on tab 2, so the gate stayed green; the fix
+landed in the kernel (FP context switching) and the scenario is **registered as of
+2026-07-28**, alongside `stitch-drivel-completes`.
+
+---
+
+**Increment 1 done.** `stitch::complete` returns
 `Forced` / `Choices` / `None` over the union of both entries; 6 tests green,
 clippy clean, full stitch suite 723/723. Real output:
 

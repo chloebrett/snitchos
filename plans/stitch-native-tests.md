@@ -209,7 +209,42 @@ Each tranche is green in Stitch before its Rust file goes.
    `isEdit`, `savedText`. The first three are constructions the tests repeat a
    dozen times; the last two exist because `Edit(Str)`/`Save(Str)` carry payloads
    and so are matched rather than compared.
-3. `prelude.st` gets tests, which it has never had. (Next.)
+3. **`prelude.st` gets tests — DONE (2026-07-29).** 20 native tests, taking the
+   canon's suite count from 69 to 89 (`canon.rs::the_canon_carries_native_tests`
+   ratcheted to match). The prelude was the last shipped `.st` file with no
+   assertions of its own, and it is the one loaded into *every* program's globals.
+
+   The cases were chosen so they can fail. Three carry the weight:
+
+   - **`any`/`all` on the empty list** — false and true respectively. The vacuous
+     pair is what a fold gets wrong by seeding the wrong identity, and it is the
+     pair intuition argues with.
+   - **`find` returns the first match, not the last**, over a list with three
+     matches. A fold that overwrites `acc` on every hit passes any single-match
+     test.
+   - **`first`/`last` over three elements, both ends asserted.** They are one fold
+     body apart, and swapping them passes on any one-element list. Verified
+     falsifiable: rewriting `first`'s `Some(_) => acc` arm to `Some(_) => Some(x)`
+     fails with `expect failed: 9 == 7` and names the test.
+
+   Also covered: `count`/`total` (including the empty fold), `contains`,
+   `min`/`max` (asserted with the extreme at both ends, since an accumulator that
+   never updates looks right when the answer is already first), `flatten` (with an
+   empty inner list — the case that separates "concatenate" from "collect"), the
+   five Maybe helpers (`andThen` vs `mapMaybe` pinned on the one case that tells
+   them apart: only `andThen` can turn a `Some` into a `None`), and both contract
+   implementations — `Try` on Maybe/Result and `Functor` on Maybe/Result, the
+   latter asserting `Err`'s payload survives a `map`.
+
+   `each` is **not** covered: its whole effect is the side effect, and there is no
+   double for it at prelude level. It wants an effect handler, which is the
+   deferred fixtures/doubles work below.
+
+   **Cost, measured rather than assumed** (the prelude is parsed at every program
+   start, on target too): source 3505 → 8456 bytes, parse 517µs → 725µs (+40%),
+   `build_env` unchanged at ~135µs — `Item::Test` lowers to a `CoreItem::Test` that
+   nothing registers as a binding, so the cost is parse-only. That is the concrete
+   number the "strip tests from the metal build" item below was missing.
 
 `tests/{print,memory_churn,expressions}.rs` **stay in Rust**: their subject is
 the runtime, not a Stitch program.

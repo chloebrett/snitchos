@@ -18,9 +18,14 @@ const CAPS_DOC: &str = "docs/generated/caps.md";
 /// heartbeat tail. `--steps` remains the hard ceiling.
 const CAP_QUIESCENCE_STEPS: u64 = 10_000_000;
 
-/// Verify every committed diagram in `docs/generated/` is up to date. Called
-/// from the `cargo xtask test` gate so a stale diagram fails the suite. Runs
-/// every target (each prints its own status) and fails if any is stale.
+/// Verify every committed diagram in `docs/generated/` is up to date. Runs every
+/// target (each prints its own status) and fails if any is stale.
+///
+/// Called from `diagram_drift_tests` in `main.rs`, i.e. the nextest phase — *not*
+/// from lean `xtask test`, which must not link snemu. That makes it dead from the
+/// binary's point of view, hence the `allow`: the drift gate is a `#[test]`, and
+/// a `#[test]` is not a caller `cargo build` can see.
+#[allow(dead_code, reason = "the drift gate is `diagram_drift_tests`, invisible to the bin build")]
 pub fn check_all() -> ExitCode {
     let deps_ok = deps(true) == ExitCode::SUCCESS;
     let matrix_ok = itest_matrix(true) == ExitCode::SUCCESS;
