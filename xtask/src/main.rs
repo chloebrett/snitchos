@@ -837,6 +837,8 @@ fn boot(
     if (workload.is_some() || burst.is_some()) && !features_vec.contains(&"itest-workloads") {
         features_vec.push("itest-workloads");
     }
+    // ...and whatever else this particular workload's programs need compiled in.
+    features_vec.extend_from_slice(qemu::workload_features(workload));
     let status = qemu::build_kernel(&features_vec).expect("failed to invoke cargo");
     if !status.success() {
         return ExitCode::from(1);

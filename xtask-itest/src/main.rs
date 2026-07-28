@@ -1315,6 +1315,10 @@ fn snemu_boot(
     if workload.is_some() && !features_vec.contains(&"itest-workloads") {
         features_vec.push("itest-workloads");
     }
+    // ...plus anything this workload's programs must be *compiled* in to have, which
+    // for the drivel rung is its 4.5 MB checkpoint. Without this the workload boots a
+    // zero-length ELF and the kernel panics `Parse(BadMagic)`.
+    features_vec.extend_from_slice(qemu::workload_features(workload));
     // `Mid` = opt-3 kernel with the opt-1 userspace pin (same regime the release
     // itests and `diff --opt mid` use); `Low` = debug. `High` (opt-3 userspace)
     // isn't exposed here — that's the deliberate-UB build, reachable via `itest`.
@@ -1343,6 +1347,13 @@ fn snemu_boot(
     }
     if interactive {
         cmd.arg("--interactive");
+        // A session has a person waiting in it, so it gets the speed flags the itest
+        // uses. Left off, the plain interpreter takes ~60s to reach a Stitch prompt
+        // where the JIT takes ~6s — and a minute of blank screen is indistinguishable
+        // from a hang, which is how the first user of this feature read it. The
+        // meta-loop's *default* stays the plain interpreter: a fidelity run wants the
+        // simplest execution path, and this is not one.
+        cmd.args(["--jit", "--native-ops"]);
     }
     if let Some(name) = workload {
         cmd.args(["--workload", name]);

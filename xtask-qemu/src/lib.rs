@@ -140,6 +140,27 @@ pub fn build_kernel(features: &[&str]) -> std::io::Result<std::process::ExitStat
     build_kernel_profiled(features, OptLevel::Low)
 }
 
+/// Kernel features a workload needs **beyond** `itest-workloads`.
+///
+/// The registry is additive at runtime — one binary, `workload=` selects — and that
+/// holds while programs are small. `kvetch-drivel` is the exception: it embeds ~4.5 MB
+/// of trained weights, more than the rest of the image put together, enough to push a
+/// 16 MiB machine out of frames at userspace load. So it is gated, and a caller that
+/// boots one of its workloads has to ask for it.
+///
+/// **This lives here, beside `build_kernel`, because every path that builds a kernel
+/// for a workload needs the same answer.** It first shipped as a private helper in the
+/// itest audit, and `snemu boot --workload stitch-drivel` promptly booted a kernel
+/// with an empty ELF stub and panicked `Parse(BadMagic)` — a mapping duplicated per
+/// call site is a mapping that is wrong at all but one of them.
+#[must_use]
+pub fn workload_features(workload: Option<&str>) -> &'static [&'static str] {
+    match workload {
+        Some("kvetch-drivel" | "stitch-drivel") => &["kvetch-drivel"],
+        _ => &[],
+    }
+}
+
 /// The kernel ELF path for a given profile. Cargo writes the debug build to
 /// `.../debug/kernel` and the optimized build to `.../release/kernel`; a caller
 /// that built with `--release` must read from the matching directory.

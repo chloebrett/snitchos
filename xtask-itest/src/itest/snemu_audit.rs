@@ -466,17 +466,18 @@ impl SpeedConfig {
 /// group's frames, and print a per-scenario + summary report. `limit` caps the
 /// number of workload groups (faster smoke). Exit is always `SUCCESS` — the
 /// audit *reports* fidelity, it doesn't gate on it.
-/// Kernel features this selection of scenarios needs beyond `itest-workloads`.
+/// Kernel features this selection of scenarios needs beyond `itest-workloads`: the
+/// union of what each selected scenario's workload asks for.
 ///
-/// The workload registry is additive at *runtime* precisely so one kernel serves
-/// every scenario, and that holds while the programs are small. `kvetch-drivel` is
-/// the exception the design anticipated ("genuinely compile-time variants — rare"):
-/// its checkpoint is larger than the rest of the image combined.
+/// The per-workload answer lives in [`crate::qemu::workload_features`], not here — a
+/// second copy of that mapping is how `snemu boot --workload stitch-drivel` ended up
+/// booting an empty ELF while the itest was fine.
 fn kernel_features(work: &[&itest_harness::Scenario]) -> Vec<&'static str> {
-    const DRIVEL_WORKLOADS: [&str; 2] = ["kvetch-drivel", "stitch-drivel"];
-    let needs_drivel =
-        work.iter().any(|s| s.workload.is_some_and(|w| DRIVEL_WORKLOADS.contains(&w)));
-    if needs_drivel { vec!["kvetch-drivel"] } else { Vec::new() }
+    let mut features: Vec<&'static str> =
+        work.iter().flat_map(|s| crate::qemu::workload_features(s.workload)).copied().collect();
+    features.sort_unstable();
+    features.dedup();
+    features
 }
 
 pub fn run(
