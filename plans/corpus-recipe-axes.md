@@ -1,9 +1,22 @@
 # Corpus recipe axes — 100 domains and a sampled crossing each
 
-**Status: 📐 DATA — not started.** Axis values for
-[corpus-mvp.md](corpus-mvp.md)'s Increment 3 recipe-tuple generator. Split out of
-that plan to keep it readable; the *rules* for crossing these axes live there,
-the *values* live here.
+**Status: 📐 DATA — shipped as `cram-gen/assets/recipes/batch9.toml`, and
+superseded for new batches.** Axis values for [corpus-mvp.md](corpus-mvp.md)'s
+Increment 3 recipe-tuple generator. Split out of that plan to keep it readable;
+the *rules* for crossing these axes live there, the *values* live here.
+
+**The 100 below are batch9's sheet and are frozen.** They are the record of what
+produced `corpora/batch9`, so the findings in
+[../notes/batch9-findings.md](../notes/batch9-findings.md) can still be read back
+onto the axes that produced them. New batches draw from
+`cram-gen/assets/recipes/batch10.toml` — 500 domains, each asked for at two
+different crossings, flattened so a run covers every domain before it repeats
+one. Pick a sheet with `cargo xtask cram --gen --recipes <name>`; the default is
+the newest. The rules on this page (clauses, declaration-counted sizes, the
+size↔construct-count crossing rule) all still hold; what changed is the size mix
+and the size latitude, both from Finding 1 of the batch9 notes — parse-death is
+a monotone function of program length, so batch10 skews small and its briefs no
+longer end "if the program naturally wants to be bigger, let it be".
 
 Distinguishing clauses are model-generated (Claude) and unreviewed. **Read them
 before use** — the whole point of the clause is that it names the real
@@ -344,5 +357,37 @@ Sizes: 24 small · 56 medium · 20 large. Shapes: 62 module · 14 server loop ·
 should draw shapes uniformly, and this seed under-represents `script` badly.
 Treated as a review finding rather than a target distribution.
 
-Every crossing above respects the size↔construct-count rule. None has been
-validated by generating a program.
+~~Every crossing above respects the size↔construct-count rule.~~ **Five do not** —
+`taxi meter`, `tip pooling`, `chess clock`, `sauna booking` and
+`dog licence register` are all `small` asked for three constructs. The claim was
+written, never checked, and only surfaced when batch10 made the rule a test. They
+stay in `batch9.toml` because that sheet is the record of what produced the
+corpus; the test pins them so the count cannot grow.
+
+None has been validated by generating a program.
+
+## What batch10's sheet does differently
+
+Validated now — 973 programs' worth. `cram-gen/assets/recipes/batch10.toml`
+carries these 100 domains forward with their clauses intact, re-crossed, plus 400
+new ones, and changes four things:
+
+| | batch9 | batch10 |
+|---|---|---|
+| domains | 100 | 500 |
+| rows | 100 (one crossing each) | 1000 (two crossings each) |
+| repeats | same domain **at the same crossing**, ten times | same domain at two different crossings |
+| sizes | 24 small · 56 medium · 20 large | 500 small · 462 medium · 38 large |
+| shapes | 62 module · 14 server · 5 script · 11 library | 447 module · 162 server · 158 script · 233 library |
+| latitude | "if the program naturally wants to be bigger, let it be" | "a longer program is not a better one" |
+| opening line | "Write a `<domain>` **module**", whatever the shape | names the shape: module / script / service / library |
+
+The crossings flatten **pass-major** — every domain's first crossing, then every
+domain's second — so a 500-candidate run sees 500 distinct domains rather than
+250 of them twice. The eight domains Finding 4 found to be zero-yield
+(`sudoku grid`, `bowling scorecard`, `go territory scoring`, `darts scoring`,
+`cribbage board`, `orienteering control points`, `playlist shuffling`,
+`woodworking cut list`) are **kept deliberately**: the finding is that Stitch
+cannot express indexed grid iteration in a program that survives its own length,
+and asking for a smaller program is a different experiment rather than a rerun of
+the same one. Their yield at `small` is the thing to look at in batch10.

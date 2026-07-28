@@ -192,21 +192,258 @@ fn correction_rewinds_to_the_last_good_prefix_and_resumes() {
 /// Variety is the whole point of a corpus: one recipe repeated 500 times is one
 /// program written 500 ways. The axes come from `plans/corpus-recipe-axes.md`.
 #[test]
-fn there_are_a_hundred_recipes_and_they_cycle_deterministically() {
-    assert_eq!(cram_gen::recipe::count(), 100);
+fn a_sheet_cycles_deterministically() {
+    let sheet = cram_gen::recipe::sheet("batch9").unwrap();
+    let first = sheet.nth(0);
 
-    let first = cram_gen::recipe::nth(0);
-    assert_eq!(cram_gen::recipe::nth(0).domain, first.domain, "must be deterministic");
-    assert_ne!(cram_gen::recipe::nth(1).domain, first.domain);
+    assert_eq!(sheet.nth(0).domain, first.domain, "must be deterministic");
+    assert_ne!(sheet.nth(1).domain, first.domain);
     // Past the end it wraps, so `--count 500` gives five passes over the set.
-    assert_eq!(cram_gen::recipe::nth(100).domain, first.domain);
+    assert_eq!(sheet.nth(sheet.count()).domain, first.domain);
+}
+
+/// batch9's sheet is the record of what produced `corpora/batch9`, so it is
+/// frozen: 100 recipes, in that order, rendered the way they were rendered then.
+/// A later sheet is a new file, never an edit to this one.
+#[test]
+fn the_batch9_sheet_is_frozen_at_the_hundred_that_produced_batch9() {
+    let sheet = cram_gen::recipe::sheet("batch9").unwrap();
+
+    assert_eq!(sheet.count(), 100);
+    assert_eq!(sheet.nth(0).domain, "warehouse bin allocation");
+    assert_eq!(sheet.nth(99).domain, "lost pet register");
+}
+
+/// Pass-major, and this is the whole reason crossings are a list rather than
+/// repeated rows: a 500-candidate run over a 500-domain sheet sees all 500
+/// domains once, instead of the first 250 twice. The axes only buy variety if a
+/// short run gets the spread as well as a long one does.
+#[test]
+fn crossings_flatten_pass_major_so_a_short_run_sees_every_domain() {
+    let text = r#"
+        [[recipe]]
+        domain = "one"
+        clause = "c"
+        crossings = [
+          { constructs = "prod", size = "small", shape = "module" },
+          { constructs = "sum", size = "large", shape = "script" },
+        ]
+
+        [[recipe]]
+        domain = "two"
+        clause = "c"
+        crossings = [
+          { constructs = "prod", size = "small", shape = "module" },
+          { constructs = "sum", size = "large", shape = "script" },
+        ]
+    "#;
+
+    let sheet = cram_gen::recipe::Sheet::parse("fixture", text).unwrap();
+
+    let order: Vec<String> = (0..4).map(|at| sheet.nth(at).domain).collect();
+    assert_eq!(order, vec!["one", "two", "one", "two"]);
+    assert_eq!(sheet.nth(0).size, "small", "the first pass is the first crossing");
+    assert_eq!(sheet.nth(2).size, "large", "the second pass is the second crossing");
+}
+
+/// batch9's spelling — one inline crossing per row — still parses, because the
+/// sheet that produced a batch has to keep producing it.
+#[test]
+fn an_inline_crossing_is_one_crossing() {
+    let text = r#"
+        [[recipe]]
+        domain = "one"
+        clause = "c"
+        constructs = "prod"
+        size = "small"
+        shape = "module"
+    "#;
+
+    let sheet = cram_gen::recipe::Sheet::parse("fixture", text).unwrap();
+
+    assert_eq!(sheet.count(), 1);
+    assert_eq!(sheet.nth(0).constructs, "prod");
+}
+
+/// A row that names neither is a mistake in the data, and it has to fail loudly:
+/// a sheet that silently drops rows generates a batch against fewer axes than
+/// anybody chose, and the manifest would not say so.
+#[test]
+fn a_row_with_no_crossing_at_all_is_an_error() {
+    let text = "[[recipe]]\ndomain = \"one\"\nclause = \"c\"\n";
+
+    let error = cram_gen::recipe::Sheet::parse("fixture", text).unwrap_err();
+
+    assert!(error.contains("one"), "must name the row: {error}");
+}
+
+/// The point of the sheet: 500 domains, each asked for twice at different
+/// crossings. batch9 asked each of its 100 domains ten times at the *identical*
+/// crossing, so nine of every ten programs varied only by sampling noise.
+#[test]
+fn the_default_sheet_asks_every_domain_twice() {
+    let sheet = cram_gen::recipe::sheet(cram_gen::recipe::DEFAULT).unwrap();
+    let domains = sheet.domains().len();
+
+    assert_eq!(domains, 500);
+    assert_eq!(sheet.count(), domains * 2);
+
+    let first_pass: std::collections::HashSet<String> =
+        (0..domains).map(|at| sheet.nth(at).domain).collect();
+    assert_eq!(first_pass.len(), domains, "the first pass must cover every domain once");
+}
+
+/// Finding 1 of `notes/batch9-findings.md`: parse-death is a monotone function
+/// of program length, 16% in the shortest decile against 92% in the longest. The
+/// size mix is half of the response to that — the wording is the other half.
+#[test]
+fn the_default_sheet_skews_small() {
+    let sheet = cram_gen::recipe::sheet(cram_gen::recipe::DEFAULT).unwrap();
+
+    let count = |size: &str| (0..sheet.count()).filter(|at| sheet.nth(*at).size == size).count();
+    let (small, medium, large) = (count("small"), count("medium"), count("large"));
+
+    assert_eq!(small + medium + large, sheet.count(), "every size must be one of the three");
+    assert!(small * 2 >= sheet.count(), "at least half should be small, got {small}");
+    assert!(small > medium, "small should be the biggest bucket, got {small} vs {medium}");
+    assert!(large * 10 < sheet.count(), "large should be a tail, got {large}");
+}
+
+/// The one hard crossing rule from `plans/corpus-recipe-axes.md`: construct
+/// count scales with size — small 1–2, medium 2–3, large 3–4. Four constructs
+/// asked of a small program is a brief that cannot be satisfied at that size,
+/// and the model resolves that by writing a bigger program, which Finding 1
+/// says is what kills the yield.
+#[test]
+fn every_recipe_respects_the_size_to_construct_count_rule() {
+    let sheet = cram_gen::recipe::sheet(cram_gen::recipe::DEFAULT).unwrap();
+
+    for at in 0..sheet.count() {
+        let recipe = sheet.nth(at);
+        let count = recipe.constructs.split(',').count();
+        let (least, most) = match recipe.size.as_str() {
+            "small" => (1, 2),
+            "large" => (3, 4),
+            _ => (2, 3),
+        };
+        assert!(
+            (least..=most).contains(&count),
+            "{} at {} asks for {count} constructs, not {least}–{most}: {}",
+            recipe.domain,
+            recipe.size,
+            recipe.constructs
+        );
+    }
+}
+
+/// batch9 breaks that rule in five rows, all of them a `small` asked for three
+/// constructs — `plans/corpus-recipe-axes.md` claimed every crossing respected
+/// it, and that claim was never checked. They stay, because the sheet is the
+/// record of what produced the corpus and editing it would break the
+/// correspondence. Pinned rather than fixed, so the count cannot grow.
+#[test]
+fn batch9_carries_five_crossings_that_break_the_construct_count_rule() {
+    let sheet = cram_gen::recipe::sheet("batch9").unwrap();
+
+    let broken: Vec<String> = (0..sheet.count())
+        .map(|at| sheet.nth(at))
+        .filter(|recipe| recipe.size == "small" && recipe.constructs.split(',').count() > 2)
+        .map(|recipe| recipe.domain)
+        .collect();
+
+    assert_eq!(
+        broken,
+        vec!["taxi meter", "tip pooling", "chess clock", "sauna booking", "dog licence register"]
+    );
+}
+
+/// batch9's seed was 62% module, which left `script` and `server loop` barely
+/// exercised — and shape is the axis that changes a program's skeleton rather
+/// than its nouns. No shape may be more than half the sheet.
+#[test]
+fn the_default_sheet_spreads_its_shapes() {
+    let sheet = cram_gen::recipe::sheet(cram_gen::recipe::DEFAULT).unwrap();
+
+    let count = |shape: &str| (0..sheet.count()).filter(|at| sheet.nth(*at).shape == shape).count();
+    let shapes = ["module", "script", "server loop", "library-with-heavy-tests"];
+    let counts: Vec<usize> = shapes.iter().map(|shape| count(shape)).collect();
+
+    assert_eq!(counts.iter().sum::<usize>(), sheet.count(), "every shape must be a known one");
+    for (shape, at) in shapes.iter().zip(&counts) {
+        assert!(at * 10 >= sheet.count(), "{shape} is under a tenth of the sheet at {at}");
+        assert!(at * 2 <= sheet.count(), "{shape} is over half the sheet at {at}");
+    }
+}
+
+/// The other half of the response to Finding 1. batch9's briefs ended "if the
+/// program naturally wants to be bigger, let it be" — which is exactly the
+/// latitude the yield curve says is expensive. The old sheet keeps the old
+/// wording, because it is the record of what produced that corpus.
+#[test]
+fn a_held_size_policy_does_not_invite_a_longer_program() {
+    let held = cram_gen::recipe::sheet("batch10").unwrap().nth(0).render();
+    let grew = cram_gen::recipe::sheet("batch9").unwrap().nth(0).render();
+
+    assert!(held.contains("A longer program is not a better one"), "{held}");
+    assert!(!held.contains("let it be"), "{held}");
+    assert!(grew.contains("let it be"), "batch9's wording is frozen: {grew}");
+    // Both still count declarations, never lines — a model cannot count lines
+    // and wrecks a working program trying to.
+    assert!(!held.contains("lines") && !grew.contains("lines"));
+}
+
+/// The opening line used to call every program a module and then the next line
+/// called it a script. batch9 could carry that because 62% of it really was
+/// modules; batch10 spreads the shapes, so the brief now contradicts itself more
+/// often than not — and a brief that argues with itself is exactly the
+/// reconciliation a small model fails at.
+#[test]
+fn the_opening_line_names_the_shape_it_then_describes() {
+    let sheet = cram_gen::recipe::sheet("batch10").unwrap();
+
+    for at in 0..sheet.count() {
+        let recipe = sheet.nth(at);
+        let noun = match recipe.shape.as_str() {
+            "script" => "script",
+            "server loop" => "service",
+            "library-with-heavy-tests" => "library",
+            _ => "module",
+        };
+        let brief = recipe.render();
+        assert!(
+            brief.starts_with(&format!("Write a {} {noun}:", recipe.domain)),
+            "a {} should not open as a {noun}: {brief}",
+            recipe.shape
+        );
+    }
+}
+
+/// batch9's briefs called everything a module, and that wording is what produced
+/// `corpora/batch9`. It does not get retrospectively improved.
+#[test]
+fn batch9_still_calls_every_program_a_module() {
+    let sheet = cram_gen::recipe::sheet("batch9").unwrap();
+    let script = (0..sheet.count()).map(|at| sheet.nth(at)).find(|r| r.shape == "script").unwrap();
+
+    assert!(script.render().starts_with(&format!("Write a {} module:", script.domain)));
+}
+
+/// An unknown name is an error that says what does exist — a typo'd `--recipes`
+/// silently falling back to the default would train a batch on the wrong axes
+/// and nothing downstream would report it.
+#[test]
+fn an_unknown_sheet_names_the_ones_that_exist() {
+    let error = cram_gen::recipe::sheet("batch11").unwrap_err();
+
+    assert!(error.contains("batch11"), "must name what was asked for: {error}");
+    assert!(error.contains("batch9") && error.contains("batch10"), "must list the sheets: {error}");
 }
 
 /// The rendered brief must carry the distinguishing clause — a bare domain name
 /// lets the model default to the same records-plus-filter program every time.
 #[test]
 fn a_rendered_recipe_states_the_computation_not_just_the_domain() {
-    let recipe = cram_gen::recipe::nth(0);
+    let recipe = cram_gen::recipe::sheet("batch9").unwrap().nth(0);
     let brief = recipe.render();
     assert!(brief.contains(&recipe.domain), "domain missing");
     assert!(brief.contains(&recipe.clause), "distinguishing clause missing");
@@ -402,6 +639,8 @@ fn a_candidate_record_serialises_the_whole_funnel_state() {
     let record = cram_gen::CandidateRecord {
         index: 7,
         domain: "sauna booking".into(),
+        size: "small".into(),
+        shape: "module".into(),
         stage: "parse".into(),
         detail: "unexpected character `&`".into(),
         tokens: 412,
@@ -411,9 +650,16 @@ fn a_candidate_record_serialises_the_whole_funnel_state() {
         corrections: Vec::new(),
     };
     let json = serde_json::to_string(&record).expect("serialises");
-    for expected in
-        ["\"index\":7", "\"stage\":\"parse\"", "\"tokens\":412", "\"reasoned\":true"]
-    {
+    // The crossing is on the row, not just the domain: a sheet that asks the
+    // same domain at two sizes cannot be analysed per domain alone.
+    for expected in [
+        "\"index\":7",
+        "\"stage\":\"parse\"",
+        "\"tokens\":412",
+        "\"reasoned\":true",
+        "\"size\":\"small\"",
+        "\"shape\":\"module\"",
+    ] {
         assert!(json.contains(expected), "{expected} missing from {json}");
     }
 }

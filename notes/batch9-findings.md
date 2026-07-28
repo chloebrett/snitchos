@@ -271,6 +271,73 @@ this ladder needs next; corpus is. Throughput on that is the real constraint —
 36.6 tok/s, a corpus big enough to feed `cliche` is several hundred hours of generation, so
 Findings 1–4 (yield per candidate) matter more than any training-side change.
 
+### Half the training budget went on English prose
+
+Comments are in the corpus verbatim — nothing strips them, and the samples make it obvious
+that is where the capacity is going.
+
+| corpus | comment bytes | comment tokens | lines |
+|---|---|---|---|
+| batch9 (all 973) | 44.2% | **47.3%** | 88 733 comment / 139 370 code / 36 706 blank |
+| real `.st` | 37.8% | 38.3% | 1 625 comment / 4 277 code / 1 040 blank |
+
+**Nearly half of every token this model saw was English.** Modelling English prose is not
+something a 1M-parameter transformer can do — the samples are full of `getAmnestyPolicyToBmnesty`,
+`puzzle.persudget(puzzle)`, "a rolling-recal days" — so that half of the budget buys almost
+nothing, while competing for the same parameters as the grammar.
+
+It also **inflates the parse rate**. Over 60 samples at 96 tokens (temperature 0.8):
+
+- 20/60 parsed (33.3%),
+- **5 of those 20 contain no code line at all** — a file of pure comments parses trivially,
+- parse rate among samples that do contain code: **15/55 = 27%**,
+- parsing samples average **67%** comment text; failing ones average 37%.
+
+So the more of a sample is comment, the more likely it "parses". The headline 25–29.5%
+figures are measuring grammar and comment-fraction together.
+
+#### …and stripping them makes the model worse
+
+`--strip-comments` drops `//` comments from both sides of the split (skipping `//` inside
+string literals, and removing comment-only lines entirely so blank-line structure survives).
+Two 30 000-step runs, same vocab, both scored against the **same comment-free held-out
+stream** (`corpora/heldout-nocomment`, 187 781 tokens) so the comparison is exact:
+
+| run | training tokens | epochs | train loss | held-out loss | parse rate |
+|---|---|---|---|---|---|
+| `drivel-comments` | 2 932 977 | 21.0 | 2.107 | **2.4497** | 50/200 = 25.0% |
+| `drivel-nocomment` | 1 500 727 | 40.9 | 1.389 | 2.7192 (min 2.706 @ 18k) | 9/200 = 4.5% |
+
+**Stripping comments costs 0.27 nats at predicting code** — which is now the only thing the
+metric measures. Three things are going on:
+
+- Halving the corpus costs more than focusing the budget gains. Same lesson as the
+  parse-failure control and the quip run: at this size, volume is the binding constraint,
+  and that has now been the answer three times.
+- The stripped run memorises much faster — training loss 1.389 against the baseline's 2.107,
+  with the held-out minimum arriving at 18k steps instead of 27k. Code alone is more
+  predictable, so a fixed model runs out of corpus sooner.
+- Plausibly, **the comments are load-bearing**. `// Calculate the remaining free space in a
+  bin` sitting directly above `freeSpace(b: Bin) -> Int` is a free hint, and lexical overlap
+  that blatant is usable even by a 1M model. This experiment cannot separate that from the
+  volume effect; distinguishing them needs a run that keeps the comments but pads the corpus
+  back to 2.93M some other way.
+
+**The parse-rate column is not apples to apples** and should not be read as a 5× regression:
+
+- At a fixed 96-token sample budget, a comment-free sample is *far more code*. The
+  comment-free model has to keep ~96 tokens of syntax balanced where the baseline has to
+  keep ~50 — a harder task, not necessarily a worse model. (`complete items` is much closer:
+  22.0% vs 28.0%.)
+- Stripping leaves slightly longer newline runs at program boundaries — blank lines go from
+  13.9% to 20.8% of all lines, purely because code lines were removed, and the training-text
+  `\n\n` join then sits on top of them. Prompted with `"\n"`, the stripped model burns
+  budget on blank lines: one sampled program opened with thirteen. The corpus artifact
+  itself is small (only 1% of blank runs are 3 or more) but it costs sample budget.
+
+**Conclusion: comments stay in, and `--strip-comments` stays off by default.** They are not
+dead weight paid for in entertainment — they earn their place on the gate metric.
+
 ### Caveats on these numbers
 
 - **The held-out loss is a 64-window sample** (`--eval-batch`, ~8 192 of 302 985 tokens),
@@ -304,8 +371,39 @@ Findings 1–4 (yield per candidate) matter more than any training-side change.
 
 - Commit the incremental `write_manifest`.
 - Repair the rewind splice (Finding 2).
-- Cap program size in the prompt — the recipes should ask for ~150-line programs, not
-  whatever the domain suggests. Finding 1 says that alone roughly doubles yield.
-- Drop or rewrite the ~8 domains that need indexed grid iteration.
+- ~~Cap program size in the prompt~~ — **done**, see below.
+- ~~Drop or rewrite the ~8 domains that need indexed grid iteration~~ — deliberately
+  **kept**, see below.
 - Record `abandoned` in `CandidateRecord`; it is currently computed and thrown away, so
   "the guard gave up" is invisible in the manifest.
+
+## The recipe sheet for batch10
+
+Recipes are now **one sheet per batch**, in `cram-gen/assets/recipes/`, selected with
+`cargo xtask cram --gen --recipes <name>` and recorded in the manifest header.
+`batch9.toml` is the frozen 100 that produced this corpus — including the wording its
+briefs were rendered with, so everything above still corresponds to something.
+`batch10.toml` is the new default:
+
+- **500 domains, 1000 rows.** Each domain is asked for twice at *different* crossings.
+  batch9 asked each of its 100 domains ten times at the identical crossing, so nine of
+  every ten programs varied only by sampling noise.
+- **Pass-major flattening.** All 500 first crossings, then all 500 second ones — a
+  500-candidate run covers every domain rather than half of them twice.
+- **Response to Finding 1**, in two parts. The size mix goes from 24/56/20
+  small/medium/large to 500/462/38, and the brief's closing sentence changes from "if the
+  program naturally wants to be bigger, let it be" to "a longer program is not a better
+  one — cover the core computation, test it, and stop". The cap stays in *declarations*,
+  never lines: `plans/corpus-mvp-spike.md` Findings 004 is that a model cannot count lines
+  and wrecks working code trying to.
+- **Shapes spread**: 62% module becomes 45%, and `script` goes from 5% to 16%. Which
+  exposed a prompt bug worth its own line: every brief opened "Write a `<domain>` module"
+  and then said "Shape: a script" underneath. Survivable while most of the sheet really
+  was modules; wrong more often than right once the shapes spread. batch10's briefs open
+  with the shape's own noun, batch9's still say module.
+- **The eight zero-yield domains are kept.** Finding 4 says they die because indexed grid
+  iteration becomes a long recursive program, and Finding 1 kills long programs. Asking
+  for a small one is a different experiment, and their batch10 yield is what settles it.
+- `CandidateRecord` now carries `size` and `shape` beside `domain`. Per-domain analysis
+  was enough for batch9 because the crossing never varied within a domain; it is not
+  enough here.

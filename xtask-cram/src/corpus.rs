@@ -43,6 +43,7 @@ pub(crate) fn load(
     drop_stages: &[&str],
     held_out_every: usize,
     held_out_root: Option<&Path>,
+    strip: bool,
 ) -> Result<Loaded, String> {
     let mut loaded =
         Loaded { train: Vec::new(), held_out: Vec::new(), held_out_paths: Vec::new(), sources: Vec::new() };
@@ -90,6 +91,13 @@ pub(crate) fn load(
             println!("corpus     {leaked} training programs were already held out — dropped");
         }
         loaded.train = kept;
+    }
+
+    // Both sides, always. A model trained on code alone and scored against text
+    // that is half prose is being measured on a distribution it never saw.
+    if strip {
+        loaded.train = loaded.train.iter().map(|text| strip_comments(text)).collect();
+        loaded.held_out = loaded.held_out.iter().map(|text| strip_comments(text)).collect();
     }
 
     Ok(loaded)
@@ -182,16 +190,75 @@ fn kept_indices(manifest_json: &str, drop_stages: &[&str]) -> Result<Vec<usize>,
     Ok(kept)
 }
 
+/// `program` with its `//` comments removed.
+///
+/// 47% of batch9's tokens are comment text, and a rung this size cannot model
+/// English — so half the training budget competes with the grammar for the same
+/// parameters and buys prose like `getAmnestyPolicyToBmnesty`. Stripping is a
+/// flag rather than a policy because the comments are the *point* of the corpus
+/// for anything above syntax; this exists to measure what they cost.
+///
+/// A line that was only a comment is removed entirely rather than left blank:
+/// blank lines separate top-level items in Stitch, so leaving one behind would
+/// teach a structure the program never had.
+fn strip_comments(program: &str) -> String {
+    let mut out = String::with_capacity(program.len());
+    // `split('\n')` rather than `lines()`, so a trailing newline survives the
+    // round trip instead of being silently eaten.
+    let mut lines = program.split('\n').peekable();
+
+    while let Some(line) = lines.next() {
+        let code = code_before_comment(line).trim_end();
+        // Only drop a line that *became* empty. One that was already blank is
+        // layout, and layout is what the model is here to learn.
+        if !code.is_empty() || line.trim().is_empty() {
+            out.push_str(code);
+            if lines.peek().is_some() {
+                out.push('\n');
+            }
+        }
+    }
+
+    out
+}
+
+/// The part of `line` before its `//`, if any — skipping over string literals,
+/// because Stitch programs print URLs and `"//---//"` separators.
+fn code_before_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (at, &byte) in bytes.iter().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' && in_string {
+            escaped = true;
+        } else if byte == b'"' {
+            in_string = !in_string;
+        } else if !in_string && byte == b'/' && bytes.get(at + 1) == Some(&b'/') {
+            return &line[..at];
+        }
+    }
+
+    line
+}
+
 /// `programs` minus any program the held-out set already contains.
 ///
 /// By content, not by path. Reusing one frozen held-out set across several runs
 /// is what makes their curves comparable, but the same files are still sitting
 /// in the source directories — so the exclusion has to survive a copy under a
 /// different name.
+///
+/// The key is the program with its comments stripped, so it also survives a
+/// copy written out by `--strip-comments`. Comparing raw bytes would let all
+/// 116 held-out programs back into training the moment the held-out set was
+/// transformed — a leak that nothing downstream would report.
 fn without(programs: &[String], held_out: &[String]) -> Vec<String> {
-    let excluded: std::collections::HashSet<&str> =
-        held_out.iter().map(String::as_str).collect();
-    programs.iter().filter(|program| !excluded.contains(program.as_str())).cloned().collect()
+    let excluded: std::collections::HashSet<String> =
+        held_out.iter().map(|text| strip_comments(text)).collect();
+    programs.iter().filter(|program| !excluded.contains(&strip_comments(program))).cloned().collect()
 }
 
 /// Where `cram_gen` saved a candidate: zero-padded to three digits.
@@ -316,6 +383,61 @@ mod tests {
 
     /// Batch candidates are saved zero-padded to three digits, so the index a
     /// manifest records has to be spelled the same way to find its file.
+    #[test]
+    fn a_whole_line_comment_goes_and_takes_its_line_with_it() {
+        let program = "ext a() -> Int = 1\n// why\next b() -> Int = 2\n";
+
+        assert_eq!(strip_comments(program), "ext a() -> Int = 1\next b() -> Int = 2\n");
+    }
+
+    /// Blank lines separate top-level items, so they are structure, not
+    /// whitespace. A comment block must not leave a hole where the blank lines
+    /// around it were, and must not fill one either.
+    #[test]
+    fn blank_lines_survive_the_comments_between_them() {
+        let program = "ext a() -> Int = 1\n\n// why\n// more why\n\next b() -> Int = 2\n";
+
+        assert_eq!(strip_comments(program), "ext a() -> Int = 1\n\n\next b() -> Int = 2\n");
+    }
+
+    #[test]
+    fn an_indented_comment_goes_too() {
+        let program = "ext a() -> Int = {\n    // why\n    1\n}\n";
+
+        assert_eq!(strip_comments(program), "ext a() -> Int = {\n    1\n}\n");
+    }
+
+    #[test]
+    fn a_trailing_comment_goes_but_its_code_stays() {
+        let program = "ext a() -> Int = 1  // why\n";
+
+        assert_eq!(strip_comments(program), "ext a() -> Int = 1\n");
+    }
+
+    /// The one case a line scan gets wrong if it is naive, and it is not
+    /// hypothetical: Stitch programs print URLs and separator strings.
+    #[test]
+    fn a_slash_slash_inside_a_string_is_not_a_comment() {
+        let program = "let url = \"http://example.com\"\n";
+
+        assert_eq!(strip_comments(program), program);
+        assert_eq!(strip_comments("let rule = \"//---//\"  // why\n"), "let rule = \"//---//\"\n");
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_the_string() {
+        let program = "let q = \"a \\\" // b\"\n";
+
+        assert_eq!(strip_comments(program), program);
+    }
+
+    #[test]
+    fn a_program_with_no_comments_is_untouched() {
+        let program = "ext a() -> Int = 1\n\next b() -> Int = 2\n";
+
+        assert_eq!(strip_comments(program), program);
+    }
+
     /// Reusing a held-out set across runs is the only way two runs are
     /// comparable, and it is also the only way to leak it: the same files are
     /// still sitting in the source directories. Excluding by *content* rather
@@ -328,6 +450,18 @@ mod tests {
         let held_out = vec![String::from("b")];
 
         assert_eq!(without(&programs, &held_out), vec![String::from("a"), String::from("c")]);
+    }
+
+    /// A held-out set written out with `--strip-comments` no longer matches the
+    /// source files byte for byte, and matching on bytes would silently let all
+    /// 116 of them back into training. The comments are not what is being held
+    /// out — the program is.
+    #[test]
+    fn a_held_out_program_still_matches_after_its_comments_were_stripped() {
+        let programs = vec![String::from("// why\next a() -> Int = 1\n"), String::from("b")];
+        let held_out = vec![String::from("ext a() -> Int = 1\n")];
+
+        assert_eq!(without(&programs, &held_out), vec![String::from("b")]);
     }
 
     #[test]

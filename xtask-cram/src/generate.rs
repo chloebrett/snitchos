@@ -22,6 +22,10 @@ use cram_gen::{
 
 pub struct GenOptions {
     pub model: String,
+    /// Which recipe sheet the batch draws its axes from. Recorded in the
+    /// manifest: a corpus whose axes cannot be named later is a corpus whose
+    /// findings cannot be read back onto them.
+    pub recipes: String,
     pub count: usize,
     pub out: Option<PathBuf>,
     pub endpoint: Option<String>,
@@ -33,6 +37,10 @@ pub struct GenOptions {
 }
 
 pub fn run(options: &GenOptions) -> std::io::Result<()> {
+    let sheet = match cram_gen::recipe::sheet(&options.recipes) {
+        Ok(sheet) => sheet,
+        Err(error) => return Err(std::io::Error::other(error)),
+    };
     let mut model = LmStudio::new(options.model.clone());
     model.sampling = options.sampling.clone();
     if let Some(endpoint) = &options.endpoint {
@@ -42,8 +50,11 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
     // Pinned settings go on the record: a later bulk run compared against this
     // one is meaningless if temperature drifted in between.
     let header = format!(
-        "model={} temp={} top_p={} top_k={} presence={} max_tokens={}",
+        "model={} recipes={} ({} recipes over {} domains) temp={} top_p={} top_k={} presence={} max_tokens={}",
         model.model,
+        sheet.name,
+        sheet.count(),
+        sheet.domains().len(),
         model.sampling.temperature,
         model.sampling.top_p,
         model.sampling.top_k,
@@ -60,7 +71,7 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
     for index in 1..=options.count {
         // Cycle the axes: `--count 500` is five passes over all hundred domains,
         // not five hundred copies of the first one.
-        let recipe = cram_gen::recipe::nth(index - 1);
+        let recipe = sheet.nth(index - 1);
         let task = recipe.render();
         println!(
             "── {index:03}/{}  {} · {} · {} ──────────────",
@@ -134,6 +145,8 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
                 records.push(CandidateRecord {
                     index,
                     domain: recipe.domain.clone(),
+                    size: recipe.size.clone(),
+                    shape: recipe.shape.clone(),
                     stage,
                     detail,
                     tokens: run.tokens,

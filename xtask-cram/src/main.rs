@@ -60,6 +60,8 @@ struct Options {
     held_out_every: usize,
     /// Copy the held-out files here, so `--eval --corpus-root` can score them.
     write_held_out: Option<PathBuf>,
+    /// Drop `//` comments from every program, on both sides of the split.
+    strip_comments: bool,
     /// Reuse a held-out set written earlier instead of splitting a fresh one.
     /// Two runs over different training sets are only comparable if they are
     /// measured against the *same* held-out data.
@@ -200,6 +202,8 @@ training on real .st files instead of babble (either flag opts in; both compose)
                         (parse | type | tests | ok) — needs the batch manifest
   --held-out-every <n>  1 file in n is held out, per source    (default 5; 0 = off)
   --write-held-out <d>  copy the held-out files to <d>, for --eval --corpus-root
+  --strip-comments      drop // comments from every program, both sides of the
+                        split — ~47% of batch9's tokens are comment text
   --held-out-root <d>   reuse the held-out set in <d> instead of splitting a
                         fresh one, and drop its programs from training — the
                         only way two runs over different corpora compare
@@ -218,6 +222,8 @@ corpus generation (talks to a local OpenAI-compatible server, e.g. LM Studio):
 
   --gen               generate candidates instead of training
   --model <name>      model id as the server knows it            (required)
+  --recipes <sheet>   which recipe sheet supplies the axes    (default batch10;
+                      batch9 is the frozen 100 that produced corpora/batch9)
   --count <n>         candidates to generate                     (default 10)
   --out <dir>         save each candidate's raw + extracted form
   --temp <f>          sampling temperature                       (default 0.7)
@@ -245,6 +251,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         drop_stages: Vec::new(),
         held_out_every: DEFAULT_HELD_OUT_EVERY,
         write_held_out: None,
+        strip_comments: false,
         held_out_root: None,
         vocab_file: None,
         save_vocab: None,
@@ -255,6 +262,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut generating = false;
     let mut gen_options = generate::GenOptions {
         model: String::new(),
+        recipes: cram_gen::recipe::DEFAULT.to_string(),
         count: 10,
         out: None,
         endpoint: None,
@@ -306,6 +314,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--held-out-every" => options.held_out_every = number(&value()?)?,
             "--write-held-out" => options.write_held_out = Some(PathBuf::from(value()?)),
             "--held-out-root" => options.held_out_root = Some(PathBuf::from(value()?)),
+            "--strip-comments" => options.strip_comments = true,
             "--vocab-file" => options.vocab_file = Some(PathBuf::from(value()?)),
             "--save-vocab" => options.save_vocab = Some(PathBuf::from(value()?)),
             "--name" => options.name = Some(value()?),
@@ -318,6 +327,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--gen" => generating = true,
             "--model" => gen_options.model = value()?,
+            "--recipes" => gen_options.recipes = value()?,
             "--count" => gen_options.count = number(&value()?)?,
             "--out" => gen_options.out = Some(PathBuf::from(value()?)),
             "--endpoint" => gen_options.endpoint = Some(value()?),
@@ -353,6 +363,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
         if gen_options.model.is_empty() {
             return Err(String::from("--gen needs --model"));
         }
+        // Same reasoning for the sheet: a name that does not exist has to fail
+        // here rather than after the first model call, and must never fall back
+        // to the default — a batch generated against axes nobody chose looks
+        // exactly like one that was.
+        cram_gen::recipe::sheet(&gen_options.recipes)?;
         options.generate = Some(gen_options);
         return Ok(options);
     }
@@ -417,6 +432,7 @@ fn gather(options: &Options) -> std::io::Result<(Vec<String>, Vec<String>)> {
         &dropped,
         options.held_out_every,
         options.held_out_root.as_deref(),
+        options.strip_comments,
     )
     .map_err(std::io::Error::other)?;
 
@@ -425,6 +441,9 @@ fn gather(options: &Options) -> std::io::Result<(Vec<String>, Vec<String>)> {
     }
     if !dropped.is_empty() {
         println!("           dropped stages: {}", dropped.join(", "));
+    }
+    if options.strip_comments {
+        println!("           comments stripped from both sides of the split");
     }
 
     if let Some(dir) = &options.write_held_out {

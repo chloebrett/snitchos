@@ -1,0 +1,4062 @@
+# Recipe axes for corpus generation, batch 10 — the diversity dimensions, as data.
+#
+# A sheet is frozen once a batch has been generated from it. `batch9.toml` is the
+# record of what produced `corpora/batch9`, down to the wording its briefs were
+# rendered with; this is a new file rather than an edit to that one, so a finding
+# about that corpus can still be read back onto the axes that produced it.
+# See `cram-gen/src/recipe.rs` and `plans/corpus-recipe-axes.md`.
+#
+# What changed from batch9, and why — `notes/batch9-findings.md`:
+#
+# - **500 domains rather than 100.** batch9 ran each domain ten times at the
+#   *identical* crossing, so nine of every ten programs differed only by sampling
+#   noise. Domain is the axis that moves the identifiers, and identifiers are
+#   most of what a rung this size learns.
+# - **Two crossings per domain, flattened pass-major.** A run sees all 500
+#   domains before it sees any domain twice, and the second asking differs in
+#   size and shape — a different program rather than a re-roll.
+# - **`latitude = "hold"`.** Finding 1: parse-death is a monotone function of
+#   program length, 16% in the shortest decile against 92% in the longest.
+#   batch9's briefs ended "if the program naturally wants to be bigger, let it
+#   be"; this one asks the model to cover the computation and stop.
+# - **The size mix skews small** for the same reason. batch9's seed was 24 small
+#   / 56 medium / 20 large; this one is roughly 55 / 35 / 10.
+# - **Shapes are spread wider.** batch9's seed was 62 module / 14 server loop /
+#   5 script / 11 library-with-heavy-tests, which under-represented `script`
+#   badly enough that the axis was barely exercised.
+# - **`subject = "shape"`.** batch9's briefs opened "Write a <domain> module"
+#   and then said "Shape: a script" on the next line. That contradiction was
+#   survivable while 62% of the sheet really was modules; with the shapes spread
+#   it would be wrong more often than right, and reconciling two facts that
+#   disagree is exactly where a small model fails.
+#
+# `clause` is the load-bearing field. A bare domain name lets a weak model
+# default to the same records-plus-filter program every time; the clause names
+# the actual computation, which is what makes `sauna booking` (interval overlap)
+# and `library hold queue` (FIFO per title with expiry) diverge into genuinely
+# different programs.
+#
+# The first 100 domains are batch9's, carried over with their clauses intact and
+# re-crossed — including the eight Finding 4 named as zero-yield. They are kept
+# deliberately: the finding is about what Stitch cannot express, and a smaller
+# ask at a smaller size is a different experiment rather than the same one.
+
+[policy]
+latitude = "hold"
+subject  = "shape"
+
+[[recipe]]
+domain    = "warehouse bin allocation"
+clause    = "smallest bin that fits; fragmentation matters"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "script" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "bakery inventory"
+clause    = "daily bake against sell-through; staleness expires stock"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "seed catalogue"
+clause    = "germination rates and sowing windows per variety"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "spare-parts bin"
+clause    = "reorder points triggered by consumption rate"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "tool crib checkout"
+clause    = "who holds what, and overdue detection"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "lost-property office"
+clause    = "match found items against claims by description"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "sum, prod, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "pharmacy stock rotation"
+clause    = "first-expiring-first-out, not first-in-first-out"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "cold-chain shipment log"
+clause    = "temperature excursions invalidate a shipment"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "shipping container stowage"
+clause    = "weight distribution and stacking constraints"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map, Result+?", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "museum exhibit rotation"
+clause    = "light exposure budgets limit display time"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "prod, |>, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "library hold queue"
+clause    = "one FIFO queue per title; holds expire if not collected"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "kitchen order queue"
+clause    = "courses fire at different times so a table lands together"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "module" },
+  { constructs = "sum, contract+on, |>", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "barber shop appointments"
+clause    = "variable service durations against chair availability"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "court docket"
+clause    = "priority and continuance push cases down the list"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "classroom timetable"
+clause    = "no room, teacher, or class double-booked"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?, recursion", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "on-call rotation"
+clause    = "fair distribution with rest periods between shifts"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, contract+on, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "ice rink session booking"
+clause    = "capacity per recurring slot, many skaters per session"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "allotment plot waiting list"
+clause    = "seniority ordering with plot-size preferences"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, Maybe", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "community hall bookings"
+clause    = "recurring bookings collide with one-offs"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "telescope observing queue"
+clause    = "targets ranked by visibility window and priority"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, contract+on, |>, uses Telemetry", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "subway turnstile"
+clause    = "fare deduction with entry/exit pairing and stuck-open faults"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "ferry schedule"
+clause    = "tide-dependent sailings and vehicle deck capacity"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "flight manifest"
+clause    = "seat assignment with weight-and-balance limits"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "server loop" },
+  { constructs = "prod, Result+?, recursion, |>", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "parking garage occupancy"
+clause    = "counts per level with oversize-vehicle rules"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "bus stop departure board"
+clause    = "predicted vs scheduled times, with cancellations"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "bike share dock"
+clause    = "rebalancing when docks are full or empty"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, |>, Map", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "level crossing barrier"
+clause    = "a safety interlock state machine"
+crossings = [
+  { constructs = "sum, contract+on", size = "small", shape = "module" },
+  { constructs = "sum, contract+on, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "taxi meter"
+clause    = "a state machine over distance and waiting time, with tariff changes"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "script" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "toll booth"
+clause    = "class-based tariffs and unpaid-toll accumulation"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "elevator dispatch"
+clause    = "assign cars to calls to minimise waiting"
+crossings = [
+  { constructs = "sum, Maybe", size = "small", shape = "script" },
+  { constructs = "sum, contract+on, recursion, Map", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "weather station"
+clause    = "rolling aggregates with gap handling in the series"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, use <-", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "tide table"
+clause    = "harmonic prediction and high/low extraction"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "seismograph log"
+clause    = "event detection above a noise floor"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "water meter readings"
+clause    = "deltas between cumulative readings, including rollover"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, |>, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "air quality monitor"
+clause    = "index bands with threshold-crossing alerts"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "soil moisture probe"
+clause    = "irrigation decisions from depth-layered readings"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "beehive scale"
+clause    = "nectar flow inferred from daily weight change"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "river gauge"
+clause    = "flood stage thresholds and rate-of-rise warnings"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, uses Telemetry, |>", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "street light fault log"
+clause    = "fault clustering suggests a common circuit"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "whale sighting log"
+clause    = "sightings grouped into encounters by time and place"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "household ledger"
+clause    = "double-entry balancing; categories roll up"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, recursion, Map", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "tip pooling"
+clause    = "hours-weighted distribution with rounding remainder"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "market stall takings"
+clause    = "cash reconciliation against recorded sales"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "subscription billing"
+clause    = "proration on mid-cycle plan changes"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "server loop" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "currency exchange board"
+clause    = "cross-rate derivation with spread"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "petty cash box"
+clause    = "receipts must reconcile the float"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "invoice aging"
+clause    = "bucketing by days overdue with escalation"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "vending float reconciliation"
+clause    = "coin denominations against sales"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "locker rental"
+clause    = "periods, deposits and abandonment"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Maybe", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "library fine amnesty"
+clause    = "recompute balances under a retroactive policy"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, contract+on, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "chess clock"
+clause    = "increment and delay modes, flag detection"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "sum, prod, recursion", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "darts scoring"
+clause    = "checkout paths from a remaining score"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "module" },
+  { constructs = "sum, recursion, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "cribbage board"
+clause    = "hand scoring combinatorics (fifteens, runs, pairs)"
+crossings = [
+  { constructs = "sum, recursion", size = "small", shape = "module" },
+  { constructs = "sum, recursion, Map, |>", size = "large", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "bowling scorecard"
+clause    = "strikes and spares pull forward later frames"
+crossings = [
+  { constructs = "sum, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "sudoku grid"
+clause    = "constraint propagation on candidate sets"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "server loop" },
+  { constructs = "prod, recursion, Map, Result+?", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "crossword grid"
+clause    = "slot extraction and intersection consistency"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "dominoes train"
+clause    = "matching ends: constrained graph traversal"
+crossings = [
+  { constructs = "sum, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, recursion, contract+on", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "go territory scoring"
+clause    = "flood-fill regions; distinguish alive groups from dead"
+crossings = [
+  { constructs = "sum, Map", size = "small", shape = "module" },
+  { constructs = "sum, recursion, Map, |>", size = "large", shape = "script" },
+]
+
+[[recipe]]
+domain    = "pinball high scores"
+clause    = "initials table with tie-breaking rules"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, |>, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "tournament bracket"
+clause    = "seeding, byes and advancement"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, recursion, prod", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "swim lane assignment"
+clause    = "seed times into lanes, fastest in the middle"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "marathon split times"
+clause    = "pace projection from partial splits"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "rowing crew seating"
+clause    = "balance port and starboard by side preference"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "referee assignment"
+clause    = "avoid conflicts of interest and travel clashes"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?, recursion", size = "large", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "ski patrol incidents"
+clause    = "triage ordering and resource dispatch"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, contract+on, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "climbing route grading"
+clause    = "consensus grade from a set of opinions"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "campsite pitch allocation"
+clause    = "pitch size and hookup requirements"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "prod, Maybe, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "orienteering control points"
+clause    = "validate a punched course in order"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "sauna booking"
+clause    = "exclusive occupancy, so overlapping intervals must be detected"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, |>, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "hiking trail register"
+clause    = "sign-in/sign-out pairing to find overdue parties"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Maybe", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "greenhouse watering"
+clause    = "zone schedules adjusted by recent rainfall"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "server loop" },
+  { constructs = "prod, contract+on, uses Telemetry, Map", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "bird feeder log"
+clause    = "species counts with seasonal comparison"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "orchard harvest"
+clause    = "per-tree yields and picking-window scheduling"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "sheep flock register"
+clause    = "lineage tracking and lambing records"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "mushroom cultivation"
+clause    = "substrate batches through contamination checks"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "compost turning"
+clause    = "carbon-nitrogen ratio and turn scheduling"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "apiary inspection"
+clause    = "queen status and disease signs per hive over time"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "script" },
+  { constructs = "prod, sum, uses FsWrite, Map", size = "large", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "fish hatchery tank"
+clause    = "stocking density against growth rates"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, |>, Map", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "tree ring measurement"
+clause    = "series cross-dating between cores"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "seed bank vault"
+clause    = "viability testing intervals per accession"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "knitting pattern rows"
+clause    = "stitch-count arithmetic across shaping rows"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "pottery kiln firing"
+clause    = "ramp, soak and cooling schedules per clay body"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, contract+on, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "loom warp threading"
+clause    = "threading and treadling from a draft"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "woodworking cut list"
+clause    = "cutting plan minimising offcut waste"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, |>, Result+?", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "bookbinding signatures"
+clause    = "folding and nesting arithmetic; page order is non-obvious"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Maybe", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "dyeing lot tracking"
+clause    = "batch consistency across dye lots"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "model railway layout"
+clause    = "block occupancy and route setting"
+crossings = [
+  { constructs = "sum, Map", size = "small", shape = "module" },
+  { constructs = "sum, Map, contract+on, recursion", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "brewery fermentation"
+clause    = "a time series against target curves, with alerts"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, contract+on, uses Telemetry", size = "large", shape = "script" },
+]
+
+[[recipe]]
+domain    = "coffee roast profiles"
+clause    = "first-crack timing and development ratio"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "cheese ageing cave"
+clause    = "turn and wash schedules by wheel age"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "server loop" },
+  { constructs = "prod, uses Telemetry, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "playlist shuffling"
+clause    = "avoid repeating artists too closely"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "podcast feed"
+clause    = "episode ordering with seasons and specials"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, Maybe", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "subtitle timing"
+clause    = "interval arithmetic with shift and stretch"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "photo album tagging"
+clause    = "tag hierarchies and set queries"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, recursion, |>", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "radio station rotation"
+clause    = "rotation categories with separation rules"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, contract+on, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "e-reader bookmarks"
+clause    = "position sync across devices with conflicts"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "script" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "thermostat schedule"
+clause    = "setpoints with hold and override precedence"
+crossings = [
+  { constructs = "sum, Maybe", size = "small", shape = "module" },
+  { constructs = "sum, prod, Maybe", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "laundromat machine status"
+clause    = "cycle timing and queue notification"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "dog licence register"
+clause    = "renewal windows and lapse handling"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "lost pet register"
+clause    = "match reports to sightings by area and description"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, recursion, Map, Maybe", size = "large", shape = "module" },
+]
+
+# ── Trades, maintenance and buildings ────────────────────────────────────────
+
+[[recipe]]
+domain    = "boiler service register"
+clause    = "next service due from install date and running hours, whichever comes first"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "plumber's job sheet"
+clause    = "parts used on a job deducted from van stock, shortfalls flagged"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "master key system"
+clause    = "which keys open which doors; a master must open every door below it"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "scaffold inspection"
+clause    = "statutory re-inspection every seven days; an overdue tower may not be used"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "window cleaning round"
+clause    = "houses ordered by street; a skipped house rolls into the next round"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "chimney sweep bookings"
+clause    = "sweep frequency depends on fuel type, not on the calendar alone"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "script" },
+  { constructs = "sum, prod, Maybe", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "pest control treatments"
+clause    = "a follow-up visit falls inside the reinfestation window or the course restarts"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "damp survey readings"
+clause    = "moisture readings by wall height distinguish rising damp from a leak"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "paint tint recipe"
+clause    = "colourant parts scaled to tin volume, rounded to the dispenser's step"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "wallpaper estimate"
+clause    = "rolls needed once the pattern repeat wastes part of every drop"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "electrical circuit register"
+clause    = "sockets grouped by breaker; total load per circuit against its rating"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "appliance test register"
+clause    = "retest interval set by appliance class and environment"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "fire door inspection"
+clause    = "gap measurements against tolerance decide pass, remedy or fail"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "smoke alarm register"
+clause    = "battery and unit replacement fall due on different clocks"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "asbestos register"
+clause    = "survey findings ranked into a reinspection priority"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "script" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "building access fobs"
+clause    = "a fob carries zones; a door demands one, and outside hours demands more"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, contract+on", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "caretaker rota"
+clause    = "cover for a shift found among those not already working that day"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "snagging list"
+clause    = "defects grouped by trade, ordered by severity within each"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, sum, Map, |>", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "loft insulation survey"
+clause    = "depth measured at points; a shortfall converts to a top-up quantity"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "radiator sizing"
+clause    = "heat loss per room drives the output a radiator must meet"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "underfloor heating zones"
+clause    = "loop length caps zone area, so a big room needs splitting"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "septic tank emptying"
+clause    = "interval from tank size and household occupancy"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, Maybe, Map", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "drain survey defects"
+clause    = "coded defects roll up into a structural grade for the run"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "brick order estimate"
+clause    = "bricks per square metre by bond, plus a waste allowance and pack rounding"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "concrete pour schedule"
+clause    = "cure time gates the next pour, so the order constrains the dates"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "crane lift plan"
+clause    = "load against radius from a duty chart; heavier means closer in"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "site induction register"
+clause    = "an induction expires; an uninducted worker cannot be booked on"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, contract+on", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "tool hire returns"
+clause    = "daily rate with a late fee that starts at a different rate"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "plant machinery hours"
+clause    = "service falls due at hour thresholds that repeat, not at dates"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "skip hire"
+clause    = "collection scheduled from delivery plus permitted days on the highway"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Maybe", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "surveyor's level book"
+clause    = "rise-and-fall reduction; the arithmetic check must close"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "property viewing diary"
+clause    = "back-to-back viewings need travel time between addresses"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "tenancy deposit protection"
+clause    = "statutory deadlines counted in working days from receipt"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "rent arrears ladder"
+clause    = "arrears age into notice stages, and a part payment resets the stage"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, contract+on", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "service charge apportionment"
+clause    = "shared costs split by floor area, with the remainder placed somewhere"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "communal bin store"
+clause    = "bin capacity against collection frequency and flat count"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Maybe", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "estate parking permits"
+clause    = "one permit per flat, visitors draw from a shared allowance"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "glazing order"
+clause    = "pane sizes from opening sizes minus tolerance, priced by area band"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "guttering fall"
+clause    = "outlet positions from run length and the fall a run must keep"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "sign-off checklist"
+clause    = "an item cannot be signed until the items it depends on are"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map, Result+?", size = "large", shape = "script" },
+]
+
+[[recipe]]
+domain    = "loft conversion quote"
+clause    = "line items priced by measure, with a contingency on the subtotal"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "hardware shop cut service"
+clause    = "lengths cut from stock bars, offcuts returned to stock if long enough"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "sash window survey"
+clause    = "each window scored on cords, glazing and frame into one repair verdict"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "site fuel bowser"
+clause    = "issues per machine reconciled against deliveries and dipped stock"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "noise permit hours"
+clause    = "permitted working hours differ by day, and an overrun needs consent"
+crossings = [
+  { constructs = "sum, Maybe", size = "small", shape = "module" },
+  { constructs = "sum, prod, contract+on", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "hoarding advertising"
+clause    = "panel bookings by period, with a minimum term and a break clause"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "lift maintenance log"
+clause    = "callouts and services interleave; repeated callouts trigger an overhaul"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "roofing tile order"
+clause    = "tiles per area from headlap, with hip and ridge counted separately"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "handyman quote rounding"
+clause    = "labour billed in part-hours with a minimum callout"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "site visitor badges"
+clause    = "badges issued and returned; anyone still on site at close is chased"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+# ── Health, care and laboratories ────────────────────────────────────────────
+
+[[recipe]]
+domain    = "vaccination schedule"
+clause    = "doses separated by a minimum interval; a missed dose reschedules the rest"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "clinic appointment slots"
+clause    = "some patients need a double slot, so a booking can straddle two"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "repeat prescription"
+clause    = "quantity converts to days of supply; an early request is refused"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "blood donation eligibility"
+clause    = "each deferral reason carries its own wait, and the longest one wins"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Maybe", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "ward bed allocation"
+clause    = "isolation and sex-mixing rules exclude beds an empty bay would allow"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?, Map", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "dental recall interval"
+clause    = "recall length set by a risk score rather than a fixed six months"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "physiotherapy progression"
+clause    = "an exercise advances only after it is tolerated at the current level"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "audiogram classification"
+clause    = "thresholds across frequencies average into a loss category"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "spectacle prescription"
+clause    = "transposing between plus and minus cylinder must preserve the lens"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "blood test reference ranges"
+clause    = "the same value is normal or abnormal depending on age and sex"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, sum", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "drug interaction check"
+clause    = "every pair on the list checked, and the worst severity reported"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map, sum", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "weight-based dosing"
+clause    = "dose per kilogram, capped at the adult maximum"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "infusion rate"
+clause    = "drops per minute from volume, time and the giving set's drip factor"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "sterilisation cycle log"
+clause    = "a failed cycle recalls every instrument set that went through it"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "instrument tray count"
+clause    = "counted in and counted out; a discrepancy stops the close"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "sample chain of custody"
+clause    = "every handover links to the previous one; a gap invalidates the chain"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "assay plate controls"
+clause    = "every plate must carry its controls, or its results do not count"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "reagent expiry"
+clause    = "the shortest-dated reagent caps the expiry of anything made from it"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "prod, recursion, Maybe", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "centrifuge balance"
+clause    = "tubes must be placed opposite each other and mass-matched"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "specimen fridge log"
+clause    = "an excursion above range for long enough discards the contents"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "clinical waste segregation"
+clause    = "each item routes to a stream, and one wrong item upgrades the whole bag"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "care home medication round"
+clause    = "scheduled doses plus as-needed doses within their own hourly limits"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "district nurse round"
+clause    = "each visit has a window, and travel between them is not free"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "wheelchair fitting"
+clause    = "measurements select a frame size; two candidates need a tie-break"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "porter task queue"
+clause    = "urgent tasks jump the queue but a waiting task eventually outranks them"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "theatre list ordering"
+clause    = "clean cases run before contaminated ones, children before adults"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "module" },
+  { constructs = "sum, prod, recursion", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "triage categories"
+clause    = "each category carries a time-to-be-seen target and a breach clock"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "ambulance response clock"
+clause    = "the clock stops on arrival, and a stand-down stops it differently"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "practice list weighting"
+clause    = "patients weighted by age band to give a workload figure"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "waiting list validation"
+clause    = "duplicate entries merge, and a patient-requested pause adjusts the clock"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "due date estimation"
+clause    = "forty weeks from the last period, adjusted for cycle length"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Maybe, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "growth centile chart"
+clause    = "a measurement lands in a band, and crossing bands is the signal"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "sleep diary"
+clause    = "efficiency is time asleep over time in bed, with wakings deducted"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "compounding dilution"
+clause    = "stock strength diluted to target volume; too weak a stock is an error"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "veterinary vaccination"
+clause    = "schedules differ by species, and the boosters differ again"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "animal weight chart"
+clause    = "expected weight for age by breed; a deviation triggers a recheck"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "stable feed plan"
+clause    = "forage and hard feed as a percentage of body weight, split across the day"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "boarding kennel booking"
+clause    = "a booking is refused unless vaccination cover spans the whole stay"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "hospital linen stock"
+clause    = "clean stock, in-use and in-wash must account for every item"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "cleaning audit score"
+clause    = "element scores roll up to a room score and then to a ward score"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "hand hygiene audit"
+clause    = "compliance is opportunities taken over opportunities observed"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "incident severity matrix"
+clause    = "likelihood crossed with consequence gives a rating and an escalation"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "dental lab work tracking"
+clause    = "work must return before the fitting appointment or the appointment moves"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "optician frame stock"
+clause    = "frames held by size and colour; a lens shape restricts what fits"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Maybe", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "hearing aid battery supply"
+clause    = "issue interval derived from cell size and daily wear hours"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "patient transport booking"
+clause    = "mobility class decides the vehicle, and an escort takes a seat"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "prosthetics socket fitting"
+clause    = "successive casts tracked as adjustments until the fit converges"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "dialysis session log"
+clause    = "fluid removed against target, with the rate capped per hour"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "server loop" },
+  { constructs = "prod, Result+?, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "allergy alert list"
+clause    = "an alert must survive a name change, so it is keyed on the substance"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "immunisation catch-up"
+clause    = "the schedule for a late start is not the schedule shifted"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "large", shape = "library-with-heavy-tests" },
+]
+
+# ── Shops, food service, hospitality and events ──────────────────────────────
+
+[[recipe]]
+domain    = "coffee shop loyalty card"
+clause    = "every nth drink is free, and the free one does not earn a stamp"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "restaurant table turning"
+clause    = "a sitting length decides how many covers a table yields in a service"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "wine list drinking windows"
+clause    = "a vintage is too young, ready, or past it, and that changes each year"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Maybe", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "cocktail batching"
+clause    = "a single-serve recipe scaled to a batch, with dilution added once"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "allergen matrix"
+clause    = "a dish inherits allergens from its ingredients, including shared fryers"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "script" },
+  { constructs = "prod, recursion, Map, Result+?", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "menu costing"
+clause    = "gross margin per dish from ingredient cost and the price it sells at"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "bar stock take"
+clause    = "measures poured against bottles opened; the variance is the finding"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "beer line cleaning"
+clause    = "lines fall due weekly, and a line changed early resets its clock"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "till change giving"
+clause    = "the fewest coins and notes that make the change, from what the drawer holds"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "gift card balance"
+clause    = "a partial redemption leaves a balance; an expired card leaves nothing"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "loyalty points expiry"
+clause    = "points are spent oldest first so the expiry date is the one that binds"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "discount stacking"
+clause    = "some offers combine and some replace each other; the customer gets the best"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "click and collect slots"
+clause    = "a slot has a picking deadline earlier than its collection time"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "unit price comparison"
+clause    = "prices normalised to a common unit so pack sizes can be ranked"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "best-before markdown"
+clause    = "the discount deepens as the date approaches, in steps, not smoothly"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "bakery proving schedule"
+clause    = "start times worked backwards from opening, through prove and bake"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "butcher's yield"
+clause    = "a carcass breaks into cuts whose weights must account for the whole"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "fishmonger catch board"
+clause    = "day-boat fish price by size grade; yesterday's drops a grade"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "veg box scheme"
+clause    = "boxes filled from what is ready, keeping each box's value near the price"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "market pitch fees"
+clause    = "regulars pay by the season, casuals by the day, and the day rate is higher"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "food hygiene scoring"
+clause    = "the worst of three component scores caps the overall rating"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "delivery tips split"
+clause    = "the pool divides by hours worked, and the pence remainder goes somewhere"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "takeaway order batching"
+clause    = "items start at different times so the order finishes together"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "dough ball count"
+clause    = "flour weight and hydration give dough weight, then ball count and remainder"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "ice cream van stock"
+clause    = "cones and lollies deplete at different rates on a hot day"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "catering headcount"
+clause    = "portions from headcount, split across dietary requirements that overlap"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "wedding seating plan"
+clause    = "guests who must not share a table constrain which tables remain"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map, Result+?", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "ticket presale tiers"
+clause    = "each tier releases an allocation, and unsold tickets fall into the next"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "cloakroom tickets"
+clause    = "a ticket redeems exactly one item, and a lost ticket needs a description match"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "festival wristbands"
+clause    = "a band carries access tiers, and a tier grants the ones beneath it"
+crossings = [
+  { constructs = "sum, Map", size = "small", shape = "module" },
+  { constructs = "sum, Map, contract+on", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "venue capacity by layout"
+clause    = "the same room holds different numbers seated, standing or cabaret"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "script" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "stage changeover"
+clause    = "strike and set must both fit the interval, or the running order changes"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "bar staffing from arrivals"
+clause    = "servers needed so the queue does not grow, given a service rate"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "hotel room allocation"
+clause    = "an early arrival competes with a late checkout for the same room"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "housekeeping route"
+clause    = "checkouts are cleaned before stayovers, and refusals drop out entirely"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "minibar restock"
+clause    = "consumption inferred from the difference between two counts"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "hostel dorm allocation"
+clause    = "mixed and single-sex dorms make a bed available to some guests only"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "breakfast sittings"
+clause    = "guests spread across sittings that each have their own capacity"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "holiday let changeover"
+clause    = "a same-day turnaround only works if cleaning fits between the two stays"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "campsite electric hookup"
+clause    = "the amperage on a bollard is shared, so appliances have to be budgeted"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "script" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "touring pitch booking"
+clause    = "a pitch has to take the van and its awning, not just the van"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "spa treatment scheduling"
+clause    = "a treatment needs a therapist with the skill and a room of the right type"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "gym class waitlist"
+clause    = "a no-show forfeits priority the next time the class is oversubscribed"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, contract+on", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "pool lane hire"
+clause    = "lanes split between clubs and public swimming across the same hour"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "squash court ladder"
+clause    = "a win against someone above you swaps the positions, and only those"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "reservation deposits"
+clause    = "a no-show forfeits the deposit, a late cancellation forfeits part of it"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "deli counter tickets"
+clause    = "numbers issued and called, with the wrap-around when the roll restarts"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "bottle deposit return"
+clause    = "containers refund by type, and an unrecognised one is rejected not counted"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "script" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "corkage and cover charges"
+clause    = "charges apply per bottle or per head depending on which is greater"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "kitchen prep list"
+clause    = "prep quantities derived from the covers booked and yesterday's waste"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+# ── Transport, fleet and logistics ───────────────────────────────────────────
+
+[[recipe]]
+domain    = "fleet service due"
+clause    = "whichever comes first of mileage, months and engine hours"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "driver rest rules"
+clause    = "daily driving is capped, and a break resets only part of the count"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "delivery round manifest"
+clause    = "drops in route order, and a failed delivery returns to the depot"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "parcel sortation"
+clause    = "a postcode prefix selects a bay; an unknown prefix goes to manual"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "courier pricing"
+clause    = "the greater of actual and volumetric weight, banded, then zoned"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "pallet space calculation"
+clause    = "stackable pallets share a floor space, unstackable ones do not"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "customs declaration"
+clause    = "duty per line from commodity code and origin, summed to the entry"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "container demurrage"
+clause    = "free days run out, then the daily rate escalates in tiers"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "harbour berth allocation"
+clause    = "a berth must take the vessel's length and its draft at low water"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "lock keeper's log"
+clause    = "lockings counted per direction, with water lost per cycle"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "canal boat licences"
+clause    = "licence fee by length, with a discount that expires before the licence"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "pilotage booking"
+clause    = "a pilot boards inside a tide window, and the window moves each day"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "lifeboat launch log"
+clause    = "launches classified by service type, with crew hours accumulated"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "lighthouse maintenance"
+clause    = "a visit needs a weather window long enough for the work"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "train headway"
+clause    = "a following train is held until the headway to the one ahead is met"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "train formation"
+clause    = "carriage order decides which coach stops where on the platform"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "rolling stock diagram"
+clause    = "a unit's day is a chain of workings that must connect in time and place"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "bus driver duty board"
+clause    = "a duty needs a meal relief inside a window, or it is not legal"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "school bus route"
+clause    = "pick-up times work backwards from the bell, stop by stop"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "server loop" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "taxi plate renewals"
+clause    = "plate, badge and insurance expire on different dates; the earliest binds"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Maybe", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "car hire utilisation"
+clause    = "days on hire over days available, with off-fleet days excluded"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "EV charge sessions"
+clause    = "energy billed at a tariff that changes partway through a session"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "fuel card transactions"
+clause    = "a fill bigger than the tank, or two fills too close, is flagged"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "van payload"
+clause    = "the conversion's weight comes off the payload before anything is loaded"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "tyre tread depth"
+clause    = "readings across the tread; the shallowest one decides the verdict"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "walk-around vehicle check"
+clause    = "a defect grades as advisory or prohibitive, and one prohibitive grounds the van"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "harsh driving events"
+clause    = "events per hundred miles, normalised so long routes are comparable"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "congestion charge"
+clause    = "one charge per day however many times the vehicle enters"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "low emission zone"
+clause    = "the charge depends on the vehicle's standard, not on its age"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "bridge weight restriction"
+clause    = "a route is refused if any structure on it is under the axle weight"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "abnormal load notice"
+clause    = "notice periods lengthen with the load, and the longest one governs"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "roll-on roll-off loading"
+clause    = "the loading order is the reverse of the order vehicles must come off"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "aircraft stand allocation"
+clause    = "a stand must take the wingspan, and some stands block their neighbour"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "baggage connection times"
+clause    = "a bag makes the transfer only if the minimum connection time is met"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "script" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "turnaround milestones"
+clause    = "milestones must occur in order, and a late one pushes the ones after it"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, recursion, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "de-icing queue"
+clause    = "holdover time expires, so an aircraft treated too early is treated again"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "crew rostering rest"
+clause    = "rest between duties scales with the duty just finished"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "large", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "air cargo unit loading"
+clause    = "containers assigned to positions with a running weight and balance"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "server loop" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "drone flight logbook"
+clause    = "battery cycles retire a pack, and a flight needs a pack with cycles left"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "freight consolidation"
+clause    = "small consignments combine while they share a destination and a deadline"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "bonded warehouse stock"
+clause    = "duty suspends until goods leave, so the release order changes the bill"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "dockside crane slots"
+clause    = "moves per hour cap the slot, and a hatch cover costs one move"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "tug scheduling"
+clause    = "bollard pull required by displacement decides how many tugs are needed"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, Result+?, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "car park season tickets"
+clause    = "a season ticket oversells the bays, so a daily cap still applies"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "vehicle recall campaign"
+clause    = "affected vehicles selected by build date range and part number"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "tail lift inspection"
+clause    = "thorough examination falls due every six months and blocks use when overdue"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "depot shunting moves"
+clause    = "a vehicle behind another must move first, so the order is forced"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "ticket gate reconciliation"
+clause    = "entries without a matching exit accumulate as open journeys"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "haulage subcontracting"
+clause    = "a job goes out when no own vehicle is free, at a rate that must still profit"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "milk round rota"
+clause    = "deliveries repeat on chosen weekdays, and a holiday pauses without cancelling"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, sum", size = "medium", shape = "script" },
+]
+
+# ── Utilities, energy, waste and the environment ─────────────────────────────
+
+[[recipe]]
+domain    = "two-rate electricity tariff"
+clause    = "units split between day and night rates across a reading period"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "standing charge proration"
+clause    = "a mid-period tariff change splits the daily charge between two rates"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "half-hourly meter data"
+clause    = "half-hours aggregate to days, and a missing half-hour is not a zero"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "solar export payments"
+clause    = "generation split between what was used on site and what was exported"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "battery storage cycles"
+clause    = "charge in the cheap window, discharge in the dear one, without over-cycling"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, uses Telemetry", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "heat pump performance"
+clause    = "efficiency falls with outside temperature, so output is not flat"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "district heating billing"
+clause    = "heat units per dwelling plus a share of the network's losses"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "gas meter conversion"
+clause    = "cubic metres to kilowatt hours through a calorific value and a correction"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "prepayment emergency credit"
+clause    = "credit advanced is repaid from the next top-up before any units are bought"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "wind turbine curtailment"
+clause    = "output capped by a grid limit, and the lost energy is the compensation"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "substation loading"
+clause    = "diversity means the sum of peaks is not the peak of the sum"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "street works permits"
+clause    = "road space booked for a window, and an overrun charges by the day"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "night flow leak detection"
+clause    = "the minimum overnight flow that never reaches zero is the leak"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "reservoir drawdown"
+clause    = "level against a control curve decides which restriction stage applies"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "tipping bucket rain gauge"
+clause    = "tips become an intensity, and a blocked gauge reads as a dry spell"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "flood gate operation"
+clause    = "gates open on level and close on tide, and the two can disagree"
+crossings = [
+  { constructs = "sum, contract+on", size = "small", shape = "module" },
+  { constructs = "sum, contract+on, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "sewer overflow spills"
+clause    = "spills within a block count once, and duration is what is reported"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "tanker emptying rounds"
+clause    = "tank fill rates decide the order; a full tank cannot wait for the round"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "water hardness zones"
+clause    = "a supply zone's hardness sets the dosing, and blending zones complicates it"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "script" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "hydrant testing"
+clause    = "flow and pressure together decide whether a hydrant passes"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "water sampling schedule"
+clause    = "sites sampled at frequencies that must spread across the year, not bunch"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "bin collection calendar"
+clause    = "a bank holiday shifts that week's collections and everything after it"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "recycling contamination"
+clause    = "a contamination rate per round, and a threshold rejects the load"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "refuse round tonnage"
+clause    = "weighbridge tickets attributed back to the rounds that filled the lorry"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "tip site booking"
+clause    = "van visits are rationed per year, and a permit does not stack with a booking"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "bulky waste collection"
+clause    = "items priced by count with the first item costing more than the rest"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "fly-tipping reports"
+clause    = "reports near each other in time and place are one incident"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "bin fill sensors"
+clause    = "fill rate predicts the day a bin overflows, and emptying resets it"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "bottle bank collections"
+clause    = "a bank is collected when predicted fullness beats the round's spare capacity"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "scrap metal grading"
+clause    = "price by grade, with a deduction when a load is mixed"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "landfill gas monitoring"
+clause    = "gas readings against trigger levels, with barometric pressure confounding them"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "server loop" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "digester feedstock mix"
+clause    = "feedstocks blended to a target ratio without exceeding the tank"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "carbon footprint by activity"
+clause    = "activity data times a factor, where the factor depends on the year"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "energy audit payback"
+clause    = "measures ranked by payback, and a measure changes the ones after it"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "insulation grant eligibility"
+clause    = "several routes to eligibility, and only the reason for the first one matters"
+crossings = [
+  { constructs = "sum, Maybe", size = "small", shape = "module" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "tree planting survival"
+clause    = "survival counted at intervals, with beat-up planting replacing losses"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "hedgerow survey"
+clause    = "attributes scored against criteria; enough of them make a hedge important"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "diffusion tube monitoring"
+clause    = "monthly means per site, bias-adjusted before anything is compared"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "noise complaint log"
+clause    = "complaints about one source aggregate, and repeat sources escalate"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "bathing water classification"
+clause    = "a season's samples classify the site, with the worst discounted"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "beach litter survey"
+clause    = "counts normalised to a transect length so surveys compare"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "invasive species records"
+clause    = "a record becomes an established population once it repeats at a site"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "camera trap captures"
+clause    = "captures within minutes of each other are one visit, not several"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "bat emergence counts"
+clause    = "counts are only comparable when tied to sunset, not to clock time"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Maybe, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "bird ringing recoveries"
+clause    = "a recovery gives a distance and an elapsed time from the ringing record"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "moth trap counts"
+clause    = "counts per night adjusted for trap effort and weather"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "pollinator transect"
+clause    = "a walk is valid only within a temperature and wind window"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "server loop" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "river invertebrate score"
+clause    = "families score points, and the score per family is the water quality index"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "peatland water table"
+clause    = "dipwell depths below surface, where a positive reading means flooded"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "solar panel soiling"
+clause    = "output compared against a clean reference decides when cleaning pays"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, Result+?", size = "medium", shape = "server loop" },
+]
+
+# ── Civic, legal, money and membership ───────────────────────────────────────
+
+[[recipe]]
+domain    = "electoral canvass"
+clause    = "a household's response adds and removes names, and silence does neither"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "transferable vote count"
+clause    = "a surplus above quota transfers on at a reduced value"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?, Map", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "postal vote deadlines"
+clause    = "issue and return deadlines counted in working days around the poll"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "script" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "polling station allocation"
+clause    = "electors split between stations so neither exceeds its capacity"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "petition signature validation"
+clause    = "duplicates and out-of-area signatures come off before the threshold is tested"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "council tax discounts"
+clause    = "a single-occupant discount and an exemption do not add, they replace"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "business rates relief"
+clause    = "reliefs apply in a fixed order and each works on what the last left"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "planning consultation period"
+clause    = "the consultation runs from a date that is itself derived from validation"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "premises licence hours"
+clause    = "the hours applied for are cut back by conditions, not refused outright"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "information request clock"
+clause    = "the deadline pauses while a clarification is outstanding and resumes after"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "intestacy shares"
+clause    = "the estate divides by the surviving relatives, in a fixed order of classes"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, recursion, Result+?", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "legacy abatement"
+clause    = "when the estate falls short, gifts reduce in classes, not proportionally"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "script" },
+  { constructs = "sum, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "statutory interest"
+clause    = "interest accrues daily on the outstanding balance, and payments land mid-period"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "court fee remission"
+clause    = "income and capital tests both apply, and capital fails outright"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "jury summons pool"
+clause    = "deferrals return to a later pool; excusals do not return at all"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "fine instalment plan"
+clause    = "instalments sized to the balance, with the last one taking the remainder"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "penalty discount window"
+clause    = "paying inside the window halves it; a challenge suspends the window"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "enforcement fee stages"
+clause    = "each stage adds its fee once, however many visits it took"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "insurance premium rating"
+clause    = "factors multiply onto a base rate, then a minimum premium applies"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "no-claims discount"
+clause    = "a claim steps the ladder back further than a clean year steps it forward"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "claim excess apportionment"
+clause    = "compulsory and voluntary excesses both bite, but only once each"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "script" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "claims reserve development"
+clause    = "a reserve is revised as payments land, and the movement is what is reported"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, uses Telemetry", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "travel policy limits"
+clause    = "per-item, per-category and per-trip limits all cap the same claim"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "pet policy limits"
+clause    = "an annual limit is per condition, so a new condition gets its own"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "rebuild sum insured"
+clause    = "last year's figure indexed, then tested against a floor area estimate"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "total loss threshold"
+clause    = "repair cost against value decides write-off, and salvage changes the sum"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "underwriting referral"
+clause    = "any one trigger refers the risk; the reasons are all reported, not the first"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "excess of loss layers"
+clause    = "a loss fills each layer in turn and stops at the top of the programme"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "standing order dates"
+clause    = "a payment date on a weekend rolls forward, and month ends do not exist"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "direct debit notice"
+clause    = "a change needs advance notice, and the notice period sets the earliest date"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "script" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "overdraft interest"
+clause    = "interest on the daily balance, so the order of the day's transactions matters"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "tiered savings interest"
+clause    = "each tier pays on the slice of balance inside it, not on the whole"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "mortgage overpayment"
+clause    = "an overpayment inside the allowance is free; above it an early charge applies"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "loan amortisation"
+clause    = "each payment splits into interest and capital, and the split moves every month"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "card foreign fees"
+clause    = "a percentage fee with a minimum, applied after conversion not before"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "payroll tax bands"
+clause    = "cumulative pay to date decides the band, so a bonus month is not a rate change"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "large", shape = "module" },
+]
+
+[[recipe]]
+domain    = "holiday accrual"
+clause    = "entitlement pro-rated for a leaver, and days already taken can exceed it"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "sick pay waiting days"
+clause    = "waiting days are unpaid, and linked absences do not serve them twice"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "pension contribution match"
+clause    = "the employer matches up to a cap, on qualifying earnings not on all pay"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "expense claim policy"
+clause    = "a per-item cap, a daily cap, and a receipt rule that only bites above a value"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "script" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "VAT return boxes"
+clause    = "boxes derive from each other, so one wrong line breaks two totals"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "payment terms"
+clause    = "end of month plus thirty days is not the same as thirty days from invoice"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "purchase order approval"
+clause    = "value decides who approves, and splitting an order does not avoid it"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "supplier payment run"
+clause    = "invoices due before the next run are paid early, not late"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "gift aid claims"
+clause    = "only donations from eligible donors qualify, and the claim is per donation"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "fundraising thermometer"
+clause    = "pledged and received are different totals, and a pledge can lapse"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "membership renewals"
+clause    = "a grace period keeps benefits, and lapsing past it restarts the joining fee"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "volunteer hours awards"
+clause    = "cumulative hours cross award thresholds, and an award is granted once"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "grant application scoring"
+clause    = "criteria weighted into a score, with any criterion below a floor failing outright"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, sum, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "committee quorum"
+clause    = "a quorum needs numbers and the right roles present, and conflicts remove people"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+# ── Learning, culture, media and archives ────────────────────────────────────
+
+[[recipe]]
+domain    = "attendance codes"
+clause    = "each code counts toward presence, absence or neither, and the totals differ"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "grade boundaries"
+clause    = "raw marks convert to uniform marks by interpolating inside a band"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "coursework moderation"
+clause    = "a moderation adjustment applies to the cohort, not to one candidate"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "reading level bands"
+clause    = "a text's band comes from sentence and word length together"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "spelling test progression"
+clause    = "a word retires after consecutive correct attempts and returns after a miss"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "school trip ratios"
+clause    = "adults required depend on age and activity, and one adult cannot cover two groups"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "practice diary"
+clause    = "minutes per piece accumulate toward a target that resets each week"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "instrument hire register"
+clause    = "instruments sized to the player, and an outgrown one comes back into stock"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "orchestral desk allocation"
+clause    = "players sit in desks, and a divisi part needs both desks covered"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "choir voice balance"
+clause    = "parts balance by ratio, so one extra bass can unbalance a small choir"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "concert programme timing"
+clause    = "pieces plus applause plus an interval must fit the hall's curfew"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "rehearsal room bookings"
+clause    = "a booking needs set-up and clear-down time either side of the slot"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "score library loans"
+clause    = "a set returns only when every part does, and a missing part is chargeable"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "input channel list"
+clause    = "sources map to desk channels, and stereo sources take two"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "lighting cue list"
+clause    = "a cue inserted between two others takes a fractional number"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "sound check order"
+clause    = "bands check in reverse running order, and the headliner takes longest"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "box office holds"
+clause    = "held seats release automatically unless confirmed before the deadline"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "cinema screen scheduling"
+clause    = "trailers, feature and cleaning all sit between two showings"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "screening key windows"
+clause    = "a playback key is valid for a window, and a schedule change can fall outside it"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "server loop" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "audio description gaps"
+clause    = "description must fit the silences, so a long note has to be cut or moved"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "playout as-run log"
+clause    = "what went out compared against what was scheduled, with the drift accumulating"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "music quota"
+clause    = "a share of output must meet a category, measured by duration not by count"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "advert break placement"
+clause    = "breaks fall at natural points, spaced so no two are too close"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "archive accession numbering"
+clause    = "numbers issued per year and never reused, even after a deaccession"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "archive box locations"
+clause    = "a box moves, so the location is history rather than a field"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "script" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "conservation treatment queue"
+clause    = "condition and exhibition dates compete, and a loan outranks both"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "negative catalogue"
+clause    = "frames within a roll are ordered, and a missing frame is not a gap in numbering"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "transcript timecodes"
+clause    = "speaker turns carry timecodes that must not overlap or run backwards"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "shelf order by classmark"
+clause    = "classmarks sort by their parts, so 5.10 comes after 5.9 and not before"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "inter-library loan"
+clause    = "a request goes to the nearest holder that is not already lending it out"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "reading list copies"
+clause    = "copies per student against loan periods says whether a list is servable"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "invigilation rota"
+clause    = "an invigilator cannot cover two rooms, and a subject teacher cannot cover theirs"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?, recursion", size = "large", shape = "script" },
+]
+
+[[recipe]]
+domain    = "lecture room fit"
+clause    = "a cohort outgrows a room mid-term, so the booking has to move"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "credit accumulation"
+clause    = "credits count toward an award only at the right level"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "supervisor allocation"
+clause    = "students rank supervisors who have caps, so not everyone gets a first choice"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map, Result+?", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "moderation sample size"
+clause    = "the sample must span the mark range, not just be big enough"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "tutorial group balancing"
+clause    = "groups balanced on size first and on background second"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "school meal choices"
+clause    = "choices close at a cut-off, after which a default meal is counted"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "book fair stock"
+clause    = "sale-or-return means unsold stock is a credit, not a loss"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "print run pricing"
+clause    = "setup cost spread over the run, so the unit price falls in steps"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "newspaper rounds"
+clause    = "a round's papers vary by household order, and extras go to the shop"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "script" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "subscription issues remaining"
+clause    = "a subscription is counted in issues, and a missed issue extends it"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "page count estimate"
+clause    = "words to pages through a characters-per-page figure, rounded to a signature"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "font licence seats"
+clause    = "seats are counted by installation, and a web licence counts differently"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "server loop" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "timed entry tickets"
+clause    = "capacity per slot with a dwell time that overlaps the following slot"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, Map, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "gallery hanging plan"
+clause    = "works hung along a wall must fit its length with spacing between them"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "artwork loan agreement"
+clause    = "the loan window includes travel and rest, not just the exhibition"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "reading group rota"
+clause    = "each member hosts in turn, and a skipped turn goes to the back"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Maybe", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "quiz league fixtures"
+clause    = "every team plays every other once, home and away alternating"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "language exchange pairing"
+clause    = "pairs need complementary languages and a shared free hour"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "script" },
+]
+
+# ── Growing, outdoors, animals and making ────────────────────────────────────
+
+[[recipe]]
+domain    = "crop rotation"
+clause    = "a family must not return to a bed until the rest interval has passed"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map, Result+?", size = "large", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "succession sowing"
+clause    = "sowings spaced so harvests do not arrive together"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "hardening off"
+clause    = "hours outside increase daily, and a cold night resets the count"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, recursion", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "seed potato spacing"
+clause    = "spacing by variety gives plants per row and an expected yield"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "apple pressing yield"
+clause    = "juice per tonne varies by variety, and pomace is the difference"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "preserve sugar ratio"
+clause    = "sugar to fruit by pectin content, so a low-pectin fruit needs help"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "priming sugar"
+clause    = "sugar for a target carbonation depends on the beer's temperature"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "cider apple blend"
+clause    = "sharps, bittersweets and sweets blended to a target within tolerance"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "curing salt calculation"
+clause    = "cure per kilogram of meat, where an error is not recoverable by tasting"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "starter feeding"
+clause    = "feed ratios by weight, and a skipped feed changes the next one"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "server loop" },
+  { constructs = "prod, recursion, Maybe", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "foraging calendar"
+clause    = "a species is in season by place as well as by month"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Maybe", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "wild swim log"
+clause    = "safe duration falls as water temperature does, and it is not linear"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "sea angling size limits"
+clause    = "undersized fish are returned, and a bag limit counts what is kept"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "angling club permits"
+clause    = "beats rotate between permit holders so nobody draws the same one twice"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "fly tying stock"
+clause    = "a pattern consumes materials, so stock says which patterns are still tieable"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "script" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "archery round scoring"
+clause    = "a round is a fixed set of distances, and the scoring zones change with it"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "clay shooting rounds"
+clause    = "stands vary in targets, so a round's maximum is not fixed"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "sailing handicap"
+clause    = "elapsed time corrected by a rating, so the first boat home may not win"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "dinghy park spaces"
+clause    = "spaces sized by hull, and a trailer needs its own or shares one"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "server loop" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "mooring allocation"
+clause    = "swinging moorings and pontoon berths suit different boats and cost differently"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "float plan"
+clause    = "an expected return time triggers a callout when it passes without a check-in"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "surf window forecast"
+clause    = "swell, wind and tide must line up, and any one of them can rule a day out"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "paragliding site check"
+clause    = "a site is flyable within a wind direction arc and below a strength"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "winch launch log"
+clause    = "launch height per run tracked against cable life in launches"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "model rocket motor choice"
+clause    = "impulse class must lift the mass without exceeding the field's ceiling"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "meteor shower counts"
+clause    = "raw counts corrected for radiant altitude to give an hourly rate"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Result+?, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "variable star estimates"
+clause    = "brightness estimated between two comparison stars, then averaged per night"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "radio contact log"
+clause    = "contacts count once per band and mode, so a repeat is not a new one"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "geocache maintenance"
+clause    = "consecutive not-founds trigger a check, and one find clears the streak"
+crossings = [
+  { constructs = "prod, recursion", size = "small", shape = "module" },
+  { constructs = "prod, recursion, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "detecting finds record"
+clause    = "finds recorded with depth and material; a hoard is a cluster, not a find"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, recursion, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "fossil collection catalogue"
+clause    = "a specimen's age comes from its bed, so the bed is the record that matters"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "mineral hardness testing"
+clause    = "scratch tests bracket a hardness between two known minerals"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "climbing gear retirement"
+clause    = "soft goods retire on age or use, whichever comes first, and a fall shortens it"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "route setting rotation"
+clause    = "routes are stripped oldest first, keeping a spread of grades on the wall"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, recursion", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "caving callout times"
+clause    = "an overdue party triggers a callout, and an extension must arrive before it"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "rescue callout log"
+clause    = "volunteer hours per callout accumulate, and travel counts differently"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "snow depth transect"
+clause    = "depths along a line summarised so a single drift does not dominate"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, sum, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "dog agility scoring"
+clause    = "faults and time faults combine, and an elimination beats any score"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "sheepdog trial scoring"
+clause    = "points are deducted from a maximum per phase, and a retirement scores nothing"
+crossings = [
+  { constructs = "sum, |>", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "dressage sheet"
+clause    = "movement marks are weighted by coefficient before the percentage"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "showjumping penalties"
+clause    = "time faults accrue per second over the allowed time, in whole penalties"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "sum, prod, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "pigeon race velocity"
+clause    = "velocity is distance over time, and each loft's distance is different"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "poultry laying records"
+clause    = "lay rate per bird per week, with a moult explaining a drop"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "script" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "aquarium water changes"
+clause    = "change volume from nitrate reading and tank size, capped per week"
+crossings = [
+  { constructs = "prod, Result+?", size = "small", shape = "module" },
+  { constructs = "prod, uses Telemetry, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "vivarium temperature zones"
+clause    = "a gradient must hold across the tank, so one probe is not enough"
+crossings = [
+  { constructs = "prod, sum", size = "small", shape = "module" },
+  { constructs = "prod, sum, uses Telemetry", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "honey extraction yield"
+clause    = "yield per super against hive strength, with wet supers returned"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "module" },
+  { constructs = "prod, Map, Result+?", size = "medium", shape = "server loop" },
+]
+
+[[recipe]]
+domain    = "milk yield records"
+clause    = "yield per cow per lactation day, so herd averages need the day, not the date"
+crossings = [
+  { constructs = "prod, Map", size = "small", shape = "module" },
+  { constructs = "prod, Map, |>", size = "medium", shape = "library-with-heavy-tests" },
+]
+
+[[recipe]]
+domain    = "wool clip grading"
+clause    = "fleeces graded by staple and micron, and one bad fleece downgrades a bale"
+crossings = [
+  { constructs = "sum, prod", size = "small", shape = "module" },
+  { constructs = "sum, prod, Map", size = "medium", shape = "module" },
+]
+
+[[recipe]]
+domain    = "silage clamp"
+clause    = "clamp capacity in tonnes from dimensions and density, filled in layers"
+crossings = [
+  { constructs = "prod, |>", size = "small", shape = "library-with-heavy-tests" },
+  { constructs = "prod, recursion, Result+?", size = "medium", shape = "script" },
+]
+
+[[recipe]]
+domain    = "sheep dipping records"
+clause    = "a treatment sets a withdrawal period before the animal can be sold"
+crossings = [
+  { constructs = "prod, Maybe", size = "small", shape = "module" },
+  { constructs = "prod, sum, Result+?", size = "medium", shape = "library-with-heavy-tests" },
+]

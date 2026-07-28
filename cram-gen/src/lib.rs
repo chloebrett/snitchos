@@ -236,6 +236,12 @@ pub struct CandidateRecord {
     /// Which recipe produced it — without this a batch is a bag of programs
     /// with no way to ask which axes actually yield.
     pub domain: String,
+    /// The crossing that domain was asked for. batch9 could only be analysed
+    /// per domain because every asking of a domain used the same crossing;
+    /// a sheet that varies them has to record which one, or the same question
+    /// cannot be asked of this batch.
+    pub size: String,
+    pub shape: String,
     /// `empty` | `parse` | `type` | `tests` | `ok`.
     pub stage: String,
     /// The gate's own message — the raw material for a repair trace.
