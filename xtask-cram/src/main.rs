@@ -33,6 +33,13 @@ const DEFAULT_PROGRAMS: usize = 1_000_000;
 /// for more is harmless — the trainer stops when there is nothing left to merge.
 const DEFAULT_VOCAB: usize = 1024;
 
+/// One file in five is held out. A fifth is enough to measure against and small
+/// enough that training does not miss it — and taking it as a *stride* over
+/// sorted files, per source, is what keeps both corpora represented on both
+/// sides of the split. See `corpus::split_held_out`.
+const DEFAULT_HELD_OUT_EVERY: usize = 5;
+
+mod corpus;
 mod eval;
 mod generate;
 
@@ -42,6 +49,32 @@ struct Options {
     vocab_size: usize,
     layout: Layout,
     config: TrainingConfig,
+    /// Real `.st` files to train on. `None` keeps the babble corpus, which is
+    /// what every run did before there was a real corpus to prefer.
+    real_root: Option<PathBuf>,
+    /// `cram-gen` batch directories to train on.
+    batch_dirs: Vec<PathBuf>,
+    /// Gate stages whose candidates are excluded from a batch.
+    drop_stages: Vec<String>,
+    /// One file in `held_out_every` never reaches training.
+    held_out_every: usize,
+    /// Copy the held-out files here, so `--eval --corpus-root` can score them.
+    write_held_out: Option<PathBuf>,
+    /// Reuse a held-out set written earlier instead of splitting a fresh one.
+    /// Two runs over different training sets are only comparable if they are
+    /// measured against the *same* held-out data.
+    held_out_root: Option<PathBuf>,
+    /// Train against a frozen vocab instead of a fresh probe. Two runs sharing
+    /// a vocab have comparable losses; two runs that each trained their own do
+    /// not, however similar the numbers look.
+    vocab_file: Option<PathBuf>,
+    /// Train a vocab over the training split, write it, and stop.
+    save_vocab: Option<PathBuf>,
+    /// Names this run's checkpoint, vocab and curve. Defaults to
+    /// `<rung>-<seed>`, which collides the moment two runs of one rung differ by
+    /// anything except the seed — a step sweep overwrites itself, and the run it
+    /// overwrites is the one you wanted to compare against.
+    name: Option<String>,
     /// Score instead of train. Both live behind one verb because they share
     /// every path a run depends on — rung, checkpoint naming, vocab — and a
     /// separate binary is how `parse-rate` drifted into measuring one rung on
@@ -69,18 +102,40 @@ fn main() -> std::io::Result<()> {
         return generate::run(generate);
     }
 
-    let corpus = load_corpus(options.programs, options.layout)?;
     // Train and tokenize on the *programs*, never the corpus file. The file's
     // `\n\x1e---\n` separators are not Stitch, and a model trained on them
     // learns to emit them — which it did, and every sampled program was legal
     // Stitch interrupted by a delimiter that is not.
-    let programs = parse_corpus(&corpus);
-    let vocab = build_vocab(&programs, options.vocab_size);
+    let (programs, held_out_programs) = gather(&options)?;
+
+    let vocab = match &options.vocab_file {
+        Some(path) => load_vocab(path)?,
+        // Trained over the training split alone. A vocab is learned from text,
+        // so training one over the held-out files would let their lexicon reach
+        // the model by another route.
+        None => build_vocab(&programs, options.vocab_size),
+    };
     let tokens = encode(&vocab, &programs);
+
+    if let Some(path) = &options.save_vocab {
+        report_vocab(&vocab);
+        std::fs::write(path, vocab.encode_vocab())?;
+        println!("vocab      wrote {}", path.display());
+        return Ok(());
+    }
+
+    let held_out_tokens = if held_out_programs.is_empty() {
+        Vec::new()
+    } else {
+        encode_held_out(&vocab, &held_out_programs)
+    };
 
     let checkpoint_dir = PathBuf::from(CHECKPOINT_DIR);
     std::fs::create_dir_all(&checkpoint_dir)?;
-    let stem = format!("{}-{}", options.rung.name(), options.config.seed);
+    let stem = options
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}", options.rung.name(), options.config.seed));
     let curve_path = checkpoint_dir.join(format!("{stem}.tsv"));
     let checkpoint_path = checkpoint_dir.join(format!("{stem}.kvetch"));
 
@@ -92,6 +147,7 @@ fn main() -> std::io::Result<()> {
     let started = Instant::now();
     let model = train(
         &tokens,
+        &held_out_tokens,
         vocab.len(),
         options.config,
         &AccelerateGemm,
@@ -132,6 +188,23 @@ usage: cargo xtask cram [options]
   --lr <f>            peak learning rate                       (default 0.003)
   --seed <n>          seeds weights and batch order            (default 0)
   --report-every <n>  steps between progress lines             (default 20)
+  --eval-every <n>    steps between held-out loss reports      (default 200)
+  --eval-batch <n>    sequences in the held-out batch          (default 64)
+  --name <stem>       names the checkpoint/vocab/curve      (default <rung>-<seed>)
+
+training on real .st files instead of babble (either flag opts in; both compose):
+
+  --real-root <d>       include every real .st file under <d>
+  --batch-dir <d>       include a cram-gen batch directory (repeatable)
+  --drop-stage <s>      batch gate stages to exclude, comma-separated
+                        (parse | type | tests | ok) — needs the batch manifest
+  --held-out-every <n>  1 file in n is held out, per source    (default 5; 0 = off)
+  --write-held-out <d>  copy the held-out files to <d>, for --eval --corpus-root
+  --held-out-root <d>   reuse the held-out set in <d> instead of splitting a
+                        fresh one, and drop its programs from training — the
+                        only way two runs over different corpora compare
+  --vocab-file <p>      train against a frozen vocab instead of a fresh probe
+  --save-vocab <p>      train a vocab over the training split, write it, and stop
 
 evaluation (replaces the old `parse-rate` bin):
 
@@ -166,7 +239,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
         programs: DEFAULT_PROGRAMS,
         vocab_size: DEFAULT_VOCAB,
         layout: Layout::Printed,
-        config: TrainingConfig::default(),
+        config: TrainingConfig { eval_every: 200, ..TrainingConfig::default() },
+        real_root: None,
+        batch_dirs: Vec::new(),
+        drop_stages: Vec::new(),
+        held_out_every: DEFAULT_HELD_OUT_EVERY,
+        write_held_out: None,
+        held_out_root: None,
+        vocab_file: None,
+        save_vocab: None,
+        name: None,
         eval: None,
         generate: None,
     };
@@ -214,6 +296,19 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--batch" => options.config.batch = number(&value()?)?,
             "--context" => options.config.context = number(&value()?)?,
             "--report-every" => options.config.report_every = number(&value()?)?.max(1),
+            "--eval-every" => options.config.eval_every = number(&value()?)?,
+            "--eval-batch" => options.config.eval_batch = number(&value()?)?.max(1),
+            "--real-root" => options.real_root = Some(PathBuf::from(value()?)),
+            "--batch-dir" => options.batch_dirs.push(PathBuf::from(value()?)),
+            "--drop-stage" => options
+                .drop_stages
+                .extend(value()?.split(',').map(str::trim).map(str::to_string)),
+            "--held-out-every" => options.held_out_every = number(&value()?)?,
+            "--write-held-out" => options.write_held_out = Some(PathBuf::from(value()?)),
+            "--held-out-root" => options.held_out_root = Some(PathBuf::from(value()?)),
+            "--vocab-file" => options.vocab_file = Some(PathBuf::from(value()?)),
+            "--save-vocab" => options.save_vocab = Some(PathBuf::from(value()?)),
+            "--name" => options.name = Some(value()?),
             "--seed" => options.config.seed = number(&value()?)? as u64,
             "--lr" => {
                 let text = value()?;
@@ -272,6 +367,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
         return Ok(options);
     }
 
+    // A stride of one holds out everything, leaving nothing to train on. It is
+    // always a typo, and it fails here rather than after the corpus is read.
+    if options.held_out_every == 1 {
+        return Err(String::from("--held-out-every 1 would hold out every file"));
+    }
+    if !options.drop_stages.is_empty() && options.batch_dirs.is_empty() {
+        return Err(String::from("--drop-stage only means something with --batch-dir"));
+    }
+
     options.config.rung = options.rung;
     // Warmup is a fraction of the run, not a constant: 100 steps of warmup in a
     // 200-step smoke run would be half the run spent not training.
@@ -292,6 +396,100 @@ fn layout_named(name: &str) -> Result<Layout, String> {
         "printed" => Ok(Layout::Printed),
         other => Err(format!("unknown layout {other:?}")),
     }
+}
+
+/// The programs a run trains on, and the ones it is measured against.
+///
+/// With no `--real-root` and no `--batch-dir` this is the babble corpus and an
+/// empty held-out set, exactly as every run behaved before real files were an
+/// option — babble is generated, so a held-out split of it measures the
+/// generator rather than the model.
+fn gather(options: &Options) -> std::io::Result<(Vec<String>, Vec<String>)> {
+    if options.real_root.is_none() && options.batch_dirs.is_empty() {
+        let corpus = load_corpus(options.programs, options.layout)?;
+        return Ok((parse_corpus(&corpus), Vec::new()));
+    }
+
+    let dropped: Vec<&str> = options.drop_stages.iter().map(String::as_str).collect();
+    let loaded = corpus::load(
+        options.real_root.as_deref(),
+        &options.batch_dirs,
+        &dropped,
+        options.held_out_every,
+        options.held_out_root.as_deref(),
+    )
+    .map_err(std::io::Error::other)?;
+
+    for (label, train, held_out) in &loaded.sources {
+        println!("corpus     {label}: {train} train, {held_out} held out");
+    }
+    if !dropped.is_empty() {
+        println!("           dropped stages: {}", dropped.join(", "));
+    }
+
+    if let Some(dir) = &options.write_held_out {
+        write_held_out(dir, &loaded)?;
+    }
+
+    Ok((loaded.train, loaded.held_out))
+}
+
+/// Copy the held-out files somewhere `--eval --corpus-root` can walk.
+///
+/// Names are flattened from the source path rather than taken from it: two
+/// sources both offering `001.st` would otherwise overwrite each other, and the
+/// one that survived would be silently half a held-out set.
+fn write_held_out(dir: &Path, loaded: &corpus::Loaded) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (path, text) in loaded.held_out_paths.iter().zip(&loaded.held_out) {
+        let flattened: String = path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .filter(|part| part != "." && part != "..")
+            .collect::<Vec<_>>()
+            .join("_");
+        std::fs::write(dir.join(flattened), text)?;
+    }
+    println!("held out   {} files → {}", loaded.held_out.len(), dir.display());
+    Ok(())
+}
+
+/// The longest tokens a vocab learned.
+///
+/// The check that catches an oversized vocab, and it costs nothing: BPE spends
+/// its tail on whatever is frequent, so a tail of whole phrases means the vocab
+/// is memorising this corpus rather than learning the language's lexemes. Bytes
+/// per token alone cannot tell those apart — both look like better compression.
+/// Same report `cram-corpus`'s `train-vocab` bin prints, for the same reason.
+fn report_vocab(vocab: &Vocab) {
+    const SHOWN: usize = 12;
+
+    let mut learned: Vec<String> = (kvetch_vocab::BYTE_TOKENS..vocab.len())
+        .map(|id| String::from_utf8_lossy(&vocab.decode(&[id as u16])).into_owned())
+        .collect();
+    learned.sort_by_key(|token| core::cmp::Reverse(token.len()));
+
+    println!("           longest {SHOWN} learned tokens (phrases here mean an oversized vocab):");
+    for token in learned.iter().take(SHOWN) {
+        println!("             {token:?}");
+    }
+}
+
+fn load_vocab(path: &Path) -> std::io::Result<Vocab> {
+    let bytes = std::fs::read(path)?;
+    let vocab = Vocab::decode_vocab(&bytes).ok_or_else(|| {
+        std::io::Error::other(format!("{}: not a vocab this build reads", path.display()))
+    })?;
+    println!("vocab      {} tokens from {}", vocab.len(), path.display());
+    Ok(vocab)
+}
+
+/// The held-out token stream. Same join as training, so the two streams differ
+/// only in which programs they contain.
+fn encode_held_out(vocab: &Vocab, programs: &[String]) -> Vec<u16> {
+    let tokens = tokenize(vocab, &training_text(programs));
+    println!("held out   {} tokens over {} programs", tokens.len(), programs.len());
+    tokens
 }
 
 /// The corpus, from cache when the cache still answers this request.

@@ -73,7 +73,10 @@ fn main() {
         "\n== training drivel: {} steps, ctx {}, batch {} ==",
         config.steps, config.context, config.batch
     );
-    let model = train(&tokens, vocab.len(), config, &AccelerateGemm, |progress| {
+    // No held-out split: this probe trains on everything it can find, which is
+    // the whole point of it. `cargo xtask cram --real-root` is the path that
+    // splits.
+    let model = train(&tokens, &[], vocab.len(), config, &AccelerateGemm, |progress| {
         println!("  {}", progress.line());
     });
 

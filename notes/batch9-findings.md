@@ -148,6 +148,158 @@ named vocab.**
    reach. At 36.6 tok/s, generating 20× more corpus is ~470 hours — generation throughput,
    not the trainer, is what caps the ladder.
 
+## Training results (2026-07-28)
+
+The blockers above are cleared and `drivel` is trained. Everything below uses one frozen
+vocab (`corpora/kvetch-batch9.vocab`, 2048 entries) and one frozen held-out set
+(`corpora/heldout`, 116 programs / 302 985 tokens = 20% of the real files plus 20% of the
+batch9 keep-set), so every number is comparable to every other.
+
+### Choosing the vocab
+
+`--save-vocab` over the training split, at four sizes:
+
+| entries | training tokens | bytes/token | train time | drivel params |
+|---|---|---|---|---|
+| 512 | 1 771 233 | 2.05 | 5s | 853 120 |
+| 1024 | 1 360 658 | 2.67 | 14s | 918 656 |
+| **2048** | **1 120 837** | **3.24** | **33s** | **1 049 728** |
+| 4096 | 956 158 | 3.80 | 65s | 1 311 872 |
+| 8192 | 839 780 | 4.33 | 123s | 1 836 160 |
+
+**2048.** Above it the embedding table starts to dominate a 1M-parameter rung — 8192 nearly
+doubles the model — while each row gets less evidence: 2048 gives ~550 occurrences per
+token, 8192 gives ~100. The longest-token report agrees: at 2048 the tail is indentation
+runs and comment rules (which is what a code vocab *should* spend its tail on, and what
+`pre_tokenize` keeps whitespace runs whole for), while at 4096 it already contains
+`" reduceReduceReduceReduceRedu"` — a degenerate-repetition artifact from Finding 3 being
+memorised as a token.
+
+Note this vocab compresses this corpus at **3.24 bytes/token** against the 1.52 that
+babble-trained `drivel-9.vocab` managed, which is why the token counts in the section above
+are roughly halved everywhere below.
+
+### The step sweep — where the clean corpus runs out
+
+`drivel`, union of real Stitch + the batch9 keep-set (parse deaths dropped), 1.12M training
+tokens:
+
+| steps | tokens seen | epochs | train loss | held-out loss | wall |
+|---|---|---|---|---|---|
+| 3 000 | 6.1M | 5.5 | 2.772 | 3.326 | 124s |
+| 10 000 | 20.5M | 18.3 | 2.226 | 3.123 | 413s |
+| 15 000 | 30.7M | 27.4 | 2.109 | **3.084** (min 3.077 @ 12k) | 625s |
+| 30 000 | 61.4M | 54.8 | 1.881 | 3.093 (min 3.078 @ 15k) | 1230s |
+
+The held-out curve **bottoms out around step 12 000–15 000 and then turns**, while the
+training loss keeps falling. That is the overfitting knee, and it is the first thing this
+project has ever been able to see — before this run the loop reported training loss only.
+
+### The finding: dropping the parse failures was the wrong call
+
+Both runs below train for 15 000 steps against the *same* held-out set, so only the training
+corpus differs:
+
+| run | corpus | training tokens | epochs | held-out loss |
+|---|---|---|---|---|
+| `drivel-clean` | parse deaths **dropped** | 1 120 837 | 27.4 | 3.169 |
+| `drivel-all` | parse deaths **kept** | 2 932 977 | 10.5 | **2.797** |
+| `drivel-all-30k` | parse deaths kept | 2 932 977 | 20.9 | **2.688** |
+
+Keeping the 437 parse-dead files is worth **0.37 nats** at equal step count, and 0.48 nats
+once the bigger corpus is trained to convergence. The plan's recommendation — drop them,
+they are ungrammatical by construction — was wrong, and the control run is the only reason
+we know.
+
+Why: at drivel's size the binding constraint is *volume*, not purity. 1.12M tokens is 27
+epochs of memorising; 2.93M is 10. And the parse-dead files are not garbage — Finding 2
+says they are long, mostly-correct programs carrying a handful of glued tokens, and
+`run_once_corrected`'s own doc comment says as much ("overwhelmingly correct Stitch by
+token"). The held-out set contains only clean programs, so this is not the model learning
+to like broken text; it is genuinely better at clean Stitch.
+
+`drivel-all-30k` is the checkpoint to keep. Its held-out loss had flattened by ~26k
+(2.6947 → 2.6872 → 2.6879), so it is at or near converged for this corpus and this rung.
+
+### Parse rate
+
+`cargo xtask cram --eval --corpus-root corpora/heldout --samples 200`:
+
+| rung | as sampled | complete items |
+|---|---|---|
+| babble (floor) | 200/200 = 100% | 100% — by construction, the mask guarantees it |
+| `drivel-clean` | 47/200 = 23.5% | 62/200 = 31.0% |
+| `drivel-all-30k` | 50/200 = 25.0% | 56/200 = 28.0% |
+| `quip-all` | **59/200 = 29.5%** | 63/200 = 31.5% |
+
+**Parse rate did not see the difference the held-out loss did.** 23.5% vs 25.0% at n = 200
+is inside the sampling error; the held-out loss separates the same two checkpoints by 0.48
+nats. This is the argument for the gate metric being NLL rather than parse%, made
+concretely: a generative rate over 200 samples is too coarse to rank two rungs that are
+genuinely half a nat apart.
+
+For reference the floors' masked NLL on this held-out set is babble 5.2927 / uniform 2.6941
+free-nll. **Do not compare that to the held-out losses above** — masked NLL is scored over
+oracle-legal token *classes*, the training loss is unconstrained cross-entropy over the 2048
+vocab. They are different quantities that happen to land near each other.
+
+25% is well below the 91% that drivel-on-babble reached, and that is expected: babble is
+generated from the grammar, so its programs are short, shallow and structurally uniform.
+These are 96-token unconstrained samples in the presence of real Stitch's comment style,
+generics and effect annotations. Samples read as plausible Stitch that loses its balance
+partway through — the right failure mode for this size.
+
+### quip: 3× the parameters buys 0.03 nats
+
+`quip` (3.05M params, d 192 × 6 layers × 6 heads) on the same corpus, same vocab, same
+held-out set, 20 000 steps:
+
+| run | params | steps | training tokens | epochs | train loss | held-out | wall |
+|---|---|---|---|---|---|---|---|
+| `drivel-clean` | 1.05M | 15 000 | 1 120 837 | 27.4 | 2.109 | 3.169 | 623s |
+| `drivel-all` | 1.05M | 15 000 | 2 932 977 | 10.5 | 2.189 | 2.797 | 623s |
+| `drivel-all-30k` | 1.05M | 30 000 | 2 932 977 | 20.9 | 2.079 | 2.688 | 1255s |
+| `quip-all` | 3.05M | 20 000 | 2 932 977 | 14.0 | 1.834 | **2.658** | 1608s |
+
+quip wins, and by almost nothing — 0.030 nats for triple the parameters and 28% more wall
+clock, and its held-out loss was still falling at the end (2.6699 → 2.6611 → 2.6575) so a
+longer run would take it further. Parse rate moves more than the loss does: 25.0% → 29.5%.
+
+**This is the data-starvation signal, and it is the most useful number of the day.** 2.93M
+tokens is ~1 token per quip parameter against Chinchilla's 20. Scaling the rung is not what
+this ladder needs next; corpus is. Throughput on that is the real constraint — at batch9's
+36.6 tok/s, a corpus big enough to feed `cliche` is several hundred hours of generation, so
+Findings 1–4 (yield per candidate) matter more than any training-side change.
+
+### Caveats on these numbers
+
+- **The held-out loss is a 64-window sample** (`--eval-batch`, ~8 192 of 302 985 tokens),
+  fixed for a run so consecutive points differ by the model alone. It is reliable for
+  comparing runs *on the same held-out stream* and is not an absolute: re-ordering the same
+  held-out programs moved the reported loss by 0.085. Raise `--eval-batch` before quoting
+  one of these as a standalone figure.
+- The `drivel-clean-*` sweep rows used the stride split; `drivel-clean` / `drivel-all*` used
+  the frozen `corpora/heldout`. The sweep's shape (where the knee is) is sound; its absolute
+  values are on a different stream from the comparison table.
+- `--eval` gives a trained checkpoint **no** masked-NLL row. That needs the class→vocab
+  decode mask (increment 6). Parse rate and held-out loss are what we have.
+
+### Still open
+
+- The 45 degenerate files (Finding 3) were left in. Only ~5 of them survive into the
+  keep-set, but all 45 are in `drivel-all`'s corpus, and one of them reached the 4096-entry
+  vocab as a token. Filtering them is untested.
+- The vocab is not frozen in the wire-law sense — it sits in `corpora/`, uncommitted.
+  Promoting it into `kvetch-vocab/assets/` with a digest test is a deliberate call.
+- `xtask/src/main.rs`'s `the_derived_plan_matches_the_previously_hardcoded_set` fails on a
+  clean tree, and did before any of this work: the derived mutation plan has picked up
+  `cram`, `cram-corpus`, `cram-eval`, `cram-gen`, `kvetch-model`, `kvetch-vocab` and
+  `xtask-cram` since the characterisation list was written. Enrolling seven crates in the
+  mutation gate is the deliberate act that test exists to force, so it was left alone.
+- `checkpoints/drivel-0.tsv` — the 52 000-step reference curve quoted in the timings above —
+  was overwritten by a 20-step smoke run before `--name` existed. The numbers in this
+  document were taken from it beforehand; the file is gone.
+
 ## What to do before batch10
 
 - Commit the incremental `write_manifest`.
