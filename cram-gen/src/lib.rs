@@ -250,6 +250,11 @@ pub struct CandidateRecord {
     pub seconds: f64,
     pub reasoned: bool,
     pub extra_blocks: usize,
+    /// Whether correction ran out of budget and the program was finished
+    /// unguarded. Without it, "the guard gave up" is visible only on a terminal
+    /// that has long since scrolled — and a program the guard abandoned is a
+    /// different kind of evidence from one it never had to touch.
+    pub abandoned: bool,
     /// Every rewind, with what the model wanted beside what replaced it.
     pub corrections: Vec<Correction>,
 }
@@ -362,10 +367,19 @@ pub fn run_once_corrected<M: Model + ?Sized>(
         let prefix: String = kept.concat();
         let mut round: Vec<String> = Vec::new();
         let mut doomed = false;
-        let raw = model.complete(&system, &user, &prefix, &mut |chunk| {
+        model.complete(&system, &user, &prefix, &mut |chunk| {
             tokens += 1;
             on_chunk(chunk);
+            let mut kept_chunk = chunk.to_string();
             if let Some((context, discarded, depth)) = pending.take() {
+                // Put back what the prefill boundary ate — onto the replacement
+                // chunk itself, never as a chunk of its own. Rewind depth is
+                // counted in chunks, so an extra one would make the next rewind
+                // reach a token less far than it asked for; riding along also
+                // means a later rewind that discards this chunk takes the
+                // repair with it. The correction still records the model's own
+                // words: it is evidence about the model, not about the splice.
+                kept_chunk.insert_str(0, lost_separator(&discarded, chunk));
                 corrections.push(Correction {
                     context,
                     discarded,
@@ -373,7 +387,7 @@ pub fn run_once_corrected<M: Model + ?Sized>(
                     depth,
                 });
             }
-            round.push(chunk.to_string());
+            round.push(kept_chunk);
             doomed = is_doomed(
                 extract(&format!("{prefix}{}", round.concat())).program.trim_end(),
             );
@@ -381,7 +395,10 @@ pub fn run_once_corrected<M: Model + ?Sized>(
         })?;
 
         if !doomed {
-            let mut run = assemble(format!("{prefix}{raw}"), tokens, false);
+            // From the chunks, not from what the model returned: the repaired
+            // separators live in `round`, and assembling from the raw reply
+            // would silently drop every one of them.
+            let mut run = assemble(format!("{prefix}{}", round.concat()), tokens, false);
             run.corrections = corrections;
             return Ok(run);
         }
@@ -393,15 +410,26 @@ pub fn run_once_corrected<M: Model + ?Sized>(
             // guard and let it run to the end: what comes back is a finished
             // program with a few bad tokens in it, which is overwhelmingly
             // correct Stitch by token and perfectly good training data.
+            // This resumes from the same prefill boundary as any other rewind,
+            // so it drops a separator the same way — and this is the path that
+            // produces a *finished* program, i.e. the one most likely to be
+            // trained on.
+            let dropped = round.concat();
+            let mut separator = String::new();
+            let mut first = true;
             let finished = model.complete(&system, &user, &prefix, &mut |chunk| {
                 tokens += 1;
                 on_chunk(chunk);
+                if first {
+                    first = false;
+                    separator = lost_separator(&dropped, chunk).to_string();
+                }
                 true
             })?;
             // A `Correction` is a *completed* rewind — discarded text plus what
             // replaced it. This last refusal never got one; `abandoned` records
             // that correction ran out, not that the program did.
-            let mut run = assemble(format!("{prefix}{finished}"), tokens, true);
+            let mut run = assemble(format!("{prefix}{separator}{finished}"), tokens, true);
             run.corrections = corrections;
             return Ok(run);
         }
@@ -434,6 +462,32 @@ pub fn run_once_corrected<M: Model + ?Sized>(
         on_rewind(&discarded);
         pending = Some((tail(&kept.concat()), discarded, requested));
     }
+}
+
+/// The whitespace a resumed completion dropped at the prefill boundary, or `""`
+/// when nothing was dropped.
+///
+/// `notes/batch9-findings.md` Finding 2: resuming a rewind by sending the kept
+/// prefix as a trailing `assistant` message reliably loses one separator — the
+/// chat template strips it, or the model will not open a continuation with a
+/// leading space. 69% of batch9's discarded texts started with whitespace and
+/// only 20% of their replacements did, so **49% of all 25 482 corrections were a
+/// whitespace-to-non-whitespace join**. Most are lost indentation; the rest are
+/// `ext` + ` freeSpace` → `extfreeSpace`, which is the parse-error population
+/// (83 × `unexpected token: If`, 18 × `Let`, 19 × `expected '(' after function
+/// name`).
+///
+/// The repair is the *discarded* text's own leading whitespace, so an
+/// indentation rewind gets its indentation back rather than a single space. It
+/// fires only when the replacement brought none of its own: a replacement that
+/// kept its separator must not be given a second copy, or every rewind inside a
+/// block would deepen the indent.
+fn lost_separator<'a>(discarded: &'a str, replacement: &str) -> &'a str {
+    if replacement.starts_with(char::is_whitespace) {
+        return "";
+    }
+    let end = discarded.find(|byte: char| !byte.is_whitespace()).unwrap_or(discarded.len());
+    &discarded[..end]
 }
 
 /// The last `CORRECTION_CONTEXT` bytes, on a character boundary.

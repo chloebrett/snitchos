@@ -49,12 +49,16 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
 
     // Pinned settings go on the record: a later bulk run compared against this
     // one is meaningless if temperature drifted in between.
+    // `correct` belongs here as much as temperature does: batch9's manifest
+    // recorded every sampling knob and not the guard budget, so the run cannot
+    // be reproduced and no later run is strictly comparable to it.
     let header = format!(
-        "model={} recipes={} ({} recipes over {} domains) temp={} top_p={} top_k={} presence={} max_tokens={}",
+        "model={} recipes={} ({} recipes over {} domains) correct={} temp={} top_p={} top_k={} presence={} max_tokens={}",
         model.model,
         sheet.name,
         sheet.count(),
         sheet.domains().len(),
+        options.corrections,
         model.sampling.temperature,
         model.sampling.top_p,
         model.sampling.top_k,
@@ -153,6 +157,7 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
                     seconds,
                     reasoned: run.reasoned,
                     extra_blocks: run.extra_blocks,
+                    abandoned: run.abandoned,
                     corrections: run.corrections.clone(),
                 });
                 // Everything is kept, salvageable or not: model-produced broken

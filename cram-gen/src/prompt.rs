@@ -37,9 +37,16 @@ Rules that are easy to get wrong:
 - There is no `return`. A block's value is its last expression.
 - Exported items are prefixed `ext`; everything else is module-private.
 - Comments explain *why*, never *what*. Keep them to one or two lines.
+- Do not plan in comments. Decide first, then write the code — a comment that
+  weighs options, sketches an approach, or narrates what comes next is not a
+  comment, and a program full of them is a worse program.
 - Include `test \"…\" { expect … }` items covering the core logic.
 
-Reply with exactly one fenced ```stitch block and nothing else."
+If you need to think first, do it in a few plain sentences before the block.
+That text is discarded and never becomes part of the program, so it costs you
+nothing.
+
+Reply with one fenced ```stitch block, and no other block."
         .to_string()
 }
 
