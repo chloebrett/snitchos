@@ -142,6 +142,7 @@ cargo xtask snemu boot         # build full kernel + run under the snemu emulato
 cargo xtask snemu boot --max-steps 3000000  # cap the run at N instruction steps
 cargo xtask snemu boot --frames  # also decode + dump the telemetry frames snemu captures off the virtio-console
 cargo xtask snemu boot --workload demo  # boot a runtime workload under snemu (injects the DTB bootarg)
+cargo xtask snemu boot --interactive --release --workload stitch-kvetch  # type at the guest: raw mode, live UART, Ctrl-] to quit
 cargo xtask snemu diff          # differential oracle: diff snemu vs QEMU telemetry on the default boot
 cargo xtask snemu diff --workload demo  # ...on a specific workload (both emulators run it)
 cargo xtask snemu diff --all    # sweep every workload; print an agree/disagree summary table

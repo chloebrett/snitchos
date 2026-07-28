@@ -386,6 +386,14 @@ enum SnemuCmd {
         /// to stream frames from a release-only fidelity gap, not just diff it.
         #[arg(long)]
         release: bool,
+        /// Attach your terminal to the guest's UART — stream its output live and
+        /// send your keystrokes to it, so you can actually *use* the guest (type
+        /// at the Stitch REPL, press Tab for a completion). Raw mode, so Tab and
+        /// Ctrl-C reach the guest rather than the host shell; **Ctrl-]** ends the
+        /// session. Implies an unlimited step budget unless `--max-steps` says
+        /// otherwise.
+        #[arg(long)]
+        interactive: bool,
     },
     /// Differential oracle: boot the same kernel under snemu and QEMU and
     /// structurally diff their telemetry frame streams (timestamps normalized).
@@ -1045,8 +1053,8 @@ mod retired_command_tests {
 /// Dispatch the `snemu` subcommand group.
 fn run_snemu(cmd: SnemuCmd) -> ExitCode {
     match cmd {
-        SnemuCmd::Boot { features, max_steps, frames, workload, release } => {
-            snemu_boot(&features, max_steps, frames, workload.as_deref(), release)
+        SnemuCmd::Boot { features, max_steps, frames, workload, release, interactive } => {
+            snemu_boot(&features, max_steps, frames, workload.as_deref(), release, interactive)
         }
         SnemuCmd::Diff { steps, qemu_secs, workload, all, limit, opt } => {
             if all {
@@ -1295,6 +1303,7 @@ fn snemu_boot(
     frames: bool,
     workload: Option<&str>,
     release: bool,
+    interactive: bool,
 ) -> ExitCode {
     let mut features_vec: Vec<&str> = if features.is_empty() {
         Vec::new()
@@ -1309,6 +1318,17 @@ fn snemu_boot(
     // `Mid` = opt-3 kernel with the opt-1 userspace pin (same regime the release
     // itests and `diff --opt mid` use); `Low` = debug. `High` (opt-3 userspace)
     // isn't exposed here — that's the deliberate-UB build, reachable via `itest`.
+    // An interactive session against a debug kernel is a bad first experience: the
+    // Stitch REPL's boot self-tests alone run ~215M ticks each there versus ~2.6M
+    // optimized, so the prompt takes minutes to appear and the session looks hung.
+    // Say so rather than let it be discovered.
+    if interactive && !release {
+        eprintln!(
+            "snemu-boot: --interactive without --release runs the debug kernel, which can take \
+             minutes to reach a prompt (the Stitch REPL is ~80x slower there). Consider \
+             `--release`."
+        );
+    }
     let opt = if release { qemu::OptLevel::Mid } else { qemu::OptLevel::Low };
     let status = qemu::build_kernel_profiled(&features_vec, opt).expect("failed to invoke cargo");
     if !status.success() {
@@ -1320,6 +1340,9 @@ fn snemu_boot(
     cmd.args(["run", "-q", "-p", "snemu", "--"]);
     if frames {
         cmd.arg("--frames");
+    }
+    if interactive {
+        cmd.arg("--interactive");
     }
     if let Some(name) = workload {
         cmd.args(["--workload", name]);

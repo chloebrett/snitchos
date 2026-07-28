@@ -28,9 +28,10 @@ const DTB: &[u8] = include_bytes!("../virt.dtb");
 struct Cli {
     /// The kernel ELF64 image to run.
     kernel: PathBuf,
-    /// Instruction (scheduler-step) budget before giving up.
-    #[arg(default_value_t = DEFAULT_MAX_STEPS)]
-    max_steps: u64,
+    /// Instruction (scheduler-step) budget before giving up. Defaults to
+    /// [`DEFAULT_MAX_STEPS`], or to unlimited under `--interactive` (where the
+    /// session ends when you say so, not when a counter runs out).
+    max_steps: Option<u64>,
     /// Dump every decoded telemetry frame (otherwise just a count).
     #[arg(long)]
     frames: bool,
@@ -71,6 +72,14 @@ struct Cli {
     /// first present. Close the window or press Esc to stop the run.
     #[arg(long)]
     window: bool,
+    /// Attach your terminal to the guest's UART: stream its output as it is
+    /// written and send your keystrokes to it. Puts the terminal in raw mode, so
+    /// Tab, Ctrl-C and friends reach the guest rather than the host shell. Press
+    /// **Ctrl-]** to stop the run. Implies an effectively unlimited step budget
+    /// unless one is given explicitly — a session is bounded by you, not by a
+    /// count.
+    #[arg(long)]
+    interactive: bool,
 }
 
 /// Fixed mode this milestone's kernel hardcodes
@@ -86,6 +95,14 @@ const DEFAULT_WINDOW_HEIGHT: usize = 768;
 /// benefits from. A fixed constant for a first cut; tune once it's running
 /// (or promote to a `--window-interval` flag) if it's ever wrong.
 const WINDOW_UPDATE_INTERVAL: u64 = 200_000;
+
+/// How many guest steps between interactive input polls + output flushes. Each
+/// poll is one `read` syscall, so this trades keystroke latency against syscall
+/// overhead; at snemu's throughput this is well under a millisecond of lag, which
+/// is far below what a person typing can notice.
+const INTERACTIVE_POLL_INTERVAL: u64 = 50_000;
+
+mod interactive;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -141,7 +158,40 @@ fn main() -> ExitCode {
         None
     };
 
-    let max_steps = cli.max_steps;
+    // An interactive session is bounded by the person at the keyboard, so the
+    // default budget goes away — but an explicit one is still honoured.
+    let max_steps = cli.max_steps.unwrap_or(if cli.interactive { u64::MAX } else { DEFAULT_MAX_STEPS });
+
+    // Raw mode lives for the whole run and restores the terminal on the way out,
+    // including on a panic.
+    //
+    // Keystrokes are read *only* while it is active, and that is a correctness
+    // rule rather than a nicety: raw mode is what makes a read non-blocking
+    // (`VMIN`/`VTIME` both zero). On a pipe there is no such setting, so a read
+    // with nothing buffered would block — stalling the emulator on a guest that is
+    // busy running. The alternative, `O_NONBLOCK` on stdin, is worse: the flag
+    // lives on the open file *description*, which the parent shell shares, so
+    // snemu would leave the user's terminal non-blocking after it exits.
+    let raw = cli.interactive.then(interactive::RawMode::enter).flatten();
+    if cli.interactive && raw.is_none() {
+        eprintln!(
+            "snemu: --interactive but stdin is not a terminal — streaming output, \
+             but nothing typed will reach the guest (use `xtask itest` to script input)"
+        );
+    } else if cli.interactive {
+        // Say the keys out loud. The first user of this feature had a working
+        // session and no way to know it: keystrokes reach the guest, but a guest
+        // that has not booted far enough to echo looks identical to a dead input
+        // path, and an escape key nobody has been told about is not an escape.
+        eprintln!(
+            "snemu: interactive — keystrokes go to the guest; Ctrl-] or Ctrl-C quits. \
+             The guest takes a while to reach a prompt (much longer without --release)."
+        );
+    }
+    let typing = raw.is_some();
+    let mut shown = 0usize;
+    let mut keys = [0u8; 64];
+
     let mut steps = 0u64;
     'run: while steps < max_steps {
         match machine.step() {
@@ -155,6 +205,24 @@ fn main() -> ExitCode {
                     machine.satp(1)
                 );
                 break;
+            }
+        }
+        if cli.interactive && steps.is_multiple_of(INTERACTIVE_POLL_INTERVAL) {
+            // Output first: what the guest has already said should be on screen
+            // before we hand it what the user typed in reply.
+            let output = machine.uart_output();
+            interactive::emit(interactive::unshown(output, shown));
+            shown = output.len();
+
+            if typing {
+                let typed = interactive::poll_input(&mut keys);
+                if typed.contains(&interactive::QUIT_BYTE) {
+                    eprintln!("\r\nsnemu: Ctrl-] — ending the session");
+                    break 'run;
+                }
+                if !typed.is_empty() {
+                    machine.push_console_input(typed);
+                }
             }
         }
         if let Some(win) = &mut window
@@ -184,7 +252,13 @@ fn main() -> ExitCode {
         );
     }
 
-    print!("{}", String::from_utf8_lossy(machine.uart_output()));
+    // Batch mode prints the whole UART log at the end; an interactive session has
+    // already seen it byte by byte, so reprinting would duplicate the entire boot.
+    if cli.interactive {
+        interactive::emit(interactive::unshown(machine.uart_output(), shown));
+    } else {
+        print!("{}", String::from_utf8_lossy(machine.uart_output()));
+    }
     report_frames(machine.virtio_tx_output(), cli.frames);
     if let Some(path) = &cli.dump_framebuffer {
         dump_framebuffer(&machine, path);

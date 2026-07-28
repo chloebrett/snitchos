@@ -285,6 +285,7 @@ cargo xtask build             # just build the kernel ELF
 cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note below)
 cargo xtask diagram <target>  # generate a diagram (deps|itest-matrix|caps|trace|switches) into docs/generated/; --check gates the static ones
 cargo xtask diagram png       # render the hand-drawn mermaid docs to local PNGs (needs mmdc, Node >=18)
+cargo xtask snemu boot --interactive --release --workload stitch-kvetch   # drive the guest by hand under snemu: live UART, raw-mode keystrokes, Ctrl-] quits
 cargo xtask cram --rung drivel    # train a ladder rung end to end: corpus (generated or cached) → vocab → model → checkpoint + loss curve
 cargo xtask cram --eval           # score the ladder: floor rows (babble, uniform) on held-out real Stitch, + parse rate with samples
 cargo xtask cram --eval --checkpoint c.kvetch --eval-vocab c.vocab   # ...including a trained rung's parse rate
