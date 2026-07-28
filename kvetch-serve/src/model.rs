@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use kvetch_model::Model;
+use kvetch_model::{Model, NaiveGemm, Session};
 use kvetch_vocab::TokenId;
 
 use crate::serve::Logits;
@@ -14,12 +14,19 @@ use crate::serve::Logits;
 /// A checkpoint, answering "what comes next" for the position after a token run.
 pub struct ModelLogits {
     model: Model,
+    /// Keys and values for the run asked about last time.
+    ///
+    /// Held across calls because a completion asks about a growing prefix, one token
+    /// at a time — which is exactly the shape a KV cache turns from `O(prefix)` per
+    /// token into `O(1)`. The session reconciles the run itself, so a sampler that
+    /// backtracks cannot read a stale answer out of it.
+    session: Session,
 }
 
 impl ModelLogits {
     #[must_use]
-    pub const fn new(model: Model) -> Self {
-        Self { model }
+    pub fn new(model: Model) -> Self {
+        Self { model, session: Session::new() }
     }
 
     /// The vocab this checkpoint was trained against, for
@@ -31,10 +38,7 @@ impl ModelLogits {
 }
 
 impl Logits for ModelLogits {
-    fn next(&self, tokens: &[TokenId]) -> Vec<f32> {
-        // `forward` returns logits for *every* position, `tokens.len() × vocab`
-        // row-major, because training needs them. Serving wants the last row only.
-        //
+    fn next(&mut self, tokens: &[TokenId]) -> Vec<f32> {
         // An empty prompt has no position to predict from, so there is nothing to
         // say — an empty distribution, which `draw` reads as "stop". A REPL prefix is
         // never empty in practice (Tab on a blank line is answered by the grammar
@@ -43,9 +47,12 @@ impl Logits for ModelLogits {
         if tokens.is_empty() {
             return Vec::new();
         }
-        let vocab = self.model.vocab();
-        let mut logits = self.model.forward(tokens);
-        logits.split_off(logits.len() - vocab)
+        // Not `Model::forward`: that computes logits for every position and keeps
+        // every training intermediate, so generating N tokens re-runs the prefix N
+        // times. The session gives the same numbers — bit for bit, which
+        // `generating_with_a_cache_is_bit_identical_to_re_running_the_prefix` pins —
+        // for one position of work per token.
+        self.session.logits_for(&self.model, tokens, &NaiveGemm)
     }
 }
 

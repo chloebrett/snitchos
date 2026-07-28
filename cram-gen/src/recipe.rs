@@ -2,7 +2,7 @@
 //!
 //! One recipe repeated five hundred times is one program written five hundred
 //! ways, and a corpus of that teaches a model one program. The axes come from
-//! [`plans/corpus-recipe-axes.md`]; the sheets in `assets/recipes/` were
+//! `plans/corpus-recipe-axes.md`; the sheets in `assets/recipes/` were
 //! generated from it, and the doc stays the source of truth for *why* these are
 //! the axes.
 //!
@@ -37,7 +37,7 @@ pub const DEFAULT: &str = "batch10";
 /// How much latitude a brief gives the model around its size bucket.
 ///
 /// batch9's yield was a monotone function of program length — 16% parse-death in
-/// the shortest decile against 92% in the longest ([`notes/batch9-findings.md`]
+/// the shortest decile against 92% in the longest (`notes/batch9-findings.md`
 /// Finding 1) — because every extra token is another chance for the correction
 /// guard to splice badly. `Grow` is the wording that produced that; `Hold` is
 /// the response to it.

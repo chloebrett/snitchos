@@ -69,7 +69,7 @@ pub fn serve_model(checkpoint: &[u8], vocab: &[u8]) -> ! {
             Server::new(logits, vocab, fingerprint)
         });
 
-    let Some(server) = paired else {
+    let Some(mut server) = paired else {
         register_counter("snitchos.kvetch.pairing_refused").emit(1);
         snitchos_user::debug_write(
             b"kvetch: refusing to serve - the embedded checkpoint and vocab were not \

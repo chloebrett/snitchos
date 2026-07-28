@@ -73,13 +73,14 @@ struct LiveSnemu {
     /// `smp-tlb`). Instret makes the budget mode-independent: identical guest work
     /// on↔off, and the JIT cashes its win as wall-time, not extra scanning.
     max_instret: u64,
-    /// The guest faulted/halted — no more frames will come.
-    halted: bool,
+    /// Why the guest stopped, if it did — `None` while it is still running. Holds
+    /// the *reason*, not just the fact: see `step_batch`.
+    halt: Option<String>,
 }
 
 impl LiveSnemu {
     fn new(machine: snemu::machine::Machine, source: TelemetrySource, max_instret: u64) -> Self {
-        Self { machine, source, tx_consumed: 0, max_instret, halted: false }
+        Self { machine, source, tx_consumed: 0, max_instret, halt: None }
     }
 
     /// The next telemetry frame, stepping the machine as needed. `None` once the
@@ -97,7 +98,7 @@ impl LiveSnemu {
                 self.tx_consumed += n;
                 return Some(frame);
             }
-            if self.halted || self.machine.instret() >= self.max_instret {
+            if self.halt.is_some() || self.machine.instret() >= self.max_instret {
                 return None;
             }
             self.step_batch();
@@ -111,7 +112,7 @@ impl LiveSnemu {
             if uart_contains(self.machine.uart_output(), needle) {
                 return true;
             }
-            if self.halted || self.machine.instret() >= self.max_instret {
+            if self.halt.is_some() || self.machine.instret() >= self.max_instret {
                 return false;
             }
             self.step_batch();
@@ -124,12 +125,28 @@ impl LiveSnemu {
     fn step_batch(&mut self) {
         let target = (self.machine.instret() + LIVE_STEP_BATCH).min(self.max_instret);
         while self.machine.instret() < target {
-            if self.machine.step().is_err() {
-                self.halted = true;
+            if let Err(error) = self.machine.step() {
+                // **Keep the reason.** snemu halts deliberately on an instruction it
+                // does not model, and the error names it — that message is the whole
+                // point of the meta-loop. Discarding it (this was `.is_err()`) turns
+                // "snemu lacks this opcode at pc=X" into "no frame arrived", so the
+                // scenario blames whatever it was waiting for. Costly: a guest that
+                // stops dead reads as a program that computed nothing.
+                self.halt = Some(alloc_halt_reason(&error, self.machine.instret()));
                 return;
             }
         }
     }
+
+    /// Why the machine stopped, if it did.
+    fn halt_reason(&self) -> Option<&str> {
+        self.halt.as_deref()
+    }
+}
+
+/// Render a machine halt for a human: the error and how far the guest got.
+fn alloc_halt_reason(error: &impl std::fmt::Debug, instret: u64) -> String {
+    format!("snemu halted after {instret} guest instructions: {error:?}")
 }
 
 /// Whether `output` (the guest's UART bytes) contains `needle` as a substring.
@@ -911,6 +928,12 @@ impl View {
     }
 
     fn dump_recent(&self, reason: &str) {
+        // A halted machine is the *cause*, so it goes out even in quiet mode: a
+        // scenario whose guest stopped dead is not one more miss in a fidelity
+        // sweep, it is snemu telling us which instruction it lacks.
+        if let Some(halt) = self.source.live().and_then(LiveSnemu::halt_reason) {
+            eprintln!("  [{halt}]");
+        }
         // Batch replay (the fidelity audit) runs many scenarios against a
         // closed stream; each miss would dump a tail. The summary report is the
         // signal there, so stay silent.

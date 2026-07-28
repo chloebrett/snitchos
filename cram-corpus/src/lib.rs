@@ -370,7 +370,7 @@ pub fn tokenize(vocab: &Vocab, corpus: &str) -> Vec<TokenId> {
 /// This is the quantity that sizes both grammar-derived decode savings — forced
 /// tokens (`n == 1`, no forward pass at all) and babble-drafting (small `n`,
 /// acceptance bounded below by `1/n`). See
-/// [`docs/speculative-decoding-design.md`](../../docs/speculative-decoding-design.md).
+/// `docs/speculative-decoding-design.md`(../../docs/speculative-decoding-design.md).
 ///
 /// Measured at *token boundaries*, because that is where a decoder chooses. A
 /// byte-offset scan would answer a different and less useful question.

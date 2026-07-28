@@ -315,7 +315,7 @@ pub fn silu_backward(value: f32) -> f32 {
 /// Mean cross-entropy of `targets` given `tokens`, and its gradient with
 /// respect to every weight — same layout as [`Model::weights`].
 ///
-/// Walks the [`Trace`] backwards, composing the per-op gradients above. The
+/// Walks the `Trace` backwards, composing the per-op gradients above. The
 /// residual stream is why each half adds two contributions: a residual connection
 /// forks the gradient, so the stream's gradient is what flowed from above *plus*
 /// what came back through the block.

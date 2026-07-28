@@ -265,7 +265,7 @@ pub enum Syscall {
     AudioWrite = 32,
     /// Enqueue audio samples into the kernel's async DAC ring through an
     /// `Object::AudioSink` capability (`a0` = `Handle`, `a1` = ptr to `[i16]` samples,
-    /// `a2` = sample count). Gated on the AUDIO right. Unlike [`AudioWrite`], this
+    /// `a2` = sample count). Gated on the AUDIO right. Unlike [`Self::AudioWrite`], this
     /// **does not block** for playback: it copies as many leading samples as the ring
     /// has room for and returns the accepted count in `a0`, so the caller re-submits
     /// the tail (back-pressure). A timer-driven drain feeds the DAC from the ring. This

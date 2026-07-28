@@ -1,6 +1,6 @@
 //! `kvetch-drivel-server` — the completion server, backed by **weights**.
 //!
-//! Rung 1 of the ladder where [`kvetch-server`](../kvetch-server.rs) is rung 0: same
+//! Rung 1 of the ladder where `kvetch-server` (its sibling binary) is rung 0: same
 //! endpoint, same protocol, same guarantee that a completion is legal Stitch. The
 //! only difference is where the opinion comes from, which is what makes the two
 //! comparable on the same prompt.

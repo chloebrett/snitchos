@@ -284,9 +284,91 @@ pub(crate) fn classify_d(bits: u64) -> u64 {
     if negative { 1 << 1 } else { 1 << 6 }
 }
 
+/// `fclass`'s ten-bit one-hot classification of a **single**.
+///
+/// The same ten classes as [`classify_d`], decided at single precision — which is
+/// the whole point, and the reason this is not `classify_d(widen(bits))`:
+///
+/// - a subnormal `f32` widens to a perfectly **normal** `f64`, so the widening
+///   version would report class 2/5 as 1/6 — wrong for exactly the values a guest
+///   calls `fclass` to detect;
+/// - widening a **signalling** NaN quiets it, and bits 8 vs 9 are the one
+///   distinction `fclass` exists to expose.
+///
+/// A non-boxed register reads as the canonical NaN, per [`unbox_single`] — that is
+/// the architecture's rule for a single-precision read of a register holding a
+/// double, not a shortcut.
+pub(crate) fn classify_s(bits: u64) -> u64 {
+    let single = unbox_single(bits);
+    let raw = single.to_bits();
+    let value = f64::from(single);
+    let negative = raw >> 31 == 1;
+
+    if single.is_nan() {
+        // The MSB of the significand is the quiet bit — bit 22 at this width.
+        let quiet = raw & (1 << 22) != 0;
+        return if quiet { 1 << 9 } else { 1 << 8 };
+    }
+    if single.is_infinite() {
+        return if negative { 1 << 0 } else { 1 << 7 };
+    }
+    if value == 0.0 {
+        return if negative { 1 << 3 } else { 1 << 4 };
+    }
+    if single.is_subnormal() {
+        return if negative { 1 << 2 } else { 1 << 5 };
+    }
+    if negative { 1 << 1 } else { 1 << 6 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `fclass.s` classifies at **single** precision. The tempting implementation —
+    /// widen to `f64` and reuse `classify_d` — is wrong twice, and both wrongs are
+    /// silent: a subnormal single widens to a normal double, and a signalling NaN is
+    /// quieted on the way. Those are precisely the two classes a guest calls
+    /// `fclass` to find out about.
+    #[test]
+    fn classify_s_decides_at_single_precision_not_by_widening() {
+        let boxed = |bits: u32| 0xffff_ffff_0000_0000 | u64::from(bits);
+
+        // Smallest positive subnormal single: normal as a double.
+        let subnormal = boxed(0x0000_0001);
+        assert_eq!(classify_s(subnormal), 1 << 5, "a subnormal single is class 5");
+        assert_ne!(
+            classify_s(subnormal),
+            classify_d(f64::from(f32::from_bits(0x0000_0001)).to_bits()),
+            "widening would call this normal",
+        );
+
+        // Signalling NaN: quiet bit clear.
+        let signalling = boxed(0x7f80_0001);
+        assert_eq!(classify_s(signalling), 1 << 8, "signalling NaN is class 8");
+        let quiet = boxed(0x7fc0_0000);
+        assert_eq!(classify_s(quiet), 1 << 9, "quiet NaN is class 9");
+    }
+
+    #[test]
+    fn classify_s_covers_the_ordinary_classes() {
+        let boxed = |value: f32| 0xffff_ffff_0000_0000 | u64::from(value.to_bits());
+
+        assert_eq!(classify_s(boxed(f32::NEG_INFINITY)), 1 << 0);
+        assert_eq!(classify_s(boxed(-1.5)), 1 << 1);
+        assert_eq!(classify_s(boxed(-0.0)), 1 << 3);
+        assert_eq!(classify_s(boxed(0.0)), 1 << 4);
+        assert_eq!(classify_s(boxed(1.5)), 1 << 6);
+        assert_eq!(classify_s(boxed(f32::INFINITY)), 1 << 7);
+    }
+
+    /// A register that is not NaN-boxed holds a double, and reading it as a single
+    /// yields the canonical NaN — so `fclass.s` must report a quiet NaN rather than
+    /// classifying the low half as if it were a float.
+    #[test]
+    fn classify_s_of_an_unboxed_register_is_a_quiet_nan() {
+        assert_eq!(classify_s(1.5f64.to_bits()), 1 << 9);
+    }
 
     // ---- canonical NaN ----------------------------------------------------
 

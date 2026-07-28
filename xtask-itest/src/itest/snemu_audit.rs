@@ -466,6 +466,19 @@ impl SpeedConfig {
 /// group's frames, and print a per-scenario + summary report. `limit` caps the
 /// number of workload groups (faster smoke). Exit is always `SUCCESS` — the
 /// audit *reports* fidelity, it doesn't gate on it.
+/// Kernel features this selection of scenarios needs beyond `itest-workloads`.
+///
+/// The workload registry is additive at *runtime* precisely so one kernel serves
+/// every scenario, and that holds while the programs are small. `kvetch-drivel` is
+/// the exception the design anticipated ("genuinely compile-time variants — rare"):
+/// its checkpoint is larger than the rest of the image combined.
+fn kernel_features(work: &[&itest_harness::Scenario]) -> Vec<&'static str> {
+    const DRIVEL_WORKLOADS: [&str; 2] = ["kvetch-drivel", "stitch-drivel"];
+    let needs_drivel =
+        work.iter().any(|s| s.workload.is_some_and(|w| DRIVEL_WORKLOADS.contains(&w)));
+    if needs_drivel { vec!["kvetch-drivel"] } else { Vec::new() }
+}
+
 pub fn run(
     max_steps: u64,
     limit: Option<usize>,
@@ -481,20 +494,32 @@ pub fn run(
     instret_gate: Option<crate::itest::instret_baseline::InstretGate>,
     export_instret: Option<std::path::PathBuf>,
 ) -> ExitCode {
-    let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
+    // Naming a scenario is an explicit choice to run it, opt-in or not; an
+    // unfiltered run is the gate, and the gate skips the opt-in ones. Same rule as
+    // `select_by_tags`, and it has to be repeated here because this path selects
+    // from `SCENARIOS` directly rather than going through it.
+    let selected: Vec<&itest_harness::Scenario> = SCENARIOS
+        .iter()
+        .filter(|s| match only {
+            Some(substring) => s.name.contains(substring),
+            None => !s.opt_in,
+        })
+        .collect();
+    let cap = limit.map_or(selected.len(), |l| l.min(selected.len()));
+    let work: Vec<&itest_harness::Scenario> = selected.into_iter().take(cap).collect();
+
+    // Build *after* selecting, because what is selected decides what the kernel must
+    // carry. Only the drivel workloads want their 4.5 MB of weights embedded, and a
+    // run that does not include them must not pay for them — that cost is not
+    // abstract, it is the difference between a 16 MiB machine fitting and not.
+    let (kernel, dtb) = match snemu_diff::prepare_profiled_with(true, &kernel_features(&work), opt)
+    {
         Ok(v) => v,
         Err(e) => {
             eprintln!("itest: {e}");
             return ExitCode::from(1);
         }
     };
-
-    let selected: Vec<&itest_harness::Scenario> = SCENARIOS
-        .iter()
-        .filter(|s| only.is_none_or(|sub| s.name.contains(sub)))
-        .collect();
-    let cap = limit.map_or(selected.len(), |l| l.min(selected.len()));
-    let work: Vec<&itest_harness::Scenario> = selected.into_iter().take(cap).collect();
     eprintln!(
         "itest: auditing {cap} of {} scenario(s), live under snemu, \
          up to {max_steps} steps each, {jobs} worker(s), speed[{}]",

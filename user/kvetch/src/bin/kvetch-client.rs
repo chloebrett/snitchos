@@ -22,6 +22,17 @@ const PREFIX: &str = "greet(name) {";
 /// Room for the prefix plus whatever comes back.
 const CAP: usize = 256;
 
+/// Tokens to ask for.
+///
+/// **One**, because this client's job is to prove the *path* — request in,
+/// completion out, byte-identical across engines — and one token proves all of it.
+/// Eight cost the drivel rung ~90s per run: without a KV cache each token re-runs a
+/// forward pass over the whole prefix so far, so the budget is superlinear, not
+/// linear. Sampler depth is covered where it is cheap to cover, in the host tests
+/// (`babble::serve` and `kvetch_serve::serve` both sweep truncation and viability
+/// across many tokens and every buffer size).
+const MAX_TOKENS: u32 = 1;
+
 #[entry]
 fn main() {
     let _span = tracer().span("kvetch.client");
@@ -29,7 +40,7 @@ fn main() {
     buf[..PREFIX.len()].copy_from_slice(PREFIX.as_bytes());
 
     let request = Complete {
-        max_tokens: 8,
+        max_tokens: MAX_TOKENS,
         ptr: buf.as_ptr() as u64,
         cap: CAP as u32,
         prefix_len: PREFIX.len() as u32,

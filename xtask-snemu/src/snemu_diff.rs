@@ -783,12 +783,24 @@ pub fn prepare_profiled(
     with_workloads: bool,
     opt: qemu::OptLevel,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let features: &[&str] = if with_workloads {
-        &["itest-workloads"]
-    } else {
-        &[]
-    };
-    if !qemu::build_kernel_profiled(features, opt).is_ok_and(|s| s.success()) {
+    prepare_profiled_with(with_workloads, &[], opt)
+}
+
+/// [`prepare_profiled`], plus kernel features the caller needs on top.
+///
+/// Exists for payloads too large to carry by default. `kvetch-drivel` embeds ~4.5 MB
+/// of weights, which is more than the rest of the image put together — enough to push
+/// the default 16 MiB itest machine out of frames at userspace load, for the benefit
+/// of the two scenarios that use it. So the caller that *needs* it asks, and every
+/// other run stays lean.
+pub fn prepare_profiled_with(
+    with_workloads: bool,
+    extra: &[&str],
+    opt: qemu::OptLevel,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let mut features: Vec<&str> = if with_workloads { vec!["itest-workloads"] } else { Vec::new() };
+    features.extend_from_slice(extra);
+    if !qemu::build_kernel_profiled(&features, opt).is_ok_and(|s| s.success()) {
         return Err("kernel build failed".to_string());
     }
     let kernel = std::fs::read(qemu::kernel_bin(opt.is_release()))

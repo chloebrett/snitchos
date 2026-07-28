@@ -9,7 +9,7 @@
 //! catch-all `panic!`, so one illegal instruction from any user program halted
 //! the machine. That is what typing `1.5 + 1.5` at the Stitch REPL did: floats
 //! compile to FP instructions, and FP traps as illegal while `sstatus.FS` is
-//! Off. See [`docs/floating-point-design.md`].
+//! Off. See `docs/floating-point-design.md`.
 //!
 //! `unimp` rather than an actual float, deliberately — the disposition of an
 //! unhandled user trap is independent of floating point, and this probe should

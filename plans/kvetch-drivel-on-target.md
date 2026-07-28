@@ -1,7 +1,63 @@
 # Plan: drivel at the Stitch prompt (kvetch serves weights, not babble)
 
 **Branch**: main (house rule — no feature branches)
-**Status**: Active
+**Status**: 🚧 **Steps 1–4 done and green; step 7 partly done ahead of schedule.**
+Tab at the on-target Stitch prompt is answered by the trained checkpoint:
+
+```
+greet(name) {
+    let padded =
+```
+
+(babble, for comparison, gives `.. and ..= < "score" +`.)
+
+### What the build actually cost, versus what the plan guessed
+
+| | predicted | measured |
+|---|---|---|
+| one completion, guest instructions | 0.2–0.5B | **4–8B** (8 tokens) |
+| machine RAM | *unconsidered* | 16 MiB default is **too small**; needs 64 |
+| snemu support | assumed complete | **`fclass.s` was missing** |
+
+The instruction estimate was wrong by more than an order of magnitude, which is why
+the plan wrote it down to be checked. Three things came out of it:
+
+- **A `slow` scenario profile.** Both drivel scenarios are opt-in: excluded from an
+  unfiltered run, still runnable by name or `--tag kvetch`. A gate that takes minutes
+  is a gate people stop running. `itest-harness` grew `Scenario::opt_in`, and the
+  snemu audit path needed the same filter — it selects from `SCENARIOS` directly
+  rather than through `select_by_tags`.
+- **A `kvetch-drivel` kernel feature**, because the design decision below was not
+  enough on its own. A separate *binary* still lands in the same *image*:
+  `itest-workloads` embeds every program, so 4.5 MB of weights rode into all 130
+  other scenarios' kernels and pushed the 16 MiB machine out of frames at userspace
+  load — half the userspace suite began failing `OutOfFrames`, and each failure then
+  burned its full step budget, turning a 7-second gate into fifteen minutes. The
+  weights are now embedded only when the feature is on, and the itest builds with it
+  only when a selected scenario needs it (so it selects *before* it builds). The
+  workload registry stays additive: without the feature the workload still exists and
+  fails honestly at ELF load.
+- **The KV cache landed early** (step 7 work, pulled forward because the numbers
+  demanded it): 46.5s → **11.8s** for the six-token REPL completion, ~10× on the
+  marginal per-token cost once the fixed ~8s boot is discounted. It is bit-identical
+  to re-running the prefix, which is asserted rather than hoped.
+- **A `fclass.s` gap in snemu**, found because the guest halted on it. See below.
+
+### Two diagnostic holes, both worth more than the feature
+
+**The itest harness discarded snemu's halt reason.** `if self.machine.step().is_err()`
+threw away *what* went wrong, so an emulator that stopped dead on an unmodelled
+instruction — the one thing snemu is designed to shout about — reported as "no frame
+arrived", and the scenario blamed whatever it was waiting for. It now carries the
+reason, and the first run after the fix printed
+`Unimplemented { pc: 0x1000409a, instr: 0xe00516d3 }`, which decodes to `fclass.s`.
+Minutes of guessing became one run.
+
+**A mispaired server answers rather than dies.** `serve_model` refuses to serve on a
+checkpoint/vocab mismatch, but keeps answering `Malformed` forever instead of exiting
+— because a client blocked in `call` on a dead endpoint has no refusal and no
+timeout, and the symptom surfaces two processes away. Same lesson as
+`plans/legacy/fp-context-switching.md`.
 
 ## Goal
 
@@ -240,6 +296,18 @@ fail).
 **GREEN**: `xtask-itest` links `kvetch-serve` and reads the committed checkpoint.
 **Done when**: criteria met.
 
+### Step 5b: Housekeeping the gate needed (done)
+
+Getting `cargo xtask test` green surfaced three pre-existing reds that a fail-fast
+run had been hiding behind each other, none of them from this work:
+
+- `mutant_plan_tests::the_derived_plan_matches_the_previously_hardcoded_set` had been
+  stale by seven crates (the whole model ladder). Re-armed, plus `kvetch-serve`. A
+  tripwire nobody re-arms stops meaning "something changed".
+- Three broken rustdoc intra-doc links (`illegal.rs`, `glitch/src/lib.rs`,
+  `abi/src/lib.rs` — the last wanting `Self::AudioWrite` for an enum variant).
+- Generated-diagram drift, from the new crate and scenarios.
+
 ### Step 6: Measure it
 
 **Acceptance criteria**: guest instructions per completion, tokens/sec, and peak heap,
@@ -256,11 +324,37 @@ feature and snemu's role is correctness, not interaction.
 
 ### Step 7: Make it fast enough for the machine it runs on
 
-**Acceptance criteria**: driven entirely by step 6. In likely order of payoff:
-inference-only forward (last-position logits, no `Trace`), then a KV cache (turns
-per-token cost from O(prefix) into O(1)), then borrowed weights if heap says so. Each
-is its own increment with its own gate; none is worth doing before the profile says
-which.
+**Done: the KV cache + inference-only forward** (`kvetch_model::Session`). Pulled
+ahead of the profile because the token-count measurement was unambiguous on its own —
+8 tokens cost 90s where 1 cost 7.9s, so per-token cost was superlinear and the cause
+was structural, not a mystery worth profiling first.
+
+`Session` keeps each layer's keys and values and runs one position per token, against
+`Model::forward`'s every-position-plus-every-training-intermediate. It reconciles the
+token run itself (extend on a match, rebuild on divergence), so the sampler's
+backtracking cannot read a stale answer and the cache stays an optimisation rather
+than a protocol. Bit-identical to re-running the prefix, asserted at every length —
+which it can be, because `NaiveGemm` sums in order and the terms the batch path has
+that the cached one lacks are the masked ones, whose probability is exactly zero.
+
+Six-token REPL completion: **46.5s → 11.8s**. About 8s of that is fixed boot, so the
+marginal per-token cost fell roughly 10×.
+
+**Still open**, in the order the profile now argues for:
+
+- **The kernel dominates a short completion.** At one token the split is 19.7%
+  userspace against ~22% telemetry serialization (postcard + `wire_encode` +
+  `KernelSink::emit`), 14% `prepare_switch`, 13% `memset`. Optimising the model
+  further will not move a one-token gate; it moves the six-token REPL and the board.
+- **Borrowed weights.** `Model::decode` copies into an owned `Vec<f32>`, so the
+  process holds ~4.2 MB of rodata *plus* ~4.2 MB of heap. Borrowing from the mapped
+  image would halve resident memory and is what would let the 64 MiB machine come
+  back down.
+- **snemu's JIT ends a block at every FP op.** `block.rs::compile_op` lowers no FP
+  family (and no `MULDIV`), so a matmul inner loop compiles to two-instruction blocks
+  and the block machinery is pure overhead. This is emulator wall-clock only — it does
+  nothing for the VF2 — but it would pay for every float-heavy guest: the audio path
+  and on-target Stitch floats as well as drivel.
 **Done when**: a Tab under snemu is bearable, or we have decided in writing that it
 is a board-only feature and the snemu scenario exists for correctness alone.
 

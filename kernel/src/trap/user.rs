@@ -209,11 +209,24 @@ pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE
 pub static KVETCH_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KVETCH_SERVER_ELF"));
 
 /// The `workload=kvetch-drivel` / `stitch-drivel` server: the same endpoint answered
-/// from a trained checkpoint. ~4.4 MB, most of it weights — by a wide margin the
-/// largest program the kernel embeds, and the reason it is a *separate* binary from
-/// the babble server rather than a flag on it.
+/// from a trained checkpoint. ~4.5 MB, nearly all of it weights.
+///
+/// **Behind a feature, and it has to be.** `itest-workloads` embeds every program, so
+/// without this gate a checkpoint the other 130 scenarios never load would sit in
+/// *their* kernel image too — which is not merely wasteful: it pushed the default
+/// 16 MiB itest machine past its frame budget and half the userspace scenarios began
+/// failing `OutOfFrames` at load. The separate binary was supposed to prevent exactly
+/// that (see `plans/kvetch-drivel-on-target.md`); a separate binary in the same image
+/// is not separate enough.
+#[cfg(feature = "kvetch-drivel")]
 pub static KVETCH_DRIVEL_SERVER_ELF: &[u8] =
     include_bytes!(env!("SNITCHOS_KVETCH_DRIVEL_SERVER_ELF"));
+
+/// Without the feature the workload still *exists* — it is a runtime selection, and
+/// the registry stays additive — but there is nothing to run, so launching it fails
+/// at ELF load rather than silently booting something else.
+#[cfg(not(feature = "kvetch-drivel"))]
+pub static KVETCH_DRIVEL_SERVER_ELF: &[u8] = &[];
 
 /// The `kvetch-babble` client: one fixed completion request, answer on the wire.
 pub static KVETCH_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KVETCH_CLIENT_ELF"));

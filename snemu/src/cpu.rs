@@ -1730,6 +1730,7 @@ impl Hart {
             // can't just hand the register over.
             funct5_fp::CLASS_MV => match (instr.funct3(), fmt) {
                 (1, fp_fmt::D) => Ok(Some(fp::classify_d(self.freg(instr.rs1())))),
+                (1, fp_fmt::S) => Ok(Some(fp::classify_s(self.freg(instr.rs1())))),
                 (0, fp_fmt::D) => Ok(Some(self.freg(instr.rs1()))),
                 (0, fp_fmt::S) => {
                     let low = self.freg(instr.rs1()) as u32;

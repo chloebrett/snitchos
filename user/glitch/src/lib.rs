@@ -1,5 +1,5 @@
 //! The userspace `glitch` audio server's receive loop, factored out of the binary
-//! (`bin/beep.rs` supplies no policy — it's a client). Mirrors [`fs::serve`].
+//! (`bin/beep.rs` supplies no policy — it's a client). Mirrors `fs::serve`.
 //!
 //! Holds an `AudioSink` cap and `RECV` on the shared endpoint. One kind of caller
 //! in v1: a client `call`s a [`Play`] request; glitch synthesizes it (the pure

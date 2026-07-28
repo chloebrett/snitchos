@@ -240,6 +240,86 @@ impl Gemm for NaiveGemm {
     }
 }
 
+/// Incremental generation: the keys and values of everything already seen.
+///
+/// **Why this exists.** [`Model::forward`] computes logits for *every* position and
+/// keeps every intermediate, because that is what training needs. Generating token
+/// *n* that way re-runs the whole prefix, so a completion costs `O(N·T·params)` — for
+/// an eight-token completion off a seven-token prompt, eighty-four position-forwards
+/// where eight would do. Measured on target before this existed: 4–8 **billion**
+/// guest instructions for one completion.
+///
+/// A session keeps each layer's keys and values, so a new token is one position of
+/// work: `O(params)` per token, plus an attention pass linear in the prefix.
+///
+/// It also holds no `Trace`. Serving allocated every training intermediate and threw
+/// them away, on a `talc` heap inside a 16 MiB process.
+///
+/// **The cache is invisible.** [`logits_for`](Session::logits_for) takes the whole
+/// token run and reconciles it against what is cached — extending on a match,
+/// rebuilding what diverges. So it is an optimisation, never a protocol: a caller
+/// that backtracks (the sampler strikes a refused token and redraws) cannot get a
+/// stale answer by forgetting to reset anything.
+#[derive(Default)]
+pub struct Session {
+    /// Per layer, the rotated keys for each cached position, `positions × d_model`.
+    keys: Vec<Vec<f32>>,
+    /// Per layer, the values for each cached position, `positions × d_model`.
+    values: Vec<Vec<f32>>,
+    /// The token run these caches were built from.
+    tokens: Vec<u16>,
+}
+
+impl Session {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many positions are currently cached — the work a further token avoids.
+    #[must_use]
+    pub fn cached_positions(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Logits for the position *after* `tokens`, reusing whatever of `tokens` is
+    /// already cached.
+    ///
+    /// Returns `vocab` values — the last row of what [`Model::forward`] would return
+    /// for the same run, bit for bit.
+    pub fn logits_for<G: Gemm>(&mut self, model: &Model, tokens: &[u16], gemm: &G) -> Vec<f32> {
+        let d_model = model.config.d_model;
+        let shared = self
+            .tokens
+            .iter()
+            .zip(tokens)
+            .take_while(|(cached, wanted)| cached == wanted)
+            .count();
+
+        // Asked for exactly what is cached, the last position must still be *run* to
+        // produce logits — the cache holds keys and values, not answers. Rewinding
+        // one position and redoing it is the whole cost, and it keeps the common
+        // case (extending by a token) free of a special case.
+        let replay_from = shared.min(tokens.len().saturating_sub(1));
+        self.truncate(replay_from, d_model);
+
+        let mut logits = Vec::new();
+        for (position, &token) in tokens.iter().enumerate().skip(replay_from) {
+            logits = model.step(self, token, position, gemm);
+            self.tokens.push(token);
+        }
+        logits
+    }
+
+    /// Drop everything cached beyond `positions`.
+    fn truncate(&mut self, positions: usize, d_model: usize) {
+        self.tokens.truncate(positions);
+        for layer in self.keys.iter_mut().chain(self.values.iter_mut()) {
+            layer.truncate(positions * d_model);
+        }
+    }
+}
+
 /// Everything one layer computed on the way forward that its gradient needs.
 pub struct LayerTrace {
     /// The residual stream entering the layer.
@@ -296,7 +376,7 @@ const CHECKPOINT_HEADER_V2: usize = CHECKPOINT_HEADER + 2 * 4;
 
 /// A checkpoint that predates the vocab fingerprint reads back as this.
 ///
-/// Distinguishable from every real fingerprint because [`Vocab::fingerprint`] is
+/// Distinguishable from every real fingerprint because `Vocab::fingerprint` is
 /// FNV-1a over a non-empty serialization, which cannot produce zero for any vocab —
 /// so "unstamped" is a state a caller can act on rather than a value it must guess at.
 pub const UNSTAMPED: u64 = 0;
@@ -463,6 +543,88 @@ impl Model {
         // `new` re-derives the expected count from the config, so a header
         // whose dimensions disagree with its own weight count is caught here.
         Self::new(config, vocab, weights).map(|model| model.stamped_with(vocab_fingerprint))
+    }
+
+    /// One position of the forward pass, against a session's cached keys and values.
+    ///
+    /// Deliberately built from the *same* pieces as [`trace_with`](Self::trace_with)
+    /// — `rms_norm`, `rope_angle`, `softmax_in_place`, `attention_scale`, and the
+    /// caller's `Gemm` — rather than a second implementation of the architecture.
+    /// Two implementations of a transformer that must agree bit-for-bit is a bug
+    /// waiting for a long prefix, and gradient checking could not catch it: it
+    /// validates the backward pass against whichever forward it is handed.
+    ///
+    /// `position` is where this token sits in the run, which is what the rotation
+    /// and the causal mask are made of. It is *not* `session.tokens.len()` read
+    /// inside, because the caller replays a position when it rewinds.
+    fn step<G: Gemm>(&self, session: &mut Session, token: u16, position: usize, gemm: &G) -> Vec<f32> {
+        let ModelConfig { d_model, layers, heads, ffn } = self.config;
+        let head_dim = self.config.head_dim();
+        let embedding = &self.weights[..self.vocab * d_model];
+
+        if session.keys.len() != layers {
+            session.keys = vec![Vec::new(); layers];
+            session.values = vec![Vec::new(); layers];
+        }
+
+        let row = token as usize * d_model;
+        let mut stream: Vec<f32> = embedding[row..row + d_model].to_vec();
+
+        for layer in 0..layers {
+            let offsets = self.config.layer_offsets(self.vocab, layer);
+            let block = |start: usize, len: usize| &self.weights[start..start + len];
+            let square = d_model * d_model;
+
+            let project = |input: &[f32], weight: &[f32], in_dim: usize, out_dim: usize| {
+                let mut out = vec![0.0; out_dim];
+                gemm.sgemm(
+                    GemmSpec { m: 1, k: in_dim, n: out_dim, transpose_a: false, transpose_b: false },
+                    input,
+                    weight,
+                    &mut out,
+                );
+                out
+            };
+
+            let (normed, _) = rms_norm(&stream, block(offsets.attention_norm, d_model), d_model);
+            let mut queries = project(&normed, block(offsets.wq, square), d_model, d_model);
+            let mut keys = project(&normed, block(offsets.wk, square), d_model, d_model);
+            let values = project(&normed, block(offsets.wv, square), d_model, d_model);
+            rope_one(&mut queries, head_dim, position);
+            rope_one(&mut keys, head_dim, position);
+
+            session.keys[layer].extend_from_slice(&keys);
+            session.values[layer].extend_from_slice(&values);
+
+            let attended = attend_last(
+                gemm,
+                &queries,
+                &session.keys[layer],
+                &session.values[layer],
+                position + 1,
+                heads,
+                head_dim,
+            );
+            add_into(&mut stream, &project(&attended, block(offsets.wo, square), d_model, d_model));
+
+            let (ffn_normed, _) = rms_norm(&stream, block(offsets.ffn_norm, d_model), d_model);
+            let hidden = project(&ffn_normed, block(offsets.w1, d_model * ffn), d_model, ffn);
+            let activated: Vec<f32> = hidden.iter().copied().map(silu).collect();
+            add_into(&mut stream, &project(&activated, block(offsets.w2, ffn * d_model), ffn, d_model));
+        }
+
+        let final_offset = self.config.final_norm_offset(self.vocab);
+        let (final_normed, _) =
+            rms_norm(&stream, &self.weights[final_offset..final_offset + d_model], d_model);
+
+        let mut logits = vec![0.0; self.vocab];
+        gemm.sgemm(
+            GemmSpec { m: 1, k: d_model, n: self.vocab, transpose_a: false, transpose_b: true },
+            &final_normed,
+            embedding,
+            &mut logits,
+        );
+        logits
     }
 
     /// Logits for every position, using the reference multiply.
@@ -725,6 +887,79 @@ pub fn rope(rows: &[f32], head_dim: usize, d_model: usize, table: &RotationTable
     out
 }
 
+/// [`rope`] for a single row at a known position — the generating counterpart of
+/// the table-driven batch rotation.
+///
+/// No table: a table amortises `powf` across positions, and there is one position
+/// here. The angle is [`rope_angle`], which is the expression `RotationTable::new`
+/// evaluates, in the same order — so a generated token's rotation is bit-identical
+/// to the same token's rotation in a full forward pass, which is what lets the two
+/// paths agree exactly.
+fn rope_one(row: &mut [f32], head_dim: usize, position: usize) {
+    for head in row.chunks_mut(head_dim) {
+        for pair in 0..head_dim / 2 {
+            let angle = rope_angle(position, pair, head_dim);
+            let (sin, cos) = (libm::sinf(angle), libm::cosf(angle));
+            let (left, right) = (head[2 * pair], head[2 * pair + 1]);
+
+            head[2 * pair] = left * cos - right * sin;
+            head[2 * pair + 1] = left * sin + right * cos;
+        }
+    }
+}
+
+/// Attention for **one** query against `positions` cached keys and values.
+///
+/// The batch path computes the full `T × T` score matrix and masks the upper
+/// triangle to `-inf`; here the only query is the last position, so every cached key
+/// is legal and there is nothing to mask. That is not a shortcut around causality —
+/// it *is* causality, expressed as "the cache holds exactly the past".
+///
+/// The arithmetic matches the batch path term for term: the same `Gemm`, the same
+/// score scaling, the same `softmax_in_place`. The terms the batch path has and this
+/// does not are the masked ones, whose probability is exactly zero.
+fn attend_last<G: Gemm>(
+    gemm: &G,
+    query: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    positions: usize,
+    heads: usize,
+    head_dim: usize,
+) -> Vec<f32> {
+    let d_model = heads * head_dim;
+    let scale = attention_scale(head_dim);
+    let mut out = vec![0.0; d_model];
+
+    for head in 0..heads {
+        let key = gather_head(keys, head, positions, heads, head_dim);
+        let value = gather_head(values, head, positions, heads, head_dim);
+
+        let mut scores = vec![0.0; positions];
+        gemm.sgemm(
+            GemmSpec { m: 1, k: head_dim, n: positions, transpose_a: false, transpose_b: true },
+            &query[head * head_dim..][..head_dim],
+            &key,
+            &mut scores,
+        );
+        for score in &mut scores {
+            *score *= scale;
+        }
+        softmax_in_place(&mut scores);
+
+        let mut attended = vec![0.0; head_dim];
+        gemm.sgemm(
+            GemmSpec { m: 1, k: positions, n: head_dim, transpose_a: false, transpose_b: false },
+            &scores,
+            &value,
+            &mut attended,
+        );
+        out[head * head_dim..][..head_dim].copy_from_slice(&attended);
+    }
+
+    out
+}
+
 /// Causal multi-head attention. A position attends to itself and everything
 /// before it, never after — the property `logits_at_a_position_ignore_every_
 /// token_after_it` exists to hold.
@@ -955,6 +1190,63 @@ mod tests {
     fn tiny_model() -> Model {
         Model::new(TINY, TINY_VOCAB, pseudo_random_weights(TINY.param_count(TINY_VOCAB), 42))
             .expect("weight count matches the config by construction")
+    }
+
+    /// **The contract the cache lives or dies by.** Generating with a KV cache must
+    /// produce *exactly* what re-running the whole prefix produces — not "close",
+    /// exactly. Two reasons it has to be bit-equality and not a tolerance:
+    ///
+    /// - the completion a checkpoint serves is asserted byte-for-byte against a host
+    ///   recomputation, and a one-ULP difference in a logit can cross a sampling
+    ///   boundary and change a token;
+    /// - a tolerance would hide the exact bug this is most likely to have — an
+    ///   off-by-one in the causal mask or the rotation position, which perturbs
+    ///   results slightly and plausibly.
+    ///
+    /// It *can* be exact: `NaiveGemm` sums `0..k` in order from zero, and the terms
+    /// the batch path has that the cached one does not are the masked positions,
+    /// whose probability is exactly `0.0`.
+    #[test]
+    fn generating_with_a_cache_is_bit_identical_to_re_running_the_prefix() {
+        let model = tiny_model();
+        let tokens = [3u16, 1, 4, 1, 5, 9, 2, 6];
+
+        let mut session = Session::new();
+        for length in 1..=tokens.len() {
+            let cached = session.logits_for(&model, &tokens[..length], &NaiveGemm);
+
+            let full = model.forward(&tokens[..length]);
+            let last = &full[full.len() - model.vocab()..];
+            assert_eq!(cached.as_slice(), last, "diverged at length {length}");
+        }
+    }
+
+    /// A session that has cached one run and is asked about a *different* one must
+    /// rebuild rather than answer from stale keys. Sampling backtracks (a refused
+    /// token is struck and redrawn), so this is a live path, not a defensive one.
+    #[test]
+    fn a_session_reused_on_a_divergent_prefix_rebuilds_instead_of_lying() {
+        let model = tiny_model();
+        let mut session = Session::new();
+
+        session.logits_for(&model, &[3, 1, 4, 1], &NaiveGemm);
+        let after_divergence = session.logits_for(&model, &[3, 1, 5, 9], &NaiveGemm);
+
+        let fresh = Session::new().logits_for(&model, &[3, 1, 5, 9], &NaiveGemm);
+        assert_eq!(after_divergence, fresh);
+    }
+
+    /// Shrinking back to a prefix of what is cached is the common backtrack, and it
+    /// must not leave the extra positions attending from the cache.
+    #[test]
+    fn a_session_asked_for_a_shorter_prefix_forgets_the_tail() {
+        let model = tiny_model();
+        let mut session = Session::new();
+
+        session.logits_for(&model, &[3, 1, 4, 1, 5], &NaiveGemm);
+        let shortened = session.logits_for(&model, &[3, 1, 4], &NaiveGemm);
+
+        assert_eq!(shortened, Session::new().logits_for(&model, &[3, 1, 4], &NaiveGemm));
     }
 
     #[test]

@@ -216,7 +216,15 @@ fn build_and_embed_user(kernel_dir: &str) {
     // (`glitch-server`, `beep`) embed via USER_PROGRAMS, no fs-image dependency.
     build(&["glitch"]);
 
+    // The drivel server embeds ~4.5 MB of weights, so it is embedded only when its
+    // feature asks for it — `src/trap/user.rs` substitutes an empty ELF otherwise.
+    // Skipping the *embed* (rather than the build) keeps the dependency-graph walk
+    // below complete, so a stale binary is still impossible.
+    let drivel = std::env::var_os("CARGO_FEATURE_KVETCH_DRIVEL").is_some();
     for (bin, env_var) in USER_PROGRAMS {
+        if *bin == "kvetch-drivel-server" && !drivel {
+            continue;
+        }
         embed(&format!("{bin_dir}/{bin}"), env_var);
     }
 

@@ -97,6 +97,12 @@ fn weights_from_logits(logits: &[f32]) -> Vec<f32> {
 /// call and one that is exercised by nothing.
 fn weighted_pick(weights: &[f32], rng: &mut Lcg) -> Option<TokenId> {
     let total: f32 = weights.iter().sum();
+    // The negation is the point, so it stays despite `neg_cmp_op_on_partial_ord`:
+    // `total <= 0.0` is **false** for `NaN`, which would wave a poisoned distribution
+    // through and pick by comparing against a `NaN` point — drawing an arbitrary
+    // token from a model that has said nothing. `!(total > 0.0)` catches zero,
+    // negative and `NaN` alike, which is exactly the set with nothing to draw from.
+    #[allow(clippy::neg_cmp_op_on_partial_ord, reason = "NaN must take this branch")]
     if !(total > 0.0) {
         return None;
     }

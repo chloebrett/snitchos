@@ -26,6 +26,7 @@
 | task-stack-high-water | demo | wfi | sched |
 | endpoint-create-yields-owning-cap | endpoint-create | cpu | userspace |
 | revoke-reclaims-a-minted-cap | endpoint-create | cpu | userspace |
+| fp-survives-context-switch | fp-churn | cpu | fp, sched |
 | frame-allocator-oom | frame-oom | wfi | frame, oom |
 | fs-connect-mints-root | fs | wfi | userspace, ipc |
 | fs-create-stat | fs | wfi | userspace, ipc |
@@ -66,6 +67,7 @@
 | ipi-pong | ipi-pong | cpu | smp, ipi, stress |
 | kill-without-a-process-cap-is-refused | kill-no-cap | cpu | userspace |
 | kvetch-babble-serves | kvetch-babble | cpu | kvetch |
+| kvetch-drivel-serves | kvetch-drivel | cpu | kvetch |
 | sched-task-lookup-is-o1 | live-tasks | cpu | sched |
 | manifest-iface-served | manifest-iface | wfi | userspace, fs |
 | manifest-satisfy-attenuates | manifest-satisfy | wfi | userspace, fs |
@@ -93,6 +95,7 @@
 | spawn-storm | spawn-storm | cpu | smp, stress |
 | stack-guard-fault-detected | stack-guard | wfi | sched |
 | deep-overflow-reports-cleanly | stack-overflow-deep | wfi | sched |
+| stitch-drivel-completes | stitch-drivel | cpu | kvetch, stitch |
 | stim-edits-a-file-and-saves | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-cross-pipe-runs-a-stage | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-fs-loads-and-runs | stitch-fs | wfi | userspace, stitch, fs |
@@ -100,6 +103,7 @@
 | stitch-grant-revoke-capevents | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-hold-shows-endpoint-name | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-view-reads-a-file | stitch-fs | wfi | userspace, stitch, fs |
+| stitch-kvetch-completes | stitch-kvetch | cpu | kvetch, stitch |
 | stitch-float-evaluates-on-target | stitch-repl | wfi | userspace, stitch, fp |
 | stitch-hold-lists-caps | stitch-repl | wfi | userspace, stitch |
 | stitch-print-writes-to-console | stitch-repl | wfi | userspace, stitch |

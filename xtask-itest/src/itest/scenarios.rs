@@ -1241,7 +1241,7 @@ pub fn stitch_drivel_completes(h: &mut View) -> Result<(), String> {
 /// Changing either side without the other is what the scenario exists to catch.
 const KVETCH_PREFIX: &str = "greet(name) {";
 const KVETCH_CAP: usize = 256;
-const KVETCH_MAX_TOKENS: u32 = 8;
+const KVETCH_MAX_TOKENS: u32 = 1;
 /// The server's per-boot entropy root while the `seed=` bootarg is unwired.
 const KVETCH_BOOT_SEED: u64 = 0;
 

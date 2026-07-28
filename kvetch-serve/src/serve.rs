@@ -20,7 +20,7 @@ use crate::sample::draw;
 /// a forward pass to assert something about *truncation*.
 pub trait Logits {
     /// Logits for the position *after* `tokens`, one per vocabulary entry.
-    fn next(&self, tokens: &[TokenId]) -> Vec<f32>;
+    fn next(&mut self, tokens: &[TokenId]) -> Vec<f32>;
 }
 
 /// A model paired with the vocab it was trained against.
@@ -52,7 +52,7 @@ impl<L: Logits> Server<L> {
     /// behind one endpoint.
     #[must_use]
     pub fn handle_request(
-        &self,
+        &mut self,
         buf: &mut [u8],
         prefix_len: usize,
         max_tokens: u32,
@@ -160,7 +160,7 @@ mod tests {
     }
 
     impl Logits for Fixed {
-        fn next(&self, _tokens: &[TokenId]) -> Vec<f32> {
+        fn next(&mut self, _tokens: &[TokenId]) -> Vec<f32> {
             let mut logits = vec![0.0f32; 256];
             if let Some(byte) = self.favourite {
                 logits[byte as usize] = 12.0;
@@ -175,7 +175,7 @@ mod tests {
         Server::new(Fixed { favourite }, vocab, fingerprint).expect("matching pair")
     }
 
-    fn serve(server: &Server<Fixed>, prefix: &str, cap: usize, max_tokens: u32, seed: u64) -> (Status, alloc::string::String) {
+    fn serve(server: &mut Server<Fixed>, prefix: &str, cap: usize, max_tokens: u32, seed: u64) -> (Status, alloc::string::String) {
         let mut buf = vec![0u8; cap];
         buf[..prefix.len()].copy_from_slice(prefix.as_bytes());
         let reply = server.handle_request(&mut buf, prefix.len(), max_tokens, seed);
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_completion_extends_the_prefix_and_leaves_it_viable() {
-        let (status, text) = serve(&server(None), "greet(name) {", 4096, 6, 7);
+        let (status, text) = serve(&mut server(None), "greet(name) {", 4096, 6, 7);
         assert_eq!(status, Status::Ok);
         assert!(text.starts_with("greet(name) {"));
         assert!(text.len() > "greet(name) {".len(), "nothing was added: {text:?}");
@@ -197,7 +197,7 @@ mod tests {
     /// not be appended — the mask, not the model, decides what is legal.
     #[test]
     fn a_byte_the_grammar_rejects_is_never_appended_however_much_the_model_wants_it() {
-        let (status, text) = serve(&server(Some(b';')), "let x = 1", 4096, 8, 3);
+        let (status, text) = serve(&mut server(Some(b';')), "let x = 1", 4096, 8, 3);
         assert_eq!(status, Status::Ok);
         assert!(!text.contains(';'), "an illegal byte reached the buffer: {text:?}");
         assert!(viable(&text));
@@ -205,18 +205,18 @@ mod tests {
 
     #[test]
     fn the_same_seed_serves_the_same_bytes() {
-        let server = server(None);
-        assert_eq!(serve(&server, "let x =", 4096, 8, 42), serve(&server, "let x =", 4096, 8, 42));
+        let mut server = server(None);
+        assert_eq!(serve(&mut server, "let x =", 4096, 8, 42), serve(&mut server, "let x =", 4096, 8, 42));
     }
 
     #[test]
     fn a_completion_never_overflows_its_buffer() {
         // Every cap from "no room at all" upwards: the served text must fit, stay
         // viable, and never be cut mid-token.
-        let server = server(None);
+        let mut server = server(None);
         let prefix = "greet(name) {";
         for extra in 0..24 {
-            let (status, text) = serve(&server, prefix, prefix.len() + extra, 12, 11);
+            let (status, text) = serve(&mut server, prefix, prefix.len() + extra, 12, 11);
             assert_eq!(status, Status::Ok);
             assert!(text.len() <= prefix.len() + extra, "overflowed at cap +{extra}");
             assert!(viable(&text), "cap +{extra} left the buffer dead: {text:?}");
@@ -225,9 +225,9 @@ mod tests {
 
     #[test]
     fn different_seeds_serve_different_completions() {
-        let server = server(None);
+        let mut server = server(None);
         let mut served: Vec<alloc::string::String> =
-            (0..16).map(|seed| serve(&server, "let x =", 4096, 6, seed).1).collect();
+            (0..16).map(|seed| serve(&mut server, "let x =", 4096, 6, seed).1).collect();
         served.sort();
         served.dedup();
         assert!(served.len() > 1, "every seed served the same completion");
@@ -240,9 +240,9 @@ mod tests {
     /// Whole-completion comparison cannot see that; asking for exactly one token can.
     #[test]
     fn the_seed_reaches_the_very_first_token() {
-        let server = server(None);
+        let mut server = server(None);
         let mut first: Vec<alloc::string::String> =
-            (0..16).map(|seed| serve(&server, "let x =", 4096, 1, seed).1).collect();
+            (0..16).map(|seed| serve(&mut server, "let x =", 4096, 1, seed).1).collect();
         first.sort();
         first.dedup();
         assert!(first.len() > 1, "every seed opened with the same token");
@@ -257,7 +257,7 @@ mod tests {
         // A space is legal after `let x = 1` and the model is made to adore one, so
         // three tokens are three bytes and the arithmetic is exact.
         let prefix = "let x = 1";
-        let (status, text) = serve(&server(Some(b' ')), prefix, prefix.len() + 3, 3, 5);
+        let (status, text) = serve(&mut server(Some(b' ')), prefix, prefix.len() + 3, 3, 5);
         assert_eq!(status, Status::Ok);
         assert_eq!(text.len(), prefix.len() + 3, "served {text:?}, one token short of the room given");
     }
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn a_buffer_with_no_room_serves_nothing_rather_than_overflowing() {
         let prefix = "greet(name) {";
-        let (status, text) = serve(&server(None), prefix, prefix.len(), 20, 3);
+        let (status, text) = serve(&mut server(None), prefix, prefix.len(), 20, 3);
         assert_eq!(status, Status::Ok);
         assert_eq!(text, prefix, "nothing should have been appended");
     }

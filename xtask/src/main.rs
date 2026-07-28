@@ -426,6 +426,15 @@ mod mutant_plan_tests {
         assert_eq!(got, vec![
             "babble",
             "collector",
+            // The model ladder, enrolled 2026-07-28. Seven of these had been host-
+            // tested for a while and were never added here, so this assertion sat
+            // red on a clean tree — which is the failure mode a tripwire has when
+            // nobody re-arms it: it stops meaning "something changed" and starts
+            // meaning "ignore me". Re-armed against today's reality.
+            "cram",
+            "cram-corpus",
+            "cram-eval",
+            "cram-gen",
             "glitch-core",
             "glitch-proto",
             "hitch",
@@ -436,10 +445,15 @@ mod mutant_plan_tests {
             "kernel-net",
             "kernel-obs",
             "kernel-proc",
+            "kvetch-model",
             "kvetch-proto",
+            // New here: the grammar-masked sampler and completion loop.
+            "kvetch-serve",
+            "kvetch-vocab",
             "protocol",
             "stitch",
             "synth",
+            "xtask-cram",
         ]);
     }
 }

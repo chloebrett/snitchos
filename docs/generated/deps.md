@@ -56,6 +56,7 @@ graph LR
     kvetch["kvetch"]
     kvetch_model["kvetch-model"]
     kvetch_proto["kvetch-proto"]
+    kvetch_serve["kvetch-serve"]
     kvetch_vocab["kvetch-vocab"]
     synth["synth"]
     xtask_cmds["xtask-cmds"]
@@ -118,10 +119,17 @@ graph LR
     kernel_proc --> protocol
     kernel_proc --> snitchos_abi
     kvetch --> babble
+    kvetch --> kvetch_model
     kvetch --> kvetch_proto
+    kvetch --> kvetch_serve
+    kvetch --> kvetch_vocab
     kvetch --> snitchos_std
     kvetch --> snitchos_user
     kvetch_proto --> snitchos_abi
+    kvetch_serve --> kvetch_model
+    kvetch_serve --> kvetch_proto
+    kvetch_serve --> kvetch_vocab
+    kvetch_serve --> stitch
     protocol --> snitchos_abi
     ramfs --> fs_core
     snemu --> protocol
