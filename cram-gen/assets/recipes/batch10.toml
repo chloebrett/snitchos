@@ -71,7 +71,7 @@ crossings = [
 
 [[recipe]]
 domain    = "spare-parts bin"
-clause    = "reorder points triggered by consumption rate"
+clause    = "each part reorders when stock falls to a threshold set by its usage rate"
 crossings = [
   { constructs = "prod, |>", size = "small", shape = "module" },
   { constructs = "prod, Maybe, Result+?", size = "medium", shape = "script" },

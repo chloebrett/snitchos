@@ -19,7 +19,7 @@ use std::time::Instant;
 use cram::AccelerateGemm;
 use cram::run::{Progress, TrainingConfig, train};
 use cram_corpus::{Layout, Manifest, parse_corpus, render_corpus, tokenize, training_text};
-use kvetch_model::Rung;
+use kvetch_model::{Model, Rung};
 use kvetch_vocab::Vocab;
 
 const CORPUS_DIR: &str = "corpora";
@@ -86,6 +86,14 @@ struct Options {
     /// reason `--eval` is: it shares the rung/corpus vocabulary, and a separate
     /// binary is how `parse-rate` drifted out of sight.
     generate: Option<generate::GenOptions>,
+    /// Stamp an already-trained checkpoint with its vocab's fingerprint, in place.
+    ///
+    /// A migration, not a workflow: checkpoints trained before the fingerprint
+    /// existed load as `UNSTAMPED`, and a server refuses to serve those. Retraining
+    /// to recover a field would also discard the measured numbers that made the
+    /// checkpoint worth keeping. Takes the stem (`drivel-all-30k`) and stamps
+    /// `checkpoints/<stem>.kvetch` from `checkpoints/<stem>.vocab`.
+    stamp: Option<String>,
 }
 
 fn main() -> std::io::Result<()> {
@@ -97,6 +105,9 @@ fn main() -> std::io::Result<()> {
         }
     };
 
+    if let Some(stem) = &options.stamp {
+        return stamp(stem);
+    }
     if let Some(eval) = &options.eval {
         return eval::run(eval);
     }
@@ -161,7 +172,11 @@ fn main() -> std::io::Result<()> {
         },
     );
 
-    std::fs::write(&checkpoint_path, model.encode())?;
+    // Stamp the vocab's identity into the checkpoint. Writing the vocab beside the
+    // weights (below) says which file to use; the fingerprint says which file is
+    // *correct*, and only the second survives the two being separated — copied,
+    // renamed, or embedded in a program months later.
+    std::fs::write(&checkpoint_path, model.stamped_with(vocab.fingerprint()).encode())?;
     // Beside the weights, always: they index this token table, and loading them
     // against a different one produces a model that runs and is nonsense.
     let vocab_path = checkpoint_dir.join(format!("{stem}.vocab"));
@@ -173,6 +188,52 @@ fn main() -> std::io::Result<()> {
         checkpoint_path.display(),
         vocab_path.display(),
         curve_path.display()
+    );
+    Ok(())
+}
+
+/// May `computed` be written over `existing`?
+///
+/// Pure so the refusal is testable without a filesystem. The rule: stamping is a
+/// *migration*, so it may fill in an absent fingerprint or confirm a matching one,
+/// but never overwrite a disagreement. A disagreement is not a checkpoint awaiting
+/// migration, it is the mispairing the field exists to catch, and re-stamping it
+/// would launder exactly the evidence that caught it.
+fn may_stamp(existing: u64, computed: u64) -> bool {
+    existing == kvetch_model::UNSTAMPED || existing == computed
+}
+
+/// Write `checkpoints/<stem>.vocab`'s fingerprint into `checkpoints/<stem>.kvetch`.
+fn stamp(stem: &str) -> std::io::Result<()> {
+    let dir = std::path::Path::new("checkpoints");
+    let checkpoint_path = dir.join(format!("{stem}.kvetch"));
+    let vocab_path = dir.join(format!("{stem}.vocab"));
+
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+
+    let vocab = Vocab::decode_vocab(&std::fs::read(&vocab_path)?)
+        .ok_or_else(|| invalid(format!("{} is not a readable vocab", vocab_path.display())))?;
+    let model = Model::decode(&std::fs::read(&checkpoint_path)?).ok_or_else(|| {
+        invalid(format!("{} is not a readable checkpoint", checkpoint_path.display()))
+    })?;
+
+    let fingerprint = vocab.fingerprint();
+    let existing = model.vocab_fingerprint();
+    if !may_stamp(existing, fingerprint) {
+        return Err(invalid(format!(
+            "{} is stamped {existing:#018x} but {} fingerprints {fingerprint:#018x} — \
+             this pair was never trained together; find the right vocab rather than \
+             overwriting the stamp",
+            checkpoint_path.display(),
+            vocab_path.display(),
+        )));
+    }
+
+    std::fs::write(&checkpoint_path, model.stamped_with(fingerprint).encode())?;
+    println!(
+        "stamped {} with {} ({fingerprint:#018x})",
+        checkpoint_path.display(),
+        vocab_path.display(),
     );
     Ok(())
 }
@@ -218,6 +279,12 @@ evaluation (replaces the old `parse-rate` bin):
   --checkpoint <p>    a trained rung to include in the report
   --eval-vocab <p>    the vocab that checkpoint was trained against
 
+migration:
+
+  --stamp <stem>      write checkpoints/<stem>.vocab's fingerprint into
+                      checkpoints/<stem>.kvetch, for checkpoints trained before
+                      the field existed. Refuses a pair that disagrees.
+
 corpus generation (talks to a local OpenAI-compatible server, e.g. LM Studio):
 
   --gen               generate candidates instead of training
@@ -232,7 +299,13 @@ corpus generation (talks to a local OpenAI-compatible server, e.g. LM Studio):
   --endpoint <url>    server base URL              (default http://localhost:1234/v1)
   --correct <n>       rewinds per candidate: when the continuation oracle
                       says no token can rescue the program, go back to just
-                      before the fatal text and resume        (default 0, off)";
+                      before the fatal text and resume        (default 0, off)
+  --max-bytes <n>     stop a candidate whose program passes <n> bytes; it is
+                      recorded as `long`, not as a parse death. Only the
+                      correction path can run away — without rewinds
+                      --max-tokens already bounds it.       (default 12000,
+                      0 = off. In batch9, 25% of files passed 12000 bytes and
+                      80% of those died at parse anyway)";
 
 fn parse(args: &[String]) -> Result<Options, String> {
     // `Printed` by default: it re-prints each program from its AST, so the
@@ -258,6 +331,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         name: None,
         eval: None,
         generate: None,
+        stamp: None,
     };
     let mut generating = false;
     let mut gen_options = generate::GenOptions {
@@ -267,6 +341,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         out: None,
         endpoint: None,
         corrections: 0,
+        max_bytes: 12_000,
         sampling: cram_gen::Sampling::default(),
     };
     let mut evaluating = false;
@@ -318,6 +393,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--vocab-file" => options.vocab_file = Some(PathBuf::from(value()?)),
             "--save-vocab" => options.save_vocab = Some(PathBuf::from(value()?)),
             "--name" => options.name = Some(value()?),
+            "--stamp" => options.stamp = Some(value()?),
             "--seed" => options.config.seed = number(&value()?)? as u64,
             "--lr" => {
                 let text = value()?;
@@ -332,6 +408,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--out" => gen_options.out = Some(PathBuf::from(value()?)),
             "--endpoint" => gen_options.endpoint = Some(value()?),
             "--correct" => gen_options.corrections = number(&value()?)?,
+            "--max-bytes" => gen_options.max_bytes = number(&value()?)?,
             "--max-tokens" => gen_options.sampling.max_tokens = number(&value()?)? as u32,
             "--temp" | "--top-p" => {
                 let text = value()?;
@@ -410,6 +487,35 @@ fn layout_named(name: &str) -> Result<Layout, String> {
         "flat" => Ok(Layout::Flat),
         "printed" => Ok(Layout::Printed),
         other => Err(format!("unknown layout {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::may_stamp;
+
+    /// The migration case: a checkpoint trained before the field existed.
+    #[test]
+    fn an_unstamped_checkpoint_may_be_stamped() {
+        assert!(may_stamp(kvetch_model::UNSTAMPED, 0xa0f0_df88_0466_dc06));
+    }
+
+    /// Idempotent: re-running the migration over an already-correct pair is a no-op
+    /// rather than an error, so a sweep can be repeated without bookkeeping.
+    #[test]
+    fn restamping_with_the_same_fingerprint_is_allowed() {
+        assert!(may_stamp(0xa0f0_df88_0466_dc06, 0xa0f0_df88_0466_dc06));
+    }
+
+    /// **The one that matters.** A checkpoint stamped with one vocab and handed
+    /// another must not be quietly re-stamped: that erases the only evidence the two
+    /// were never trained together, and hands the server a pair it will serve as
+    /// fluent nonsense. (The two constants are the real fingerprints of
+    /// `drivel-all-30k` and `drivel-1` — a mispairing that could actually happen
+    /// here, not a fabricated one.)
+    #[test]
+    fn a_checkpoint_stamped_with_a_different_vocab_is_refused() {
+        assert!(!may_stamp(0x19c6_8449_e71c_368e, 0xa0f0_df88_0466_dc06));
     }
 }
 

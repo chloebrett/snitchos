@@ -174,6 +174,12 @@ pub struct Run {
     /// up, not that generation was cut short. [`run_once_guarded`] does cut it
     /// short, and sets this too.
     pub abandoned: bool,
+    /// Generation was stopped because the program outgrew its byte cap. Distinct
+    /// from `abandoned`: that one means correction gave up and the program still
+    /// finished, this one means it never did. The gate will usually call such a
+    /// program a parse death, and it is not one — it is a program that was cut
+    /// off, which is a fact about the harness rather than about Stitch.
+    pub overlong: bool,
     /// Every rewind, in order.
     pub corrections: Vec<Correction>,
     pub outcome: Outcome,
@@ -342,6 +348,34 @@ pub fn run_once_corrected<M: Model + ?Sized>(
     on_chunk: &mut dyn FnMut(&str),
     on_rewind: &mut dyn FnMut(&str),
 ) -> Result<Run, String> {
+    run_once_capped(model, task, budget, 0, on_chunk, on_rewind)
+}
+
+/// [`run_once_corrected`] with a ceiling on the **accumulated** program.
+///
+/// Nothing else bounds it. `max_tokens` bounds a single completion, and the
+/// correction loop issues many, so a candidate that keeps being rewound grows
+/// until the server or the operator gives up — batch9's worst saved file is
+/// 197 KB, and 199 of its 973 candidates hit the per-completion cap.
+///
+/// Length is the yield. In batch9, 25% of files passed 12 KB and **80% of those
+/// died at parse** against a 45% base rate; the same cut costs 48 candidates
+/// that would have survived (5% of the corpus) and reclaims about 14% of the
+/// wall clock. That trade is worth taking only because generation throughput,
+/// not the trainer, is what caps the ladder.
+///
+/// `max_bytes == 0` disables the cap.
+///
+/// # Errors
+/// Only if a model call fails.
+pub fn run_once_capped<M: Model + ?Sized>(
+    model: &M,
+    task: &str,
+    budget: usize,
+    max_bytes: usize,
+    on_chunk: &mut dyn FnMut(&str),
+    on_rewind: &mut dyn FnMut(&str),
+) -> Result<Run, String> {
     let (system, user) = (prompt::system(), prompt::user(task));
     // Kept as chunks, not one string, so a rewind can be measured in tokens.
     let mut kept: Vec<String> = Vec::new();
@@ -367,6 +401,7 @@ pub fn run_once_corrected<M: Model + ?Sized>(
         let prefix: String = kept.concat();
         let mut round: Vec<String> = Vec::new();
         let mut doomed = false;
+        let mut overlong = false;
         model.complete(&system, &user, &prefix, &mut |chunk| {
             tokens += 1;
             on_chunk(chunk);
@@ -388,11 +423,22 @@ pub fn run_once_corrected<M: Model + ?Sized>(
                 });
             }
             round.push(kept_chunk);
-            doomed = is_doomed(
-                extract(&format!("{prefix}{}", round.concat())).program.trim_end(),
-            );
-            !doomed
+            let program = extract(&format!("{prefix}{}", round.concat())).program;
+            // Checked before dooming, and it ends the candidate rather than
+            // rewinding it: a program this long is not one bad token away from
+            // being fine, and another rewind would spend more of the budget
+            // that the cap exists to protect.
+            overlong = max_bytes > 0 && program.len() > max_bytes;
+            doomed = !overlong && is_doomed(program.trim_end());
+            !doomed && !overlong
         })?;
+
+        if overlong {
+            let mut run = assemble(format!("{prefix}{}", round.concat()), tokens, false);
+            run.overlong = true;
+            run.corrections = corrections;
+            return Ok(run);
+        }
 
         if !doomed {
             // From the chunks, not from what the model returned: the repaired
@@ -501,7 +547,17 @@ fn assemble(raw: String, tokens: usize, abandoned: bool) -> Run {
     let Extracted { program, extra_blocks } = extract(&raw);
     let reasoned = raw.contains("<think>");
     let outcome = gate::run(&program);
-    Run { raw, program, extra_blocks, reasoned, tokens, abandoned, corrections: Vec::new(), outcome }
+    Run {
+        raw,
+        program,
+        extra_blocks,
+        reasoned,
+        tokens,
+        abandoned,
+        overlong: false,
+        corrections: Vec::new(),
+        outcome,
+    }
 }
 
 /// Per-stage counts for a batch.
@@ -517,6 +573,10 @@ pub struct Tally {
     /// block that ran into the token cap. A prompt/config problem, not a Stitch
     /// one, so it is counted before the gate rather than as a parse death.
     pub empty: usize,
+    /// Stopped by the byte cap. Counted apart from the gate stages because it
+    /// is not a verdict about the program — it is a verdict about its length,
+    /// and a run whose `long` count is climbing is one whose cap is too tight.
+    pub long: usize,
     pub parse: usize,
     pub type_errors: usize,
     pub tests: usize,
@@ -528,6 +588,10 @@ pub struct Tally {
 impl Tally {
     pub fn record_empty(&mut self) {
         self.empty += 1;
+    }
+
+    pub fn record_long(&mut self) {
+        self.long += 1;
     }
 
     pub fn record(&mut self, outcome: &Outcome) {
@@ -547,8 +611,8 @@ impl Tally {
     #[must_use]
     pub fn funnel(&self, attempted: usize) -> String {
         format!(
-            "{attempted} attempted → model errors {} → no program {} → parse {} → type {} → tests {} → ok {}",
-            self.errors, self.empty, self.parse, self.type_errors, self.tests, self.ok
+            "{attempted} attempted → model errors {} → no program {} → too long {} → parse {} → type {} → tests {} → ok {}",
+            self.errors, self.empty, self.long, self.parse, self.type_errors, self.tests, self.ok
         )
     }
 }

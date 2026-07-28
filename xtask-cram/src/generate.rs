@@ -16,9 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use cram_gen::{
-    CandidateRecord, LmStudio, Sampling, Tally, describe, run_once, run_once_corrected,
-};
+use cram_gen::{CandidateRecord, LmStudio, Sampling, Tally, describe, run_once, run_once_capped};
 
 pub struct GenOptions {
     pub model: String,
@@ -33,6 +31,10 @@ pub struct GenOptions {
     /// token can rescue the program, generation goes back to just before the
     /// fatal text and resumes. 0 disables it entirely.
     pub corrections: usize,
+    /// Ceiling on the accumulated program, in bytes. 0 disables it. Only the
+    /// correction path can exceed it — without rewinds, `max_tokens` already
+    /// bounds a candidate.
+    pub max_bytes: usize,
     pub sampling: Sampling,
 }
 
@@ -53,12 +55,13 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
     // recorded every sampling knob and not the guard budget, so the run cannot
     // be reproduced and no later run is strictly comparable to it.
     let header = format!(
-        "model={} recipes={} ({} recipes over {} domains) correct={} temp={} top_p={} top_k={} presence={} max_tokens={}",
+        "model={} recipes={} ({} recipes over {} domains) correct={} max_bytes={} temp={} top_p={} top_k={} presence={} max_tokens={}",
         model.model,
         sheet.name,
         sheet.count(),
         sheet.domains().len(),
         options.corrections,
+        options.max_bytes,
         model.sampling.temperature,
         model.sampling.top_p,
         model.sampling.top_k,
@@ -98,7 +101,14 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
         };
         let started = Instant::now();
         let outcome = if options.corrections > 0 {
-            run_once_corrected(&model, &task, options.corrections, &mut on_chunk, &mut on_rewind)
+            run_once_capped(
+                &model,
+                &task,
+                options.corrections,
+                options.max_bytes,
+                &mut on_chunk,
+                &mut on_rewind,
+            )
         } else {
             run_once(&model, &task, &mut on_chunk)
         };
@@ -125,6 +135,15 @@ pub fn run(options: &GenOptions) -> std::io::Result<()> {
                     // for this would point at the wrong thing entirely.
                     tally.record_empty();
                     ("empty".to_string(), "no program in response".to_string())
+                } else if run.overlong {
+                    // The gate will call this a parse death, and it is not one:
+                    // the program was cut off mid-write. Recording it as such
+                    // would put a harness decision into the Stitch statistics.
+                    tally.record_long();
+                    (
+                        "long".to_string(),
+                        format!("stopped at {} bytes — over the cap", run.program.len()),
+                    )
                 } else {
                     tally.record(&run.outcome);
                     (run.outcome.stage().to_string(), describe(&run.outcome))
@@ -248,6 +267,7 @@ fn write_manifest(
         "funnel": {
             "model_errors": tally.errors,
             "empty": tally.empty,
+            "long": tally.long,
             "parse": tally.parse,
             "type": tally.type_errors,
             "tests": tally.tests,
