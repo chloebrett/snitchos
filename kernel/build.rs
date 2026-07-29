@@ -152,21 +152,29 @@ fn build_and_embed_user(kernel_dir: &str) {
         if profile == "release" {
             cmd.arg("--release");
             // Pin the embedded userspace to opt-level 1 even in a release kernel
-            // build. At opt-level >= 2, LLVM exposes a latent UB *class* in the
-            // userspace crates (confirmed in `snitchos-user`, plus at least one
-            // more): talc's OOM handler loops mapping 68 KiB regions until the
-            // per-process heap cap, then the program hangs in the panic handler —
-            // the FS server and spawn/reap paths wedge and their itests time out.
-            // The release-itest speedup is kernel-dominated (userspace is a tiny
-            // instret fraction), so opt-1 here costs ~nothing and sidesteps the
-            // whole class. The kernel itself stays at the workspace release
-            // opt-level (3). Root-causing the userspace UB is a separate follow-up
-            // (see notes/release-build-exposes-timer-death-and-uart-corruption.md).
+            // build.
+            //
+            // **The reason this pin was added is no longer true** (root-caused
+            // 2026-07-29, see docs/debt-register.md #16). It said opt>=2 exposed a
+            // latent UB *class* in the userspace crates — a talc OOM loop mapping
+            // 68 KiB regions until the per-process heap cap, wedging the FS server
+            // and spawn/reap paths. It was not UB: `memhog`'s 4 MiB reservation was
+            // dead code that LLVM legally deleted at opt>=2, so the child committed
+            // no frames and `spawn-reclaims-memory` failed its reclaim assertion.
+            // One `black_box` in `memhog` fixed it, and the whole suite is now
+            // 130/130 at BOTH opt-2 and opt-3, plus green on the QEMU oracle at
+            // opt-3 where a hang was previously documented.
+            //
+            // The pin therefore survives on inertia, not evidence. It is kept only
+            // because removing it is not a one-liner: `OptLevel` (xtask-qemu)
+            // *defines* `Mid` as "opt-1 userspace, dodging the class", so unpinning
+            // collapses `Mid` into `Max`, and nothing above was verified on the VF2
+            // board. Removing it is a deliberate decision, not a cleanup.
             //
             // `SNITCHOS_USERSPACE_OPT` overrides the pin — `itest --opt hi`/`max`
-            // set it to `2`/`3` to *reproduce* the UB class on purpose (vs `--opt mid`,
-            // which leaves it unset and gets the safe opt-1). `rerun-if-env-changed`
-            // (in `main`) rebuilds when flicking between levels.
+            // set it to `2`/`3` (vs `--opt mid`, which leaves it unset and gets
+            // opt-1). `rerun-if-env-changed` (in `main`) rebuilds when flicking
+            // between levels.
             let us_opt = std::env::var("SNITCHOS_USERSPACE_OPT").unwrap_or_else(|_| "1".into());
             cmd.args(["--config", &format!("profile.release.opt-level={us_opt}")]);
         }

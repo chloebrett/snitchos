@@ -1,5 +1,9 @@
 # Loose ends, swept 2026-07-29
 
+> **Status after the same-day pass:** #1, #3, #10 fixed; #7 (debt #16) root-caused
+> and its reproducible half fixed. #2 is now covered by the working tree. #4, #5,
+> #6, #8, #9 remain open. Per-item notes inline.
+
 A read of the docs touched in the last week (`plans/kvetch-drivel-on-target.md`,
 `plans/floating-point.md`, `plans/repl-completion.md`, `plans/corpus-recipe-axes.md`,
 `notes/batch10-pilots.md`, `plans/glitch.md`, `plans/stitch-native-tests.md`,
@@ -8,7 +12,19 @@ Ordered roughly by how cheap the fix is against how loud the thing is.
 
 ---
 
-## 1. Every `x` invocation prints 8 dead-code warnings
+## 1. ✅ FIXED — Every `x` invocation printed 8 dead-code warnings
+
+Resolved with a documented `#[allow(dead_code, reason = …)]` on each item rather
+than `#[cfg(test)]`: gating them out of the non-test build would drop `LINTS_EXEMPT`
+from `cargo doc`, breaking `RUSTDOC_EXEMPT`'s intra-doc link to it — and broken
+intra-doc links are themselves a gate (debt #14). These tables exist to be read, so
+they stay compiled. `check_all` turned out **not** to be orphaned: it is called by
+`diagram_drift_tests` in `xtask-itest/src/main.rs:1274`; its doc comment claimed the
+lean `xtask test` gate called it, which was stale since the crate split. Same stale
+claim fixed on `run_unit_tests`, plus a `clippy::empty_line_after_doc_comment` there.
+`cargo build -p xtask -p xtask-itest` is now silent.
+
+<details><summary>original</summary>
 
 `cargo build -p xtask` → 7 warnings, `-p xtask-itest` → 1. So `x snemu boot`,
 `x itest`, `x test` all open with a wall of yellow before doing anything.
@@ -32,6 +48,8 @@ The first two are ratchets whose whole point is to be load-bearing:
 `check_all` is the more interesting one — is the diagram drift check still wired
 through some other path, or did the xtask split orphan it?
 
+</details>
+
 ## 2. An uncommitted bug fix in the working tree, with no test
 
 `git diff` carries the `workload_features` extraction (`xtask-qemu/src/lib.rs:143`,
@@ -46,7 +64,18 @@ comment says what it fixes:
 No test pins it. The failure is a one-line mapping omission at a *third* call site,
 which is exactly the shape the fix says it is preventing.
 
-## 3. Two plans carry stale, self-contradicting headers
+## 3. ✅ FIXED — Two plans carried stale, self-contradicting headers
+
+`repl-completion.md` now has one accurate status (all seven increments done, gated),
+and the increment-1 fragment that had been spliced mid-sentence into the "Status of
+the pieces" paragraph is restored under its own heading. `floating-point.md` lost its
+duplicate Increment 5 section and its dangling pre-DONE 4b paragraph; the
+`stitch-kvetch-completes is still not registered` claim is corrected (it is, at
+`xtask-itest/src/itest.rs:218`); Increment 3 is marked DONE, and its step-2 "still to
+do: compressed FP forms" is struck through, since step 6 of the same list says they
+are done. `cargo xtask links` passes (2176 files).
+
+<details><summary>original</summary>
 
 - **`plans/repl-completion.md:3` and `:7`** — two stacked `**Status:**` blocks. The
   first says all seven increments are built end to end; the second, directly under
@@ -58,6 +87,8 @@ which is exactly the shape the fix says it is preventing.
 - Same file, `:341-345`: a "Needed before two processes can use FP simultaneously…
   Removes the `RefuseBusy` guard above" paragraph left dangling *below* the
   `Increment 4b — DONE (2026-07-28)` block that removed it.
+
+</details>
 
 ## 4. A dead server hangs its clients silently
 
@@ -98,7 +129,26 @@ argues for":
 The step's own done-condition is unresolved: "a Tab under snemu is bearable, **or we
 have decided in writing** that it is a board-only feature" (`:358-359`).
 
-## 7. Debt #16 — the opt-1 userspace pin, with the next step already written down
+## 7. ✅ ROOT-CAUSED (and it was not what the register said)
+
+Not UB. `memhog`'s 4 MiB `Vec::with_capacity` was dead code that LLVM legally
+deletes at opt≥2 — `buf.capacity() != 0` does not keep an allocation alive.
+Measured: `li a7, 0x4` (`MapAnon`) present at opt-1, absent at opt-2. No syscall →
+no frames committed → nothing to reclaim → the scenario's `freed_total` assertion
+fails. One `core::hint::black_box(buf.as_ptr())` fixes it; the suite is now
+**130/130 at opt-2 and opt-3**, and green on QEMU at opt-3 where a hang was
+documented.
+
+The register's "it's a spin, not a fault" was inferred from an instret count and is
+wrong: the scenario fails on its *second* assertion, so the reaper completes all 15
+cycles, and the profile shows no `[user:…]` bucket at all. Full write-up, including
+the FS-path symptom that is *not* closed (merely not reproducing) and the
+inline-asm hypothesis eliminated along the way: `docs/debt-register.md` #16.
+
+**Still open, deliberately:** the pin itself. Removing it collapses `OptLevel::Mid`
+into `Max` and none of the evidence covers the VF2 board — a decision, not a cleanup.
+
+<details><summary>original</summary>
 
 `docs/debt-register.md:167-203`. The diagnosis is complete and the instruction is
 explicit; it just hasn't been executed:
@@ -109,6 +159,8 @@ explicit; it just hasn't been executed:
 
 Everything needed exists (`--opt hi`, `snemu profile --user-detail`), it's narrowed
 to two scenarios, and it's confirmed on the QEMU oracle so it isn't a snemu artifact.
+
+</details>
 
 ## 8. batch10's three open corpus items
 
@@ -134,12 +186,24 @@ later still have to be hand-written.
 
 So the layering violation it exists to fix is still standing.
 
-## 10. `prelude.st` has never had a test
+## 10. ✅ FIXED — `prelude.st` had never had a test
+
+20 native tests added, canon suite count 69 → 89 (the `canon.rs` ratchet raised to
+match). Verified falsifiable: breaking `first`'s fold arm fails
+`first and last pick opposite ends` with `expect failed: 9 == 7`. Measured cost,
+since the prelude is parsed at every program start: 3505 → 8456 bytes, parse
+517µs → 725µs, `build_env` unchanged (`Item::Test` lowers to a `CoreItem::Test`
+nothing registers, so it is parse-only). `each` is still uncovered — its whole
+effect is the side effect, and it needs an effect-handler double.
+
+<details><summary>original</summary>
 
 `plans/stitch-native-tests.md:212` — "`prelude.st` gets tests, which it has never
 had. (Next.)" — the last unticked item in a section otherwise done. Alongside it,
 `:201-203`: native snapshot assertions stay deferred pending a file convention +
 accept workflow, and that is now *the only reason any stim test is still in Rust*.
+
+</details>
 
 ---
 

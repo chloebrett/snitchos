@@ -28,6 +28,12 @@ fn main() {
     // enough to commit ~1024 frames — no need to zero or touch every byte, which
     // would burn ~1 s of CPU per child and blow the test's time budget.
     let buf = Vec::<u8>::with_capacity(4 * 1024 * 1024);
-    // Read the capacity back so the reservation can't be optimized away.
+    // Make the *pointer* escape — this is what keeps the reservation alive, and
+    // the `capacity()` read below is NOT (it folds to the requested size without
+    // ever observing the allocation, which is removable while its result is
+    // unused). Without this, opt>=2 deleted the whole `MapAnon`: measured as
+    // `li a7, 0x4` present at opt-1 and absent at opt-2, and it cost three weeks
+    // misfiled as a UB class. See docs/debt-register.md #16.
+    core::hint::black_box(buf.as_ptr());
     exit_with((buf.capacity() != 0) as i32);
 }

@@ -4436,12 +4436,13 @@ pub fn default_boot_starts_init(h: &mut View) -> Result<(), String> {
 /// budget). So this passes iff Exit actually frees the child's page table + frames.
 pub fn spawn_reclaims_memory(h: &mut View) -> Result<(), String> {
     // NB: `wait_for` advances one forward cursor, so assert in wire-emission
-    // order. The reaper finishes its 30 spawn/wait cycles in well under a second
-    // and emits `reaper.done` *then*; `freed_total` is only put on the wire by the
-    // ~1 Hz heartbeat, so the first sample ≥ 5000 arrives *after* `reaper.done`.
+    // order. The reaper finishes its 15 spawn/wait cycles (`reaper.rs::CHILDREN`)
+    // in well under a second and emits `reaper.done` *then*; `freed_total` is only
+    // put on the wire by the ~1 Hz heartbeat, so the first sample ≥ 5000 arrives
+    // *after* `reaper.done`.
 
     // The loop ran to completion without exhausting RAM — every child was reaped,
-    // so 30 × 4 MiB never accumulated. Never appears in the leak case (OOM stall).
+    // so 15 × 4 MiB never accumulated. Never appears in the leak case (OOM stall).
     h.wait_for(SEC * 30, is_span_start_named("reaper.done"))
         .ok_or("reaper never reached 'reaper.done' — the spawn/wait loop OOMed before finishing")?;
 
@@ -4469,8 +4470,8 @@ pub fn spawn_reclaims_memory(h: &mut View) -> Result<(), String> {
 /// wouldn't exist (names leaked, never released); the only release source in this
 /// workload is the memhog reaps, so there is no noise floor.
 pub fn spawn_reclaims_names(h: &mut View) -> Result<(), String> {
-    // The reaper finished all 30 spawn/wait cycles (emits `reaper.done` after the
-    // loop). By now every memhog has been reaped, so the counter has reached 30;
+    // The reaper finished all 15 spawn/wait cycles (emits `reaper.done` after the
+    // loop). By now every memhog has been reaped, so the counter has reached 15;
     // the next ~1 Hz heartbeat puts that value on the wire.
     h.wait_for(SEC * 30, is_span_start_named("reaper.done"))
         .ok_or("reaper never reached 'reaper.done' — the spawn/wait loop didn't finish")?;

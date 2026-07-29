@@ -164,6 +164,110 @@ a plan — see `plans/` for active implementation tracks.
 
 ## Correctness gaps
 
+### #16 — ROOT-CAUSED 2026-07-29: the spawn/reap half was never UB at all.
+
+**The diagnosis below (kept in full underneath) was wrong for the failure that
+still reproduced, and wrong in the direction that made it look hard.** The only
+failure left on the current tree was `memhog` losing its allocation to ordinary,
+*correct* LLVM optimisation — not UB, and not in the kernel. (The entry bundled a
+second, older FS-path symptom that no longer reproduces; the two are separated
+below, because only one of them is actually closed.)
+
+`memhog` reserves 4 MiB to make the kernel commit ~1024 frames, then exits so the
+reaper can prove Exit reclaims them. It guarded the reservation like this:
+
+```rust
+let buf = Vec::<u8>::with_capacity(4 * 1024 * 1024);
+// Read the capacity back so the reservation can't be optimized away.
+exit_with((buf.capacity() != 0) as i32);
+```
+
+That guard does nothing. `capacity()` is a field load LLVM constant-folds back to
+the requested size, so it never observes the *allocation*; and Rust's allocator
+calls carry LLVM's allocator attributes, which make them removable when the
+result is unused. So at opt≥2 the allocation is dead code and gets deleted.
+
+**Measured, not inferred** — `rust-objdump -d` on `memhog` built at each level:
+
+| build | `li a7, 0x4` (`MapAnon`) | `ecall` count |
+|---|---|---|
+| `--config profile.release.opt-level=1` | present at `0x1000089a` | 6 |
+| `--config profile.release.opt-level=2` | **absent** | 5 |
+
+The child never called `MapAnon`, so it committed no frames, so there was nothing
+to reclaim and `snitchos.frames.freed_total` never reached the scenario's 5000.
+
+**The failure was misread, and the misreading is the lesson.** The register said
+"a userspace task is stuck in a loop" and prescribed finding the hot userspace PC.
+But `cargo xtask itest --opt hi spawn-reclaims-memory` fails on its **second**
+assertion — the first, `reaper.done`, passes, which means the reaper completed all
+15 spawn/wait cycles. Nothing was spinning. `snemu profile --opt hi --user-detail`
+agrees: no `[user:…]` bucket appears in the top 30 at all, and userspace accounts
+for under 1% of 407M instructions. The 91M-instret observation was the kernel
+context-switching and serializing telemetry, not a userspace spin.
+
+**Fix**: `core::hint::black_box(buf.as_ptr())` — make the pointer escape.
+One line, in a test program; no kernel change.
+
+**Result after the fix** (each run rebuilds the embedded userspace at that level):
+
+| run | before | after |
+|---|---|---|
+| `itest --opt hi spawn-reclaims-memory` | FAIL (62.0s) | pass (2.0s) |
+| `itest --opt hi` (whole suite) | — | **130/130** |
+| `itest --opt max` (whole suite) | — | **130/130** |
+| `itest --engine qemu --opt max spawn-reclaims-memory` | documented `hart_stalled` | pass (0.8s) |
+
+The QEMU row is the one that closes it: QEMU was the oracle the old entry used to
+argue "genuine UB, not a snemu artifact," and it now passes at opt-3.
+
+**There were two distinct symptoms under this one entry, and they need separating
+— only one is closed by the above.**
+
+- **spawn/reap — CLOSED.** `spawn-reclaims-memory` is the `memhog` dead allocation,
+  root-caused and fixed above. This is also the one the original bisect could not
+  explain: pinning `snitchos-user` alone fixed the FS scenarios but left this
+  failing, which is what produced the "at least one more UB in another crate"
+  conclusion. There was no other UB — the second crate was `user/hello`, and its
+  "UB" was a test program whose allocation was legal to delete.
+- **FS path — NOT reproducing, but not disproven either.** The `build.rs` comment's
+  version (talc's OOM handler looping on 68 KiB regions until the per-process cap,
+  then hanging in the panic handler) was a real observation, bisected at the time to
+  `snitchos-user`. The arithmetic checks out — `MmapOnOom` maps
+  `size.next_multiple_of(PAGE_SIZE) + MIN_MAP`, which is exactly 68 KiB for a small
+  layout — and talc's `malloc` really is
+  `loop { get_sufficient_chunk(…) | handle_oom(…)? }`, so the loop is structurally
+  possible. It simply does not happen today: every FS scenario is green at opt-2 and
+  opt-3. Most likely fixed by unrelated work in the ~3 weeks since the pin
+  (2026-07-10) and never re-checked. **Treat as latent, not dead** — if it ever
+  returns, the loop above is where to look, and the tell is a flood of 68 KiB
+  `MapAnon`s.
+- *"`supervised-ipc-client-cap-survives` also fails."* Passes at opt-2 and is green
+  in both full-suite runs. It shares no code with `memhog`; presumably the same
+  silent fix as the FS half.
+
+**A hypothesis eliminated along the way, worth not re-testing.** The natural
+suspect was an under-declared inline-asm register — the same class as the kernel's
+SBI `a1` clobber, which is release-only and opt-sensitive, and there are 22
+grandfathered hand-rolled `ecall` wrappers. Checked exhaustively: every handler
+that writes `a1`–`a6` back (`handle_receive`, `handle_call`, `handle_wait_any`,
+`handle_span_open`, `handle_wait_notify`, `handle_spawn`/`_on`/`_image`) has a
+wrapper that either routes through the all-`inlateout` `ecall` helper or declares
+that register `inlateout` explicitly. No false promise anywhere. The raw-ecall
+ratchet is doing its job.
+
+**What is left, and it is a decision rather than a bug.** The pin still stands, and
+is now unjustified by any evidence. Removing it is *not* a one-line change:
+`OptLevel`'s ladder (`xtask-qemu/src/lib.rs:100-136`) is built around the UB class
+— `Mid` is *defined* as "opt-1 userspace, dodging the class" — so unpinning
+collapses `Mid` into `Max` and the four regimes become three. It also changes what
+ships to the **VF2, which none of the evidence above covers** (every run here is
+snemu or QEMU). Deliberately left for a human call. If taken: drop the `--config`
+line in `kernel/build.rs`, redefine or delete `Mid`, and re-verify on the board.
+
+<details>
+<summary>The original entry, kept because the misdiagnosis is instructive</summary>
+
 ### #16 — Userspace pinned to opt-1 to dodge a UB class *(latent, hard)*
 
 `kernel/build.rs` pins the embedded userspace to `opt-level=1`
@@ -201,6 +305,18 @@ address surfaces. Next step: read the hot PC off that profile → objdump the ow
 program → compare that one function's codegen at opt-1 vs opt-2. "Terminates at
 -O1, spins at -O2" is the classic signature of UB the optimiser exploits, so the
 source is likely fixable (pin comes off), not a compiler bug to route around.
+
+</details>
+
+**Postscript on the method.** The prescribed next step — objdump the owning program
+at opt-1 vs opt-2 — was exactly right, and is what found it. What sent it wrong for
+three weeks was the *symptom* it was pointed at: "spins at -O2" was inferred from an
+instret count rather than read off the frame stream or the profile, and the profile,
+once actually run, said the opposite. The classifier ("UB the optimiser exploits")
+was then chosen to fit the wrong symptom, and it made the work look like a hunt for
+unsound code when a diff of two disassemblies would have closed it. Read the wire
+before believing the summary — the same lesson `plans/repl-completion.md` records
+for the FP wedge, arrived at independently.
 
 ## Deferred placeholders (Tier 3)
 

@@ -29,18 +29,18 @@ test "count counts elements and total sums them" {
 // in an empty list satisfies a predicate, and everything in it does.
 test "any is false and all is true on an empty list" {
     expect any([], _ -> true) == false
-    expect all([], _ -> false) == true
+    expect all([], _ -> false)
 }
 
 test "any and all read the whole list" {
-    expect any([1, 2, 3], x -> x == 3) == true
+    expect any([1, 2, 3], x -> x == 3)
     expect any([1, 2, 3], x -> x == 9) == false
-    expect all([1, 2, 3], x -> x > 0) == true
+    expect all([1, 2, 3], x -> x > 0)
     expect all([1, 2, 3], x -> x > 1) == false
 }
 
 test "contains finds a member and rejects a non-member" {
-    expect contains([1, 2, 3], 2) == true
+    expect contains([1, 2, 3], 2)
     expect contains([1, 2, 3], 9) == false
     expect contains([], 1) == false
 }
@@ -64,7 +64,7 @@ test "find returns the first match, not the last" {
 }
 
 test "find returns None when nothing matches" {
-    expect isNone(find([1, 2, 3], x -> x > 9)) == true
+    expect isNone(find([1, 2, 3], x -> x > 9))
 }
 
 // min/max fold to the extreme element, as a Maybe (None for an empty list).
@@ -95,8 +95,8 @@ test "min and max find the extreme wherever it sits" {
 }
 
 test "min and max of an empty list are None" {
-    expect isNone(min([])) == true
-    expect isNone(max([])) == true
+    expect isNone(min([]))
+    expect isNone(max([]))
 }
 
 // first/last as a Maybe (None for an empty list). Derived from fold, so for a
@@ -113,8 +113,8 @@ test "first and last pick opposite ends" {
 }
 
 test "first and last of an empty list are None" {
-    expect isNone(first([])) == true
-    expect isNone(last([])) == true
+    expect isNone(first([]))
+    expect isNone(last([]))
 }
 
 // flatten a List of Lists by concatenating — flatMap with the identity.
@@ -154,13 +154,13 @@ on Result : Try {
 // early, `unwrap` supplies the value when it does not.
 test "the Try contract reads Maybe's failure case" {
     expect Some(1).isFailure() == false
-    expect None.isFailure() == true
+    expect None.isFailure()
     expect Some(1).unwrap() == 1
 }
 
 test "the Try contract reads Result's failure case" {
     expect Ok(1).isFailure() == false
-    expect Err("bad").isFailure() == true
+    expect Err("bad").isFailure()
     expect Ok(1).unwrap() == 1
 }
 
@@ -185,7 +185,7 @@ on Result : Functor {
 // stays in the container and `?.` can be chained again.
 test "Functor map keeps the container" {
     expect unwrapOr(Some(2).map(x -> x + 1), 0) == 3
-    expect isNone(None.map(x -> x + 1)) == true
+    expect isNone(None.map(x -> x + 1))
 }
 
 // `Err` carries a payload, and the failure arm is the one a mapper is tempted
@@ -193,7 +193,7 @@ test "Functor map keeps the container" {
 // that; asserting only `isFailure` would not.
 test "Functor map on Result preserves the error payload" {
     expect Ok(2).map(x -> x + 1).unwrap() == 3
-    expect Err("nope").map(x -> x + 1).isFailure() == true
+    expect Err("nope").map(x -> x + 1).isFailure()
 }
 
 // --- Maybe helpers ---
@@ -209,9 +209,9 @@ mapMaybe(m, f) = match m { Some(v) => Some(f(v))  None => None }
 andThen(m, f) = match m { Some(v) => f(v)  None => None }
 
 test "isSome and isNone are opposites" {
-    expect isSome(Some(1)) == true
+    expect isSome(Some(1))
     expect isNone(Some(1)) == false
-    expect isNone(None) == true
+    expect isNone(None)
     expect isSome(None) == false
 }
 
@@ -222,7 +222,7 @@ test "unwrapOr takes the value when there is one and the default when there is n
 
 test "mapMaybe transforms a value and leaves None alone" {
     expect unwrapOr(mapMaybe(Some(2), x -> x * 10), 0) == 20
-    expect isNone(mapMaybe(None, x -> x * 10)) == true
+    expect isNone(mapMaybe(None, x -> x * 10))
 }
 
 // `andThen` differs from `mapMaybe` in exactly one place: its function returns
@@ -230,8 +230,8 @@ test "mapMaybe transforms a value and leaves None alone" {
 // which is why the second assertion is the one that tells them apart.
 test "andThen lets the function decide the container" {
     expect unwrapOr(andThen(Some(2), x -> Some(x + 1)), 0) == 3
-    expect isNone(andThen(Some(2), _ -> None)) == true
-    expect isNone(andThen(None, x -> Some(x))) == true
+    expect isNone(andThen(Some(2), _ -> None))
+    expect isNone(andThen(None, x -> Some(x)))
 }
 
 // --- shell verbs ---

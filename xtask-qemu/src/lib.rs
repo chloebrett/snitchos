@@ -101,10 +101,12 @@ pub fn base_command_ex(
 ///   (the `build.rs` default, which dodges the userspace opt≥2 UB class). Fast (the
 ///   former `--release`), but this is where **release-codegen-vs-debug divergences
 ///   surface under snemu**: a scenario green under Low + QEMU can still fail here.
-/// - **Hi** — release kernel, userspace at opt-**2**. The first level the userspace
-///   opt≥2 UB class appears (talc OOM loop / hang). Distinct from `Max` so a
+/// - **Hi** — release kernel, userspace at opt-**2**. Distinct from `Max` so a
 ///   bisect can tell "opt-2 already broke it" (fewer transforms to blame) from
-///   "only opt-3 breaks it".
+///   "only opt-3 breaks it" — which is exactly how debt #16 was closed.
+///   (This was described as "the first level the userspace opt≥2 UB class appears
+///   (talc OOM loop / hang)". There was no UB class: see docs/debt-register.md #16.
+///   Both `Hi` and `Max` are 130/130 green as of 2026-07-29.)
 /// - **Max** — release everywhere, userspace at opt-3 too. Was `High`.
 ///
 /// The ladder is monotonic in userspace opt-level: Low(0) → Mid(1) → Hi(2) → Max(3).
@@ -126,7 +128,8 @@ impl OptLevel {
 
     /// The userspace opt-level this regime forces via `SNITCHOS_USERSPACE_OPT`,
     /// or `None` to leave `build.rs`'s default (opt-1) in place. `Low`/`Mid` take
-    /// the default; `Hi`/`Max` opt in to the UB-exposing levels on purpose.
+    /// the default; `Hi`/`Max` raise it. (`Hi`/`Max` were "opt in to the
+    /// UB-exposing levels on purpose"; that class was disproven — debt #16.)
     fn userspace_opt_override(self) -> Option<&'static str> {
         match self {
             OptLevel::Low | OptLevel::Mid => None,
