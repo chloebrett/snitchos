@@ -13,7 +13,7 @@ default = []
 # leave this off (no test/destructive workloads compiled in). See
 # `docs/runtime-workload-selection-design.md`.
 itest-workloads = []
-# Embed the trained `drivel-all-30k` checkpoint (~4.5 MB of weights) and the server
+# Embed the trained `drivel-b9b10-30k` checkpoint (~4.5 MB of weights) and the server
 # that runs it. **Not** part of `itest-workloads`, deliberately: that umbrella is
 # additive because its programs are small, and this one is larger than the rest of
 # the image put together. Carrying it by default pushed the 16 MiB itest machine out

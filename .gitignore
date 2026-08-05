@@ -25,10 +25,14 @@ target
 # on every run.
 #
 # One exception, force-added rather than un-ignored so the directory stays a
-# scratch space: `drivel-all-30k.kvetch` + `.vocab`. Once a checkpoint is embedded
+# scratch space: `drivel-b9b10-30k.kvetch` + `.vocab`. Once a checkpoint is embedded
 # in a program the kernel boots it stops being a by-product and becomes a contract
-# — a fresh clone must build the same guest, and an itest asserts a byte-exact
-# completion against those weights. Both halves travel together: a checkpoint
+# — a fresh clone must build the same guest, and `kvetch-serve`'s `real_checkpoint`
+# tests plus the `kvetch-drivel` / `stitch-drivel` itests all run against exactly
+# these bytes. (They assert *properties* — the pair decodes and agrees, a completion
+# is produced, it leaves the buffer parseable — not an exact byte sequence. The
+# byte-exact checksum belongs to the `kvetch-babble` scenario, which recomputes the
+# expected completion on the host.) Both halves travel together: a checkpoint
 # without its vocab is not a fixture, it is a mispairing waiting to happen (the
 # vocab fingerprint in the checkpoint header is what catches that). Replace them
 # rarely and in one commit; each version costs 4.2 MB of history forever.

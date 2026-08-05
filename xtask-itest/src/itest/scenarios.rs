@@ -1152,7 +1152,7 @@ pub fn kvetch_babble_serves(h: &mut View) -> Result<(), String> {
 }
 
 /// Rung 1 on the same endpoint (`workload=kvetch-drivel`): the completion server
-/// backed by the trained `drivel-all-30k` checkpoint answers the same fixed request
+/// backed by the trained `drivel-b9b10-30k` checkpoint answers the same fixed request
 /// babble answers.
 ///
 /// What a pass actually proves, none of which the host tests can:

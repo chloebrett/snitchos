@@ -364,11 +364,18 @@ is a board-only feature and the snemu scenario exists for correctness alone.
   carries is that step 4's scenario may not be gate-able at default budget.
 - **The 4.2 MB ELF.** Loader and W^X planning are 7× outside their exercised range.
 - **Heap headroom**, per step 3: ~8.4 MB of a 16 MiB cap before activations.
-- **Which checkpoint is canonical.** `drivel-all-30k` today, and now committed, so
-  "canonical" is a fact in git rather than a habit on one machine. When a better rung
-  is trained, both halves move in one commit and the fingerprint refuses the
+- **Which checkpoint is canonical.** `drivel-b9b10-30k` since 2026-07-29, replacing
+  `drivel-all-30k`; committed, so "canonical" is a fact in git rather than a habit on
+  one machine. Both halves move in one commit and the fingerprint refuses the
   half-updated state. Each replacement costs another 4.2 MB of history, which is the
   brake that keeps this deliberate.
+
+  The replacement is the batch10 training result: adding the batch10 corpus took
+  drivel's held-out loss from 2.6689 to **2.5584** (−0.111 nats, ~10.5% perplexity),
+  and a volume-matched control showed the gain is corpus *volume* rather than
+  batch10's better yield. The vocab is byte-identical to the old pair's — the same
+  frozen 2048-entry `corpora/kvetch-batch9.vocab` — so the fingerprint is unchanged
+  and only the weights moved. See `notes/batch10-training-findings.md`.
 
 ## Pre-PR quality gate
 

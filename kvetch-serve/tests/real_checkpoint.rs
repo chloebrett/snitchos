@@ -1,4 +1,4 @@
-//! The committed `drivel-all-30k` pair, end to end on the host.
+//! The committed `drivel-b9b10-30k` pair, end to end on the host.
 //!
 //! This is the same code the target runs, against the same bytes, so it is both a
 //! test and the fastest way to debug the on-target server: a failure here is a
@@ -20,8 +20,8 @@ fn checkpoints() -> PathBuf {
 
 fn drivel() -> Server<ModelLogits> {
     let dir = checkpoints();
-    let weights = std::fs::read(dir.join("drivel-all-30k.kvetch")).expect("committed checkpoint");
-    let vocab_bytes = std::fs::read(dir.join("drivel-all-30k.vocab")).expect("committed vocab");
+    let weights = std::fs::read(dir.join("drivel-b9b10-30k.kvetch")).expect("committed checkpoint");
+    let vocab_bytes = std::fs::read(dir.join("drivel-b9b10-30k.vocab")).expect("committed vocab");
 
     let model = Model::decode(&weights).expect("the committed checkpoint decodes");
     let vocab = Vocab::decode_vocab(&vocab_bytes).expect("the committed vocab decodes");

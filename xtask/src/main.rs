@@ -767,6 +767,60 @@ fn debug(features: &str) -> ExitCode {
     }
 }
 
+/// Kernel features a board image needs to serve `workload`.
+///
+/// `vf2` always — that is what makes it a board image — plus whatever that
+/// particular workload's programs need compiled in, which is
+/// [`qemu::workload_features`]'s single answer rather than a copy of it. `image`
+/// hardcoded `["vf2"]` and so silently produced a `stitch-drivel` image with an
+/// empty server stub: the third call site the shared mapping exists to prevent.
+///
+/// Deliberately **not** `itest-workloads`, unlike `boot`: the runtime registry is
+/// readable from a lean production image, and only the storm bodies need the test
+/// umbrella — which is not what a board gets flashed for.
+fn image_features(workload: Option<&str>) -> Vec<&'static str> {
+    let mut features = vec!["vf2"];
+    features.extend_from_slice(qemu::workload_features(workload));
+    features
+}
+
+#[cfg(test)]
+mod image_feature_tests {
+    use super::image_features;
+
+    /// A board image is a `vf2` build, always — that is what makes it a board image.
+    #[test]
+    fn every_board_image_targets_the_board() {
+        assert!(image_features(None).contains(&"vf2"));
+        assert!(image_features(Some("stitch-drivel")).contains(&"vf2"));
+    }
+
+    /// The drivel workloads embed ~4.5 MB of weights behind their own feature. An
+    /// image built without it flashes a server whose ELF is an empty stub, and the
+    /// board reports it as `Parse(BadMagic)` — a full TFTP + `booti` round trip to
+    /// discover something the build already knew.
+    #[test]
+    fn a_drivel_board_image_carries_the_weights() {
+        assert!(image_features(Some("stitch-drivel")).contains(&"kvetch-drivel"));
+        assert!(image_features(Some("kvetch-drivel")).contains(&"kvetch-drivel"));
+    }
+
+    /// ...and no other image pays 4.5 MB for them.
+    #[test]
+    fn an_ordinary_board_image_leaves_the_weights_out() {
+        assert!(!image_features(None).contains(&"kvetch-drivel"));
+        assert!(!image_features(Some("stitch-repl")).contains(&"kvetch-drivel"));
+    }
+
+    /// `itest-workloads` is the test umbrella. The storm bodies are inert on real
+    /// hardware, so a board image must never carry them however it was asked for.
+    #[test]
+    fn a_board_image_never_carries_the_test_workload_umbrella() {
+        assert!(!image_features(Some("stitch-drivel")).contains(&"itest-workloads"));
+        assert!(!image_features(Some("smp")).contains(&"itest-workloads"));
+    }
+}
+
 /// Build the `vf2` kernel and objcopy it to a flat RISC-V `Image` (`snitchos.img`)
 /// for U-Boot `booti` on the VisionFive 2. The 64-byte Image header is embedded at
 /// the start of the kernel by `entry.S`, so this is a straight ELF→binary copy —
@@ -785,7 +839,7 @@ fn image(workload: Option<&str>) -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let status = qemu::build_kernel(&["vf2"]).expect("failed to invoke cargo");
+    let status = qemu::build_kernel(&image_features(workload)).expect("failed to invoke cargo");
     if !status.success() {
         return ExitCode::from(1);
     }

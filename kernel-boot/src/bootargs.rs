@@ -190,7 +190,7 @@ workloads! {
         /// discipline — before any checkpoint exists. `docs/babble-design.md`.
         KvetchBabble,
         /// The same endpoint served from **weights**: a `kvetch-drivel-server`
-        /// (rung 1, the trained `drivel-all-30k` checkpoint embedded in its own
+        /// (rung 1, the trained `drivel-b9b10-30k` checkpoint embedded in its own
         /// image) plus the same fixed-prefix client. Deliberately the `KvetchBabble`
         /// layout with a different server behind it, so the two rungs are comparable
         /// on one prompt. `plans/kvetch-drivel-on-target.md`.

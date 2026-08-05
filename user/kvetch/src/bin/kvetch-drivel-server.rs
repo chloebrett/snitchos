@@ -19,8 +19,8 @@ use snitchos_user::entry;
 /// The blessed pair. They travel together and the checkpoint carries the vocab's
 /// fingerprint, so a half-updated pair is refused at startup rather than served as
 /// fluent nonsense.
-const CHECKPOINT: &[u8] = include_bytes!("../../../../checkpoints/drivel-all-30k.kvetch");
-const VOCAB: &[u8] = include_bytes!("../../../../checkpoints/drivel-all-30k.vocab");
+const CHECKPOINT: &[u8] = include_bytes!("../../../../checkpoints/drivel-b9b10-30k.kvetch");
+const VOCAB: &[u8] = include_bytes!("../../../../checkpoints/drivel-b9b10-30k.vocab");
 
 #[entry]
 fn main() {
