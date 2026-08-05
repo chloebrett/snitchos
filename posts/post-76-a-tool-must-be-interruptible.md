@@ -6,7 +6,7 @@
 ## why it didn't exist already
 
 - snemu has always been a batch tool, and that's not an oversight — it's the whole point. determinism is what makes the itest gate a one-run gate, and the harness feeds input from scenario code so runs are reproducible.
-- but every completion bug in the last two posts was reproduced by *predicting* what to type, injecting it, and reading a transcript. that loop is fine for a regression test and terrible for exploring. the thing I kept wanting was to press Tab twice and watch.
+- but every completion bug in posts 72 and 74 was reproduced by *predicting* what to type, injecting it, and reading a transcript. that loop is fine for a regression test and terrible for exploring. the thing I kept wanting was to press Tab twice and watch.
 
 ## three things between a keystroke and the guest, and only one is logic
 

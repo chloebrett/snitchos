@@ -65,7 +65,7 @@ Unimplemented { pc: 0x1000409a, instr: 0xe00516d3 }
 
 - `serve_model` correctly refuses to serve when the checkpoint and vocab don't match. it then keeps answering `Malformed` **forever** instead of exiting.
 - which would be a fine local choice except that a client blocked in `call` on a dead endpoint has no refusal and no timeout — so the symptom surfaces two processes away from the cause, as a REPL that completes to nothing.
-- same shape as the FP guard in post 71: the component that detects the problem is not the component that experiences it, and without a timeout or a death there is nothing connecting them.
+- same shape as the FP guard in post 72: the component that detects the problem is not the component that experiences it, and without a timeout or a death there is nothing connecting them.
 
 ## where it landed
 
