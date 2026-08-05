@@ -373,7 +373,7 @@ pub fn stitch_reads_a_line(h: &mut View) -> Result<(), String> {
 /// an `f64` add, `sstatus.FS` was never set, so the FP instruction trapped as illegal
 /// and the trap dispatcher's catch-all `panic!` killed the kernel.
 ///
-/// Now it evaluates. The whole of `plans/floating-point.md` is downstream of this one
+/// Now it evaluates. The whole of `plans/legacy/floating-point.md` is downstream of this one
 /// line of REPL input, so the scenario asserts the complete chain rather than just the
 /// answer:
 ///

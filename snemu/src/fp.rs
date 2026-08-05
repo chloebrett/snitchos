@@ -50,6 +50,35 @@ pub(crate) mod rm {
     pub const DYN: u32 = 0b111;
 }
 
+/// A rounding mode as it appears in a diagnostic.
+///
+/// Exists purely so the halt reason reads `mode: RTZ` instead of `mode: 1`. That has to
+/// come from **`Debug`**, not `Display`: a `StepError` reaches a human through
+/// `{error:?}` (the itest harness's halt reason, `snemu`'s own report), so a `Display`
+/// impl would be inert — the thing the design doc asked for ("name the mode") only
+/// happens if the derived `Debug` of the enum finds a field that names itself.
+///
+/// The table lives here, beside the constants it names, so the two cannot drift.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RoundingMode(pub u32);
+
+impl std::fmt::Debug for RoundingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self.0 {
+            rm::RNE => "RNE",
+            rm::RTZ => "RTZ",
+            rm::RDN => "RDN",
+            rm::RUP => "RUP",
+            rm::RMM => "RMM",
+            rm::DYN => "DYN",
+            // 5 and 6 are reserved; a guest that asks for one is refused like any other
+            // unsupported mode, and the number is the only useful thing left to say.
+            other => return write!(f, "reserved({other})"),
+        };
+        f.write_str(name)
+    }
+}
+
 /// A rounding mode snemu can actually apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rounding {
@@ -445,6 +474,18 @@ mod tests {
     fn a_nan_single_result_is_both_canonicalised_and_boxed() {
         let bits = box_single(f32::from_bits(0x7f80_dead) + 1.0);
         assert_eq!(bits, nan_box(CANONICAL_NAN_S));
+    }
+
+    /// The refusal has to *name* the mode, because that is how it reaches a human:
+    /// `StepError` is rendered with `{:?}` (the itest harness's halt reason), so the
+    /// naming must come from `Debug`. Pinned because the regression is silent — slap a
+    /// `#[derive(Debug)]` on `RoundingMode` and the diagnostic quietly reverts to
+    /// `mode: 1`, with every test still green.
+    #[test]
+    fn a_rounding_mode_debugs_as_its_name() {
+        assert_eq!(format!("{:?}", RoundingMode(rm::RTZ)), "RTZ");
+        assert_eq!(format!("{:?}", RoundingMode(rm::DYN)), "DYN");
+        assert_eq!(format!("{:?}", RoundingMode(0b101)), "reserved(5)");
     }
 
     // ---- rounding modes ---------------------------------------------------

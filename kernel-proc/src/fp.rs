@@ -7,7 +7,7 @@
 //! enable-or-refuse decision point, so an integer-only program pays nothing (it never
 //! traps) and the robustness fix and the feature land in the same place.
 //!
-//! Design: `docs/floating-point-design.md`, plan: `plans/floating-point.md`.
+//! Design: `docs/floating-point-design.md`, plan: `plans/legacy/floating-point.md`.
 
 /// What to do about a U-mode illegal-instruction trap that might be a request for
 /// floating point.

@@ -240,7 +240,7 @@ pub enum StepError {
     /// Loud on purpose, and never a guest trap: rounding the host's way instead would
     /// produce a plausible number that flows downstream, leaving `snemu diff` to
     /// report a distant symptom long after the cause.
-    UnsupportedRoundingMode { pc: u64, instr: u32, mode: u32 },
+    UnsupportedRoundingMode { pc: u64, instr: u32, mode: fp::RoundingMode },
     /// Sv39 translation failed for `va` (unmapped or permission-denied). A real
     /// guest page-fault trap is future work; for now this halts the run.
     PageFault { va: u64 },
@@ -1467,7 +1467,7 @@ impl Hart {
                     return Err(StepError::UnsupportedRoundingMode {
                         pc: self.pc,
                         instr: instr.0,
-                        mode,
+                        mode: fp::RoundingMode(mode),
                     });
                 }
             }
@@ -1478,7 +1478,7 @@ impl Hart {
                 return Err(StepError::UnsupportedRoundingMode {
                     pc: self.pc,
                     instr: instr.0,
-                    mode,
+                    mode: fp::RoundingMode(mode),
                 });
             }
             fp::Rounding::NearestEven
@@ -1586,7 +1586,7 @@ impl Hart {
             return Err(StepError::UnsupportedRoundingMode {
                 pc: self.pc,
                 instr: instr.0,
-                mode,
+                mode: fp::RoundingMode(mode),
             });
         }
         // rs3 shares its field with OP-FP's funct5.
@@ -4133,7 +4133,7 @@ mod tests {
             Err(StepError::UnsupportedRoundingMode {
                 pc: RAM_BASE,
                 instr,
-                mode: fp::rm::RTZ,
+                mode: fp::RoundingMode(fp::rm::RTZ),
             }),
         );
     }
@@ -4154,7 +4154,7 @@ mod tests {
             Err(StepError::UnsupportedRoundingMode {
                 pc: RAM_BASE + 4,
                 instr,
-                mode: fp::rm::RDN,
+                mode: fp::RoundingMode(fp::rm::RDN),
             }),
         );
     }

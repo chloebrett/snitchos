@@ -12,7 +12,9 @@ pub mod dtb;
 mod csr;
 mod decode;
 mod fetch_cache;
-mod fp;
+/// Only [`fp::RoundingMode`] is public — it appears in `cpu::StepError`, so it has to
+/// be at least as visible as that. The rest of the module's items stay `pub(crate)`.
+pub mod fp;
 mod framebuffer;
 mod fwcfg;
 mod jit;
