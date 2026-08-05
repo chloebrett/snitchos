@@ -1,12 +1,26 @@
 # `glitch` v2 — the async RT ring (the keystone)
 
-**Status:** 📐 **PLANNED — not started.** Depends on glitch v1 (shipped;
-[glitch.md](glitch.md)). This is the "A" milestone: it turns the DAC from a
-*syscall that blocks for the whole play* into a *ring the kernel drains on a timer*,
-which is the enabler under sonification (B) and the modem (C), **and** the place the
-first real-time deadline observable in the OS lives (XRun / missed sample-feed
-deadline). Everything here is snemu-testable end to end (snemu models the PWMDAC and
-time deterministically); the VF2 is the by-ear garnish, never a correctness gate.
+**Status:** 🚧 **IN PROGRESS — Increments 1–5 shipped; 6–9 remain.** The async ring is
+**live end to end**: `workload=glitch-beep` now feeds the DAC through the ring —
+`AudioEnqueue` (non-blocking) → `SampleRing` → the `TimerWheel`-multiplexed drain →
+`WDATA` — with `samples_emitted` coming off the timer drain, not a blocking syscall.
+Verified: the async feed + behavior-preserving wheel swap pass the full itest suite
+**plain + `--scramble`**, perturbing zero scenarios (latest: **130/130** — the count
+grew as concurrent FP work added scenarios). **Not yet shipped (6–9):** mixing, init-delegated AudioSink, snemu PCM
+capture, and the acceptance itests — which is where the **XRun observable actually
+fires** (it is *wired but dormant* today: `AUDIO_ACTIVE` is never set true, so the drain
+treats an empty ring as `Idle`, not `Underrun` — see Increment 5's shipped note and
+Increment 9). Depends on glitch v1 (shipped; [glitch.md](glitch.md)).
+
+This is the "A" milestone: it turns the DAC from a *syscall that blocks for the whole
+play* into a *ring the kernel drains on a timer*, which is the enabler under
+sonification (B) and the modem (C), **and** the place the first real-time deadline
+observable in the OS lives (XRun / missed sample-feed deadline). Everything here is
+snemu-testable end to end (snemu models the PWMDAC and time deterministically); the VF2
+is the by-ear garnish, never a correctness gate.
+
+Commits: `b8f305f`/`7ad6f8d` (plan) · `2c71e8f` (Inc 1) · `855a508` (Inc 2) · `5665b46`
+(Inc 3) · `1cce286` (Inc 4 timer) · `3b14036` (Inc 4 protocol) · `9cbe788` (Inc 5).
 
 Design context: [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md) (the arc),
 [../docs/sonification-feedback-design.md](../docs/sonification-feedback-design.md)
@@ -127,7 +141,12 @@ Increment 9 itests. All work on `main`; the user commits.
 
 ---
 
-## Increment 1 — the PCM sample ring (pure, `kernel-devices`)
+## Increment 1 — the PCM sample ring (pure, `kernel-devices`) — ✅ SHIPPED (`2c71e8f`)
+
+Shipped `kernel_devices::samplering::SampleRing<N>` — bounded `i16` FIFO, `push_slice`
+returns the accepted count (back-pressure, *not* `ConsoleRing`'s drop-on-full), `pop`
+drains FIFO. 7 host tests, **30/30 mutants caught**, clippy-clean. Loom model deferred
+(per the REFACTOR note) — nothing concurrent to model until the drain/enqueue split lands.
 
 **Acceptance:** a bounded SPSC `SampleRing` accepts a slice up to remaining capacity
 (returns accepted count; a full ring accepts 0 — back-pressure), drains in FIFO order,
@@ -141,7 +160,12 @@ buffer end preserves order.
 warrants it — defer the actual loom test to after Increment 4 wires the two sides.
 **Done when:** ring host tests + mutation report green.
 
-## Increment 2 — the drain-tick outcome (pure, `kernel-devices`)
+## Increment 2 — the drain-tick outcome (pure, `kernel-devices`) — ✅ SHIPPED (`855a508`)
+
+Shipped `DrainOutcome::{Fed(i16), Underrun, Idle}` + `SampleRing::drain_tick(active)`.
+Feeds **one** sample per tick (matching the resolved one-deadline-one-sample cadence);
+`active` is an **explicit producer input**, never inferred from emptiness — that split
+is the whole XRun decision. 5 host tests, **32/32 viable mutants caught**.
 
 **Acceptance:** `drain_tick` maps (ring non-empty) → `Fed(n)`, (empty & stream active)
 → `Underrun`, (empty & inactive) → `Idle`.
@@ -150,7 +174,16 @@ warrants it — defer the actual loom test to after Increment 4 wires the two si
 **MUTATE / KILL:** the empty/active predicate flips.
 **Done when:** host tests + mutation report green; no timer or MMIO involved yet.
 
-## Increment 3 — `AudioEnqueue` syscall: non-blocking enqueue (kernel; itest-verified)
+## Increment 3 — `AudioEnqueue` syscall: non-blocking enqueue (kernel) — ✅ SHIPPED (`5665b46`)
+
+Shipped `Syscall::AudioEnqueue = 33` (additive; ABI numbering test) + the cap-gated
+`handle_audio_enqueue` (reuses `authorize_audio` + the bounded `copy_from_user` guard),
+pushing into a static `AUDIO_RING: Mutex<SampleRing<4096>>` and returning the accepted
+count in `a0` (back-pressure). **Deviation from the plan: `play_samples`/`AudioWrite`
+were NOT retired** — keeping the old blocking path dormant-but-reachable kept every
+increment green (retiring it before the drain + glitch migration existed would have
+red-lit `glitch-beep-plays`). Retirement is now a later cleanup, not part of this
+milestone. Kernel builds, `glitch-beep-plays` stayed green.
 
 **Acceptance:** an `AudioSink`-holder calling `AudioEnqueue(handle, samples)`
 copies the samples into the ring and returns the accepted count **without blocking**
@@ -162,12 +195,26 @@ exists). The enqueue-vs-block behavior is proven by the Increment 9 itest.
 **GREEN:** `Syscall::AudioEnqueue` + `from_usize` arm; a handler that
 `authorize_audio` → `copy_from_user` (bounded, reuse the `MAX_SAMPLES = MAX_USER_STR_LEN/2`
 guard from glitch.md Increment 8) → `SampleRing::push_slice` → return accepted count.
-**Retire the blocking drain:** `play_samples`' spin-loop moves to the Increment 4 timer
-drain; the syscall no longer paces.
+**Blocking drain:** kept (see shipped note) — `AudioEnqueue` doesn't pace; the new
+timer drain (Increment 4) feeds `WDATA`. `AudioWrite`/`play_samples` stay dormant.
 **MUTATE / KILL:** covered by the resolver's existing tests + the itest.
 **Done when:** kernel builds, clippy clean, ABI tests green; behavior confirmed in Inc 9.
 
-## Increment 4 — timer-driven drain + XRun frame + counter (kernel; itest-verified)
+## Increment 4 — timer-driven drain + XRun frame + counter (kernel) — ✅ SHIPPED (`1cce286` timer, `3b14036` protocol)
+
+Shipped both sub-steps. **4a:** `kernel_boot::timer::TimerWheel` — pure soonest-deadline
+2-entry wheel (`Due{audio,sched}`, `rearm_past` drops backlog in O(1) on a missed
+deadline). 10 host tests, **21/22 viable mutants caught**. **4b:** `Frame::AudioXRun {
+count, t, hart_id }` (appended; `OwnedFrame` + `from_borrowed` + roundtrip; wire ripple
+into `collector` state machine + 2 `xtask-itest` harness arms); `XRUNS` counter +
+deferred `XRUNS_PENDING` → `AudioXRun` frame from the heartbeat (never IRQ); a per-hart
+`AUDIO_WHEEL` static; `handle_timer` now arms via `wheel.deadline()` with the per-tick
+work gated on `Due.sched` and the drain on `Due.audio`.
+
+**Key property — behavior-preserving:** the wheel self-inits on each hart's first fire
+(which *is* a sched tick) and, with audio disabled, reduces to today's fixed cadence.
+Proven: full itest **128/128 plain + 128/128 scramble**, zero scenarios perturbed. The
+drain + XRun path is **reachable but dormant** until Increment 5 enables audio.
 
 **Acceptance:** the drain runs on the timer, feeds `WDATA` at the sample rate,
 `samples_emitted_total` climbs *from the drain* (not the syscall); a mid-stream empty
@@ -192,7 +239,31 @@ heartbeat — **never emit a frame from IRQ context**, same rule as the alloc pa
 **Done when:** protocol tests green; kernel builds; XRun path exercised by Inc 9's
 `glitch-xrun` scenario.
 
-## Increment 5 — glitch fills the ring in chunks (userspace)
+## Increment 5 — glitch fills the ring in chunks (userspace) — ✅ SHIPPED (`9cbe788`)
+
+Shipped the async feed end to end. `glitch-core::next_chunk_len` (pure refill-plan; TDD,
+mutation-clean); `runtime::audio_enqueue` + `AUDIO_ENQUEUE_MAX`; `glitch::serve`'s `emit`
+migrated to the back-pressure loop (offer ≤MAX, advance by accepted count, `yield_now`
+when the ring is full). `glitch-beep-plays` **1/1 on the async path**, full itest
+**128/128 plain**.
+
+**This increment also owns the audio *enable*, which the plan under-specified:**
+- **Enable is kernel-side, triggered by `enqueue`** (glitch is userspace — it only
+  enqueues). First enqueue of a stream latches `AUDIO_FEEDING`, brings the DAC up, and
+  calls `trap::enable_audio_feed` on **the enqueuing hart** (DAC MMIO is global, so
+  whichever hart enqueues is the one that drains — no cross-hart hand-off / IPI).
+- **Auto-disable on idle:** when the ring empties the drain calls `disable_audio_feed`,
+  so the 8 kHz audio timer runs *only while there's audio* — no idle overhead.
+- **⚠️ Underrun detection is deliberately deferred to Increment 9.** `AUDIO_ACTIVE` ships
+  `false` and is never set true here, so the drain treats an empty ring as `Idle`, not
+  `Underrun` — no spurious end-of-beep XRuns, and no need for a stream-end signal yet.
+  Distinguishing "producer done" from "producer late" needs producer intent, which pairs
+  naturally with Inc 9's under-feeding scenario. So the XRun path is fully wired but
+  never *fires* until Inc 9 sets `AUDIO_ACTIVE`.
+
+**`--scramble` confirmed:** the async path passes the page-straddle guard — full suite
+**130/130 plain + scramble** (the `--scramble` run was blocked at session end by
+concurrent FP work; since re-run green).
 
 **Acceptance:** `glitch::serve` renders a `Play` into PCM and feeds it via repeated
 `AudioEnqueue` calls, pacing refills off the accepted-count back-pressure (retry when
@@ -205,7 +276,7 @@ riscv-only (verified by Inc 9).
 feed; keep the `glitch.play` span + `plays_total`.
 **Done when:** `glitch-core` tests green; glitch compiles for riscv; Inc 9 confirms.
 
-## Increment 6 — mixing: two concurrent plays summed (userspace)
+## Increment 6 — mixing: two concurrent plays summed (userspace) — ⏳ NOT STARTED
 
 **Acceptance:** two clients each sending a `Play` (different freq) overlapping in time
 produce a **summed** stream in the ring (saturating add, per-stream `Gain`); neither
@@ -217,7 +288,7 @@ gain-scaled, clipping at the extremes; host-tested.
 **Done when:** mix host tests + mutation green; Inc 9's `glitch-mix` confirms both
 contribute on the wire.
 
-## Increment 7 — init-delegated AudioSink
+## Increment 7 — init-delegated AudioSink — ⏳ NOT STARTED
 
 **Acceptance:** glitch launched under init's delegation graph plays exactly as under
 the v1 boot grant; the AudioSink reaches glitch as an init→glitch `CapEvent::Transferred`,
@@ -231,7 +302,12 @@ kernel mint.
 **Done when:** the async-plays itest passes with glitch under init; the AudioSink's
 `parent_cap_id` chains to init, not 0.
 
-## Increment 8 — snemu PCM capture (gate input; prerequisite of Increment 9)
+## Increment 8 — snemu PCM capture (gate input; prerequisite of Increment 9) — ⏳ NOT STARTED
+
+Note: snemu already renders DAC output to WAV via `--audio-out` (glitch v1 / Tier 0);
+what this increment adds is a **harness-readable** capture of the *timer-drained* stream
++ the pure Goertzel/square-wave analysis helper. Check what `--audio-out` already
+surfaces before building new capture plumbing.
 
 **Acceptance:** snemu captures the *timer-drained* `WDATA` writes and surfaces them to
 (a) the itest harness as a readable sample buffer and (b) `--audio-out foo.wav` for
@@ -245,7 +321,14 @@ elsewhere.
 **Done when:** `glitch-async` capture is byte-stable run-to-run; the analysis helper's
 host tests + mutation green. (A live native window remains optional, for ears only.)
 
-## Increment 9 — acceptance itests
+## Increment 9 — acceptance itests — ⏳ NOT STARTED (where the XRun *fires*)
+
+**Prerequisite unique to this increment:** underrun detection is dormant today
+(`AUDIO_ACTIVE` ships `false`; Increment 5 note). The `glitch-xrun` scenario must
+**turn it on** — mark the stream active so an empty ring reports `Underrun`, not `Idle`.
+Simplest: a stream-active signal the under-feeding workload/`glitch` sets (e.g. an
+`AudioEnqueue` "begin/continue vs end" convention, or a tiny control path). Design this
+alongside the scenario — it's the missing half of the XRun observable.
 
 **Acceptance:** three deterministic snemu scenarios, each asserting on the **captured
 waveform** (Increment 8) plus the counter floor:
