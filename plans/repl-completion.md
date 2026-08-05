@@ -3,7 +3,7 @@
 **Status:** ✅ **DONE — all seven increments built, working end to end, and gated.**
 `stitch-kvetch-completes` and `stitch-drivel-completes` are both registered
 (`xtask-itest/src/itest.rs:217-218`). The kernel gap that blocked registration —
-FP context switching — shipped as [floating-point.md](floating-point.md)
+FP context switching — shipped as [floating-point.md](legacy/floating-point.md)
 increment 4b on 2026-07-28. Two non-blocking defects found on the way are still
 open; see "Two defects found on the way" below.
 
@@ -216,7 +216,7 @@ re-validate what it was sent — so both eventually parse a float literal, and
 `FpEnableDecision::RefuseBusy` permits one FP process at a time. The REPL wins the race,
 the server is killed by an illegal instruction mid-request, and the REPL blocks forever
 in `call` on an endpoint with no receiver. Full evidence and consequences:
-[floating-point.md](floating-point.md) increment 4b.
+[floating-point.md](legacy/floating-point.md) increment 4b.
 
 **The lesson, again, and it is the same one.** The 2026-07-26 conclusion — "a second,
 independent gap: the REPL never reaches the call" — was read off the bisect

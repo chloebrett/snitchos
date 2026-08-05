@@ -1,6 +1,6 @@
 # Plan: floating point on SnitchOS
 
-Design: [../docs/floating-point-design.md](../docs/floating-point-design.md). This
+Design: [../../docs/floating-point-design.md](../../docs/floating-point-design.md). This
 file is the increment sequence; the design doc carries the rationale and the
 decisions (snemu grows RV64F/D; soft-float not taken; FP authority derived from
 the ELF's `e_flags`, enabled lazily at the trap).
@@ -340,7 +340,7 @@ patterns in all 32 registers, mismatch count asserted — it failed with 32 mism
 before the fix) and by the negative oracle in `default-boot-starts-init`.
 
 The plan, its two design calls, and the firmware finding that came out of it:
-[fp-context-switching.md](legacy/fp-context-switching.md).
+[fp-context-switching.md](fp-context-switching.md).
 
 **Why it became urgent** — kept because the reasoning is the interesting part, and
 because it is the evidence that the guard had to go rather than be tuned.
@@ -408,7 +408,7 @@ The earlier run saw a grammar-only menu because it was reading the console *afte
 wedge, where the last completed line is all there is. So: FP was necessary, and was also
 sufficient — via 4b, not via 4. `stitch-kvetch-completes` and `stitch-drivel-completes`
 both sit in `xtask-itest/src/itest.rs:217-218` today. Details in
-[repl-completion.md](repl-completion.md).
+[repl-completion.md](../repl-completion.md).
 
 ## Open questions carried from the design doc
 

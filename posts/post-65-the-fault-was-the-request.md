@@ -117,4 +117,10 @@ stitch> 1.5 + 1.5
 - `stitch-kvetch-completes` — the tab-completion scenario from post 64, unregistered because it wedged the guest — no longer wedges. no fault, no panic, runs straight through.
 - and fails. its own bisect diagnostic reports *"the REPL never reached the call"*: the completion request is never sent, and the console shows the grammar-only menu.
 - so there's a second, independent gap in the completion path, and FP was necessary but not sufficient. the comment above that scenario now records what's actually left, which is better than what it said this morning.
+
+> **Correction (2026-07-28).** the paragraph above is wrong, and wrong in a way worth leaving visible. there was no second gap. re-run with the bisect scaffolding removed, the REPL *does* reach the call and the server *does* answer — and then the **second** Tab kills it on `RefuseBusy`, the one-FP-process-at-a-time guard described three sections up. FP was necessary and also sufficient; it just needed increment **4b** rather than 4.
+>
+> what misled me: I read the scenario's own leftover `return Err("DIAGNOSTIC: …")` instead of the frame stream, and I read the console *after* the wedge, where the last completed line is all there is — so a completion that had actually been inserted at the prompt looked like a grammar-only fallback. **the diagnostic I trusted was a hand-rolled string from someone else's abandoned bisect; the telemetry was right there and I didn't look at it.**
+>
+> the sequel is [post 72](post-72-the-unit-was-already-on.md), which is largely about that guard finding its customer.
 - five increments to fix a bug I found by typing four characters at a prompt. two of them were fixing the design document.

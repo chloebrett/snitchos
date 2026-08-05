@@ -1,9 +1,15 @@
 # Floating point on SnitchOS
 
-**Status:** 🚧 **IN PROGRESS** — increments 1 (unhandled U-mode trap kills the
-process) and 2 (snemu delivers a guest illegal-instruction trap) are shipped; FP
-itself is not. Sequence, per-increment tests and the corrections below live in
-[../plans/floating-point.md](../plans/floating-point.md).
+**Status:** ✅ **SHIPPED** (increments 1–5 plus 4b, 2026-07-26 → 2026-07-28).
+Userspace floating point works: snemu models RV64FD behind an `sstatus.FS` gate, the
+kernel derives FP authority from the ELF and enables it lazily at the
+illegal-instruction trap, and FP state survives a context switch, so two processes can
+use it concurrently. `1.5 + 1.75` at the on-target Stitch REPL evaluates to `3.25` on
+both engines. The kernel itself remains zero-FP by design. Sequence, per-increment
+tests and the corrections below live in
+[../plans/legacy/floating-point.md](../plans/legacy/floating-point.md); the
+context-switch half is
+[../plans/legacy/fp-context-switching.md](../plans/legacy/fp-context-switching.md).
 
 Two premises in this doc turned out to be wrong once the code was read, and are
 corrected in the plan rather than silently here: problem (2)'s "as other user

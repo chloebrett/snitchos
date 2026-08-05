@@ -42,7 +42,21 @@ part — a way to recover from and *observe* hangs.
 
 The command the loop is built on. `cargo xtask board`:
 
-- Opens the board UART (`/dev/tty.usbserial-*` @ 115200; Rust `serialport` crate).
+- Opens the board UART (`/dev/cu.usbserial-*` @ 115200; Rust `serialport` crate).
+  **`cu.*`, never `tty.*`.** On macOS the `tty.*` node is the call-in device: `open()`
+  blocks until carrier detect is asserted, and a USB-TTL adapter typically never asserts
+  it. The open then hangs forever with no error — which for an unattended bridge is
+  indistinguishable from a board that never booted. `cu.*` is the call-out node and skips
+  the DCD wait. (Measured on the VF2 dev host: a `screen` on the `tty.*` node sat in a
+  blocked open indefinitely; the same adapter on `cu.*` worked immediately.)
+- **Port contention must be reported as itself, not as silence.** The port is exclusive —
+  a leftover `screen`, a previous bridge run, or an editor's serial monitor holds it, and
+  the next open fails with `EBUSY` (or, via a pending `tty.*` open, blocks). The bridge
+  must distinguish *cannot open the port* from *opened the port and the board said
+  nothing*, because on hardware those have the same downstream symptom and completely
+  different fixes. Report the holder if it can be identified (`lsof` on the device node
+  names the pid), and never leave the port held on exit — restore-on-drop, including on
+  panic, the same discipline as snemu's raw-mode guard.
 - **`exec "<text>"`** — writes input, then captures output until a stop condition:
   a **quiescence window** (N ms with no new bytes), a **marker** (regex, e.g. U-Boot's
   `=>` prompt or a kernel span), or a **timeout**. Returns `{ io_text, frames[] }`.
