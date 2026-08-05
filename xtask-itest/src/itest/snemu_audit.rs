@@ -1378,7 +1378,7 @@ fn budget_for(name: &str, default: u64) -> u64 {
         // (~90s under snemu), against an estimate of 0.2-0.5B that was wrong by more
         // than an order of magnitude. Both scenarios are `slow` (opt-in) for exactly
         // this reason; the budget is what lets them pass when asked for. Step 7 of
-        // plans/kvetch-drivel-on-target.md is what brings this number down.
+        // plans/legacy/kvetch-drivel-on-target.md is what brings this number down.
         "kvetch-drivel-serves" | "stitch-drivel-completes" => 8_000_000_000,
         // `stitch-fs-loads-and-runs` no longer needs an override: `primes(5)`
         // (down from `(10)`) reaches its assertion in ~310M instructions, under

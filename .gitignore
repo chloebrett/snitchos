@@ -36,7 +36,7 @@ target
 # without its vocab is not a fixture, it is a mispairing waiting to happen (the
 # vocab fingerprint in the checkpoint header is what catches that). Replace them
 # rarely and in one commit; each version costs 4.2 MB of history forever.
-# See plans/kvetch-drivel-on-target.md.
+# See plans/legacy/kvetch-drivel-on-target.md.
 /checkpoints
 
 # RustRover

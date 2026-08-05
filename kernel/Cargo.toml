@@ -18,7 +18,7 @@ itest-workloads = []
 # additive because its programs are small, and this one is larger than the rest of
 # the image put together. Carrying it by default pushed the 16 MiB itest machine out
 # of frames at userspace load. On for the `kvetch-drivel` / `stitch-drivel` workloads
-# only; see `plans/kvetch-drivel-on-target.md`.
+# only; see `plans/legacy/kvetch-drivel-on-target.md`.
 kvetch-drivel = []
 # Target the VisionFive 2 / JH7110: RAM base 0x4000_0000 instead of QEMU's
 # 0x8000_0000. Selects `kernel_mem::mmu::RAM_BASE` and the generated linker script's

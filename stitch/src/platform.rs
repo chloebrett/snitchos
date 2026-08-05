@@ -458,7 +458,7 @@ mod on_target {
     use super::{CapInfo, Platform};
     use crate::line_edit::LineEditor;
 
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
     use alloc::collections::VecDeque;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -472,7 +472,7 @@ mod on_target {
     /// nudge, not a paragraph, and a short answer is cheap to reject.
     const COMPLETION_TOKENS: u32 = 6;
 
-    use snitchos_user::{console_read, console_write, yield_now};
+    use snitchos_user::{Metric, console_read, console_write, register_counter, yield_now};
 
     #[derive(Default)]
     pub struct RuntimePlatform {
@@ -481,12 +481,41 @@ mod on_target {
         /// stim driver wants one raw byte at a time. Bytes drain from the front;
         /// a fresh `console_read` refills when it's empty.
         bytes: RefCell<VecDeque<u8>>,
+        /// `snitchos.stitch.completions_asked`, registered **once**.
+        ///
+        /// Registering per Tab is what this replaces, and it failed in the way a
+        /// broken metric usually does — quietly and late. A process may name at most
+        /// `MetricTable::MAX_METRIC_NAMES` (16) metrics, there is no dedup, and a
+        /// refused registration yields a handle whose `emit` is a no-op. So the
+        /// counter worked for about thirteen Tabs and then stopped, with nothing on
+        /// the wire to say it had.
+        completions: RefCell<Option<Metric>>,
+        /// Completions asked for so far. The wire metric carries an **absolute**
+        /// value, so a counter has to hold its own total; emitting `1` every time
+        /// reports "at least one happened" forever and cannot distinguish one
+        /// completion from fifty.
+        completions_asked: Cell<i64>,
     }
 
     impl RuntimePlatform {
         #[must_use]
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Record one completion request: register the counter on first use, then
+        /// emit the running total.
+        ///
+        /// Lazily rather than in `new` because a `RuntimePlatform` is built by every
+        /// program that runs Stitch on target, most of which never press Tab — and a
+        /// metric name is a quota'd, permanently-interned resource. A program that
+        /// never completes anything should not spend one.
+        fn count_completion(&self) {
+            let mut slot = self.completions.borrow_mut();
+            let metric = slot
+                .get_or_insert_with(|| register_counter("snitchos.stitch.completions_asked"));
+            self.completions_asked.set(self.completions_asked.get() + 1);
+            metric.emit(self.completions_asked.get());
         }
     }
 
@@ -585,7 +614,7 @@ mod on_target {
             // The client side of the round trip, on the wire: paired with the
             // server's `kvetch.complete` span it shows the request leaving and
             // arriving, so a hang has a side.
-            snitchos_user::register_counter("snitchos.stitch.completions_asked").emit(1);
+            self.count_completion();
             let endpoint = Endpoint::from_raw_handle(delegated_handle(0));
             let (words, _) = endpoint.call(request.encode()).ok()?;
             let Reply { status, written } = Reply::decode(words).ok()?;

@@ -165,11 +165,22 @@ fn build_and_embed_user(kernel_dir: &str) {
             // 130/130 at BOTH opt-2 and opt-3, plus green on the QEMU oracle at
             // opt-3 where a hang was previously documented.
             //
-            // The pin therefore survives on inertia, not evidence. It is kept only
-            // because removing it is not a one-liner: `OptLevel` (xtask-qemu)
-            // *defines* `Mid` as "opt-1 userspace, dodging the class", so unpinning
-            // collapses `Mid` into `Max`, and nothing above was verified on the VF2
-            // board. Removing it is a deliberate decision, not a cleanup.
+            // The pin therefore survives on inertia, not evidence — but removing it
+            // is still not a one-liner. Three things first, in order (the register
+            // has the long version):
+            //   1. `OptLevel::Mid` (xtask-qemu) is defined by *inheriting* this
+            //      default, so deleting the line silently turns `Mid` into `Max` and
+            //      collapses the bisect ladder that closed #16. Make `Mid` force
+            //      opt-1 explicitly first.
+            //   2. Decide what exercises whichever level stops being the default —
+            //      there is no CI here, and today's gate runs `Mid`, so unpinning
+            //      means opt-1 stops being run at all.
+            //   3. The FS-path talc OOM flood is latent, not fixed: it stopped
+            //      reproducing without anyone finding it, and this pin is what would
+            //      mask its return.
+            // NOT a reason, though an earlier version of this comment said it was:
+            // the VF2 board image. `cargo xtask image` builds at `OptLevel::Low`
+            // (debug), so the board has never taken this path.
             //
             // `SNITCHOS_USERSPACE_OPT` overrides the pin — `itest --opt hi`/`max`
             // set it to `2`/`3` (vs `--opt mid`, which leaves it unset and gets

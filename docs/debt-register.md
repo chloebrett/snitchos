@@ -256,14 +256,64 @@ wrapper that either routes through the all-`inlateout` `ecall` helper or declare
 that register `inlateout` explicitly. No false promise anywhere. The raw-ecall
 ratchet is doing its job.
 
-**What is left, and it is a decision rather than a bug.** The pin still stands, and
-is now unjustified by any evidence. Removing it is *not* a one-line change:
-`OptLevel`'s ladder (`xtask-qemu/src/lib.rs:100-136`) is built around the UB class
-— `Mid` is *defined* as "opt-1 userspace, dodging the class" — so unpinning
-collapses `Mid` into `Max` and the four regimes become three. It also changes what
-ships to the **VF2, which none of the evidence above covers** (every run here is
-snemu or QEMU). Deliberately left for a human call. If taken: drop the `--config`
-line in `kernel/build.rs`, redefine or delete `Mid`, and re-verify on the board.
+**What is left, and it is a decision rather than a bug.** The pin still stands
+(`kernel/build.rs:178`, default `"1"`), and is now unjustified by any *evidence*.
+It is not, however, a one-line removal, and the reasons are worth having written
+down before someone deletes the line on a Friday.
+
+### Who the pin actually affects
+
+Narrower than it looks, and I overstated this in the first draft of this entry.
+The pin is inside `if profile == "release"`, so it only touches release kernel
+builds. Concretely:
+
+| path | regime | pinned? |
+|---|---|---|
+| `cargo xtask itest` (default) | `Mid` | **yes** — this is the pin's real consumer |
+| `cargo xtask itest --opt hi` / `--opt max` | `Hi` / `Max` | no (overridden to 2 / 3) |
+| `cargo xtask boot`, `snemu boot` | `Low` (debug) | no |
+| **`cargo xtask image` (the VF2 board image)** | `Low` (debug) | **no** |
+
+That last row is the correction. `image()` calls `qemu::build_kernel`, which is
+`build_kernel_profiled(features, OptLevel::Low)` — a *debug* build. So the board
+has never taken the pinned path, and "unpinning changes what ships to the VF2" was
+wrong. The board is out of scope for this decision **today**; it re-enters the
+moment anyone builds a release image, which is also the moment opt-3 userspace
+becomes new-on-hardware. (That the board runs a debug image is its own standing
+issue — it is what hid the SBI `a1` clobber for weeks. See post 68.)
+
+### Preconditions for unpinning
+
+1. **Make `Mid` force opt-1 explicitly, before removing the default.** `Mid` is
+   currently defined by *inheriting* `build.rs`'s pin —
+   `userspace_opt_override()` returns `None` for `Low`/`Mid`. Delete the pin and
+   `Mid` silently becomes opt-3, i.e. `Max`, and the ladder collapses from four
+   rungs to three. That would throw away the exact discrimination that closed this
+   entry: "opt-2 already broke it" vs "only opt-3 breaks it" is what made the
+   `memhog` bisect cheap. Fix: `OptLevel::Mid => Some("1")`, so the ladder stays
+   monotonic Low(0) → Mid(1) → Hi(2) → Max(3) and the pin becomes a *selectable
+   regime* rather than an invisible default. Do this first, as its own change; it
+   is behaviour-preserving and independently correct.
+2. **Decide what exercises the level nobody defaults to.** There is no CI in this
+   repo (no `.github/workflows`) — the gate is whatever a human runs. Today the
+   default gate run is `Mid`, so opt-1 is exercised constantly and opt-2/3 only
+   on demand. Unpinning inverts that: opt-3 becomes continuously exercised and
+   **opt-1 stops being run at all**, so `Mid` rots the way any untested regime
+   does. Either accept that and say so, or keep a periodic `--opt mid` pass.
+3. **Guard the symptom that is latent rather than dead.** The FS-path talc OOM
+   flood (above) was real, was bisected to `snitchos-user`, and simply does not
+   reproduce now — nobody found or fixed it, it stopped happening. Nothing watches
+   for its return, and the pin is currently the thing that would mask it. Its tell
+   is a flood of 68 KiB `MapAnon`s, so the cheap standing guard is a bound on
+   per-process `MapAnon` count in the FS scenarios. Worth having *before* removing
+   the workaround, not after.
+4. **Re-verify on the board when, and only when, a release image exists.** Not a
+   blocker now (see the table). It becomes one the same day `image()` stops
+   building debug.
+
+Steps 1 and 3 are small and independently worth doing. Step 2 is the actual
+decision. The `--config` line in `kernel/build.rs` is the last thing to touch, not
+the first.
 
 <details>
 <summary>The original entry, kept because the misdiagnosis is instructive</summary>

@@ -212,7 +212,7 @@ catalog! {
     cpu "fp-survives-context-switch"      scenarios::fp_survives_context_switch     [fp, sched]     {"fp-churn"};
     // Opt-in: one drivel completion is 4-8B guest instructions (~90s under snemu),
     // against a whole-suite budget of ~7s. Run it with `--tag kvetch` or by name.
-    // Step 7 of plans/kvetch-drivel-on-target.md is what earns it a place in the gate.
+    // Step 7 of plans/legacy/kvetch-drivel-on-target.md is what earns it a place in the gate.
     slow "kvetch-drivel-serves"           scenarios::kvetch_drivel_serves           [kvetch]        {"kvetch-drivel"};
     slow "stitch-drivel-completes"        scenarios::stitch_drivel_completes        [kvetch, stitch] {"stitch-drivel"};
     cpu "stitch-kvetch-completes"         scenarios::stitch_kvetch_completes        [kvetch, stitch] {"stitch-kvetch"};

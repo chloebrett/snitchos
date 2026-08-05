@@ -24,14 +24,28 @@ const CAP: usize = 256;
 
 /// Tokens to ask for.
 ///
-/// **One**, because this client's job is to prove the *path* — request in,
-/// completion out, byte-identical across engines — and one token proves all of it.
-/// Eight cost the drivel rung ~90s per run: without a KV cache each token re-runs a
-/// forward pass over the whole prefix so far, so the budget is superlinear, not
-/// linear. Sampler depth is covered where it is cheap to cover, in the host tests
-/// (`babble::serve` and `kvetch_serve::serve` both sweep truncation and viability
-/// across many tokens and every buffer size).
-const MAX_TOKENS: u32 = 1;
+/// **Four**, and the number is set by what the byte-identity oracle can *discriminate*
+/// rather than by what the path needs. Measured against the committed checkpoint, for
+/// two unrelated prefixes:
+///
+/// ```text
+/// 1 token   "\n   "              "\n   "              same
+/// 2 tokens  "\n    let"          "\n    //"           differ
+/// 4 tokens  "\n    let water ="  "\n    // Sort by"   differ
+/// ```
+///
+/// At one token the answer is a newline and an indent whatever you ask, because a
+/// code model's first move is always to start a line — so byte-identity against it is
+/// nearly a tautology, and the negative control (recompute with the *wrong* prefix)
+/// passes. Two is the minimum that discriminates; four is that with margin, and covers
+/// more arithmetic per run.
+///
+/// It stays small because the cost was once superlinear: without a KV cache each token
+/// re-ran a forward pass over the whole prefix, and eight tokens cost ~90s. The cache
+/// made the marginal token cheap, which is what makes four affordable. Deeper sampler
+/// behaviour — truncation, viability, every buffer size — is covered in the host tests
+/// where it costs nothing.
+const MAX_TOKENS: u32 = 4;
 
 #[entry]
 fn main() {

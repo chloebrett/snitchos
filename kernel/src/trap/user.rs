@@ -216,7 +216,7 @@ pub static KVETCH_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KVETCH_SERVE
 /// *their* kernel image too — which is not merely wasteful: it pushed the default
 /// 16 MiB itest machine past its frame budget and half the userspace scenarios began
 /// failing `OutOfFrames` at load. The separate binary was supposed to prevent exactly
-/// that (see `plans/kvetch-drivel-on-target.md`); a separate binary in the same image
+/// that (see `plans/legacy/kvetch-drivel-on-target.md`); a separate binary in the same image
 /// is not separate enough.
 #[cfg(feature = "kvetch-drivel")]
 pub static KVETCH_DRIVEL_SERVER_ELF: &[u8] =

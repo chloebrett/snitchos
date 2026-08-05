@@ -97,10 +97,14 @@ pub fn base_command_ex(
 ///   whole suite (supervision included) is green here, so a Low failure is a real
 ///   logic bug, not a codegen artifact. (The old note that "supervision fails under
 ///   Low" predates supervision being built — it's now green.)
-/// - **Mid** — release kernel (opt-3) with the embedded userspace pinned to opt-1
-///   (the `build.rs` default, which dodges the userspace opt≥2 UB class). Fast (the
+/// - **Mid** — release kernel (opt-3) with the embedded userspace pinned to opt-1,
+///   by *inheriting* `build.rs`'s default rather than asking for it. Fast (the
 ///   former `--release`), but this is where **release-codegen-vs-debug divergences
 ///   surface under snemu**: a scenario green under Low + QEMU can still fail here.
+///   (The pin was added to dodge a "userspace opt≥2 UB class" that does not exist —
+///   docs/debt-register.md #16. Note the inheritance: dropping the `build.rs`
+///   default silently turns `Mid` into `Max`, which is why unpinning starts by
+///   making this rung force opt-1 explicitly.)
 /// - **Hi** — release kernel, userspace at opt-**2**. Distinct from `Max` so a
 ///   bisect can tell "opt-2 already broke it" (fewer transforms to blame) from
 ///   "only opt-3 breaks it" — which is exactly how debt #16 was closed.
@@ -224,7 +228,9 @@ mod tests {
 
     #[test]
     fn userspace_opt_override_climbs_the_ladder() {
-        // Low/Mid take build.rs's default (opt-1) pin; Hi/Max opt into the UB levels.
+        // Low/Mid inherit build.rs's default (opt-1) pin; Hi/Max raise it explicitly.
+        // If `Mid` ever returns `Some("1")` instead of `None`, that is the unpinning
+        // work from docs/debt-register.md #16 — and this assertion is where it starts.
         assert_eq!(OptLevel::Low.userspace_opt_override(), None);
         assert_eq!(OptLevel::Mid.userspace_opt_override(), None);
         assert_eq!(OptLevel::Hi.userspace_opt_override(), Some("2"));

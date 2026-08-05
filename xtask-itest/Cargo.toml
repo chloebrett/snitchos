@@ -25,6 +25,12 @@ fs-proto = { path = "../fs-proto" }
 kvetch-proto = { path = "../kvetch-proto" }
 babble = { path = "../babble" }
 stitch = { path = "../stitch" }
+# ...and the same for the trained rung: `kvetch-drivel-serves` recomputes the
+# completion from the committed checkpoint, so the assertion is byte-identity
+# rather than "a completion appeared".
+kvetch-serve = { path = "../kvetch-serve" }
+kvetch-model = { path = "../kvetch-model" }
+kvetch-vocab = { path = "../kvetch-vocab" }
 itest-harness = { path = "../itest-harness" }
 xtask-qemu = { path = "../xtask-qemu" }
 xtask-snemu = { path = "../xtask-snemu" }

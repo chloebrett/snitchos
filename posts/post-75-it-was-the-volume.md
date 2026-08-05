@@ -9,13 +9,14 @@
 - the trap in "is the new corpus better?" is that the new corpus is also **more corpus**, so any comparison moves two variables. this project had already concluded "volume beats purity" three times — keeping parse deaths, keeping comments, the quip run — and *every one of those* changed volume and something else at the same time. three confirmations of a thing none of them had actually isolated.
 - so: three arms, and the third one is the whole experiment.
 
-| arm | corpus |
-|---|---|
-| A | real + batch9 (3.13M tokens) |
-| B | real + batch9 + batch10 (4.52M) |
-| C | real + batch9 **subsampled to 1.39M**, matching batch10's token count |
+| arm | corpus | training tokens |
+|---|---|---|
+| A | real + batch9 | 2 931 385 |
+| B | real + batch9 + batch10 | 4 318 391 |
+| C | real + batch9-**half** + batch10 | 2 920 193 |
 
-- A and C differ only in *what* the tokens are. B and C differ only in *how many*. C is batch9 cut down by a running-ratio stride so whole recipes aren't dropped — the point is to keep the mixture and lose only the volume.
+- C is the one to read carefully: it **keeps batch10** and cuts batch9 down by batch10's own token count (1.39M), landing back on A's volume to within 0.4%. so A and C differ only in *what* the tokens are. B and C differ only in *how many*. the cut is a running-ratio stride rather than a prefix, so whole recipes aren't dropped — batch files are numbered in recipe order, and taking a suffix would measure generalisation to *domains* instead of to *programs*.
+- the counts above are training tokens as the trainer reported them, i.e. after the 117 programs that are already in the frozen held-out set are dropped back out. batch9's raw count is 3.13M, and quoting that instead is how you end up calling B a 44% increase when it's 47%.
 - everything is against the same frozen 2048 vocab and the same frozen 116-program held-out set, so every number compares to every other. `--eval-batch` went from 64 to 1024 because batch9's own notes warned the 64-window sample was too noisy to quote.
 
 ### and a noise floor, before any claim

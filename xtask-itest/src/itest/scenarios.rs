@@ -1065,6 +1065,29 @@ pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
     // again is what proves it is still alive to answer.
     h.send_input(b"\r").map_err(|e| format!("inject REPL input: {e}"))?;
     h.send_input(b"let y =\t").map_err(|e| format!("inject REPL input: {e}"))?;
+
+    // The client's own counter reads **2**, not 1. Both of this metric's former bugs
+    // land exactly here: it used to re-register the name on every Tab (a 16-entry
+    // per-process quota with no dedup, so it silently stopped counting after ~13) and
+    // to emit a constant `1` rather than a running total. Either leaves this at 1
+    // forever, and neither says so.
+    //
+    // Asserted *before* the server's span because the client counts before it calls,
+    // so the counter frame precedes the span on the wire — waiting for the span first
+    // walks the cursor straight past the value this is looking for.
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.stitch.completions_asked")
+                && *value == 2
+        }
+        _ => false,
+    })
+    .ok_or(
+        "'snitchos.stitch.completions_asked' never reached 2 after a second Tab — the \
+         counter is reporting a constant rather than a total, so it cannot distinguish \
+         one completion from fifty",
+    )?;
+
     h.wait_for(SEC * 30, is_span_start_named("kvetch.complete")).ok_or(
         "the second Tab never reached the server — it answered once and then stopped, \
          which is what a dead completion server looks like from the client side",
@@ -1165,8 +1188,10 @@ pub fn kvetch_babble_serves(h: &mut View) -> Result<(), String> {
 /// - a transformer forward pass runs in U-mode on the emulated hardware at all,
 ///   which needs the FP unit this morning's context-switching work handed out.
 ///
-/// Byte-exactness against a host recomputation is step 5's job; this asserts the
-/// path exists and answers.
+/// And then the headline, the same one babble's scenario makes: **byte-identity**
+/// against a host recomputation. A transformer is a long chain of floating-point
+/// arithmetic, and "a completion appeared" would pass with every logit subtly wrong.
+/// Equality with the host's answer is what says the guest ran *this* model.
 pub fn kvetch_drivel_serves(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 60, is_span_start_named("kvetch.complete")).ok_or(
         "no 'kvetch.complete' span — the drivel server never received a request. If it \
@@ -1174,19 +1199,77 @@ pub fn kvetch_drivel_serves(h: &mut View) -> Result<(), String> {
          `cargo xtask cram --stamp`); if it never started, the 4.5 MB image did not load",
     )?;
 
+    // Recompute what the server should have produced, from the committed checkpoint
+    // and the same crates it runs: same seed derivation, same masked sampler, same
+    // weights. This is also the guard on the one string that had to be duplicated —
+    // the server's `include_bytes!` needs a literal path, so if it ever embeds a
+    // checkpoint other than `CANONICAL_CHECKPOINT`, this checksum stops matching
+    // instead of the mismatch passing quietly.
+    let expected = drivel_completion()?;
+    let expected_checksum = kvetch_checksum(expected.as_bytes());
+
     h.wait_for(SEC * 60, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str) == Some("snitchos.kvetch.client.written")
-                && *value > 0
+                && *value == expected.len() as i64
         }
         _ => false,
     })
-    .ok_or(
-        "the client got no bytes back — the server opened a span but the sampler produced \
-         nothing, which means every candidate the model proposed was refused by the oracle",
-    )?;
+    .ok_or_else(|| {
+        format!(
+            "the client never reported {} bytes — the on-target model produced a different \
+             length from the host's for the same seed",
+            expected.len()
+        )
+    })?;
+
+    h.wait_for(SEC * 60, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.kvetch.client.checksum")
+                && *value == expected_checksum
+        }
+        _ => false,
+    })
+    .ok_or_else(|| {
+        format!(
+            "the completion checksum never matched the host's ({expected_checksum}) for \
+             {expected:?} — same length, different bytes, so the forward pass diverged \
+             between host and guest rather than the plumbing being wrong"
+        )
+    })?;
 
     Ok(())
+}
+
+/// The completion the drivel server should serve for the client's fixed request,
+/// computed on the host from the committed checkpoint.
+fn drivel_completion() -> Result<String, String> {
+    use kvetch_serve::{CANONICAL_CHECKPOINT, model::ModelLogits, serve::Server};
+
+    let dir = std::path::Path::new("checkpoints");
+    let read = |ext: &str| {
+        let path = dir.join(format!("{CANONICAL_CHECKPOINT}.{ext}"));
+        std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))
+    };
+
+    let model = kvetch_model::Model::decode(&read("kvetch")?)
+        .ok_or("the committed checkpoint does not decode")?;
+    let vocab = kvetch_vocab::Vocab::decode_vocab(&read("vocab")?)
+        .ok_or("the committed vocab does not decode")?;
+
+    let logits = ModelLogits::new(model);
+    let fingerprint = logits.vocab_fingerprint();
+    let mut server = Server::new(logits, vocab, fingerprint)
+        .ok_or("the committed checkpoint and vocab are not a matching pair")?;
+
+    let seed = kvetch_proto::request_seed(KVETCH_BOOT_SEED, 0);
+    let mut buf = vec![0u8; KVETCH_CAP];
+    buf[..KVETCH_PREFIX.len()].copy_from_slice(KVETCH_PREFIX.as_bytes());
+    let reply = server.handle_request(&mut buf, KVETCH_PREFIX.len(), KVETCH_MAX_TOKENS, seed);
+
+    let end = KVETCH_PREFIX.len() + reply.written as usize;
+    String::from_utf8(buf[KVETCH_PREFIX.len()..end].to_vec())
+        .map_err(|e| format!("host sampler produced non-UTF-8: {e}"))
 }
 
 /// `workload=stitch-drivel`: Tab at the Stitch prompt is answered by **weights**.
@@ -1241,7 +1324,7 @@ pub fn stitch_drivel_completes(h: &mut View) -> Result<(), String> {
 /// Changing either side without the other is what the scenario exists to catch.
 const KVETCH_PREFIX: &str = "greet(name) {";
 const KVETCH_CAP: usize = 256;
-const KVETCH_MAX_TOKENS: u32 = 1;
+const KVETCH_MAX_TOKENS: u32 = 4;
 /// The server's per-boot entropy root while the `seed=` bootarg is unwired.
 const KVETCH_BOOT_SEED: u64 = 0;
 

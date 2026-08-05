@@ -1,7 +1,9 @@
 # Plan: drivel at the Stitch prompt (kvetch serves weights, not babble)
 
 **Branch**: main (house rule — no feature branches)
-**Status**: 🚧 **Steps 1–4 done and green; step 7 partly done ahead of schedule.**
+**Status**: ✅ **COMPLETE.** Steps 1–5 done; step 7's KV cache landed early; step 6
+(the formal measurement) and step 7's remaining levers are carried forward as named
+follow-ups rather than left as an open plan — see "What is left, and where it went".
 Tab at the on-target Stitch prompt is answered by the trained checkpoint:
 
 ```
@@ -285,16 +287,39 @@ the scenario an explicit `budget_for` override and say so in the commit; if it n
 more than ~2B, leave it unregistered pending step 7 rather than making the gate slow.
 **Done when**: green on snemu, plain and `--scramble`.
 
-### Step 5: The completion is reproducible from the wire
+### Step 5: The completion is reproducible from the wire — **DONE**
 
-**Acceptance criteria**: the host recomputes the exact bytes the guest served — same
-checkpoint, same vocab, same seed — and the scenario asserts a checksum match, exactly
-as `kvetch-babble-serves` does for babble. This is what makes a recorded completion
-replayable rather than merely deterministic-in-the-lab.
-**RED**: the checksum assertion, against a deliberately wrong seed first (it must
-fail).
-**GREEN**: `xtask-itest` links `kvetch-serve` and reads the committed checkpoint.
-**Done when**: criteria met.
+The host recomputes the completion from the committed checkpoint with the same seed
+derivation and the same masked sampler, and `kvetch-drivel-serves` asserts both the
+length and an FNV checksum against what the guest served. **A transformer's output is
+a long chain of floating-point arithmetic, and it comes back byte-identical through
+the emulator** — which is the claim "deterministic given its own trace" actually
+requires, and which "a completion appeared" would have passed with every logit subtly
+wrong.
+
+This also guards the one string that had to be duplicated: `include_bytes!` needs a
+literal path, so the server names its checkpoint separately from
+`kvetch_serve::CANONICAL_CHECKPOINT`. If the two ever diverge the checksum stops
+matching, rather than the wrong weights being served quietly.
+
+**The negative control is the part worth keeping.** The first one — recompute with a
+different seed — *passed*, and so did recomputing with an entirely different prefix.
+Not a broken assertion: at the client's then-current one-token budget the model answers
+`"\n   "` (newline, indent) for any prefix and any seed, because a code model's first
+move is always to start a line. Byte-identity against that is nearly a tautology.
+Measured on the host, where the question costs milliseconds instead of a 2-minute
+emulator run:
+
+```text
+1 token   "\n   "              "\n   "              same
+2 tokens  "\n    let"          "\n    //"           differ
+4 tokens  "\n    let water ="  "\n    // Sort by"   differ
+```
+
+So the client asks for **four**. The lesson generalises past this scenario: a
+byte-identity oracle is only as strong as the *variety* of the bytes it compares, and
+the cheapest way to find out is to ask the same question at several sizes somewhere
+fast.
 
 ### Step 5b: Housekeeping the gate needed (done)
 
@@ -308,19 +333,21 @@ run had been hiding behind each other, none of them from this work:
   `abi/src/lib.rs` — the last wanting `Self::AudioWrite` for an enum variant).
 - Generated-diagram drift, from the new crate and scenarios.
 
-### Step 6: Measure it
+### Step 6: Measure it — **partly done, and the partial answer changed the question**
 
-**Acceptance criteria**: guest instructions per completion, tokens/sec, and peak heap,
-for drivel *and* babble on the same prompt — reported, not estimated. `snemu profile
---user-detail` locates where the time goes.
-**Why here**: end-to-end first was the call from the desk. The number decides step 7;
-it does not decide whether the feature exists.
-**The prediction to check it against** (recorded now so it can be wrong in public):
-~1.05M MACs per position, ~6 tokens over a ~6-token prefix with no KV cache ≈ 55M
-MACs ≈ 0.2–0.5B instructions ≈ **20–50 s per Tab at snemu's 9.5M steps/s**, versus
-well under a second on the VF2. If that holds, drivel-at-the-prompt is a board
-feature and snemu's role is correctness, not interaction.
-**Done when**: the numbers are in this file and in `notes/`.
+The prediction, written down so it could be wrong in public, was 0.2–0.5B guest
+instructions per completion. Measured: **4–8B** — wrong by more than an order of
+magnitude, which is the whole reason the number was recorded rather than assumed.
+
+The profile that followed reframed the remaining work. At **one** token the split is
+19.7% userspace against ~22% telemetry serialization (postcard + `wire_encode` +
+`KernelSink::emit`), 14% `prepare_switch`, 13% `memset`. The model is *not* the cost
+of a short completion; the kernel is. Which means further model optimisation moves the
+REPL and the board, and does nothing for the gate.
+
+A per-token profile of a *long* completion — where the model does dominate — was never
+taken, and would be the thing that chooses between the remaining levers below. It wants
+an idle machine (see post 67), which is the only reason it is not here.
 
 ### Step 7: Make it fast enough for the machine it runs on
 
@@ -355,8 +382,25 @@ marginal per-token cost fell roughly 10×.
   and the block machinery is pure overhead. This is emulator wall-clock only — it does
   nothing for the VF2 — but it would pay for every float-heavy guest: the audio path
   and on-target Stitch floats as well as drivel.
-**Done when**: a Tab under snemu is bearable, or we have decided in writing that it
-is a board-only feature and the snemu scenario exists for correctness alone.
+**Decided in writing, which is what this step asked for**: a Tab under snemu is
+*bearable* — ~12s for six tokens, on an opt-in scenario nobody runs per commit — and
+the three levers above are worth doing on their own merits rather than to rescue this
+feature. Drivel-at-the-prompt is a board feature that snemu can also gate. That was
+the fork step 6 existed to resolve, and it is resolved.
+
+## What is left, and where it went
+
+The plan is complete; these carry on without it, so nothing is lost by archiving:
+
+- **The long-completion profile** (step 6's remainder) — the measurement that would
+  choose between the two performance levers below. Wants an idle machine.
+- **Borrowed weights** — halves the drivel server's resident memory and is what would
+  let its 64 MiB machine come back to the 16 MiB default. Contained to `kvetch-model`.
+- **FP in snemu's block JIT** — emulator wall-clock only, but pays for the audio path
+  and on-target Stitch floats as much as for drivel. Its own piece of work.
+- **FP ownership is per-process, not per-task** (`Process::fp_enabled`) — identical
+  only while a process has one task. Recorded in post 72; the trigger to fix it is the
+  first thing that gives a process two.
 
 ## Known unknowns
 
