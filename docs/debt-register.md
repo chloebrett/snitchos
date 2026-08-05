@@ -320,6 +320,35 @@ for the FP wedge, arrived at independently.
 
 ## Deferred placeholders (Tier 3)
 
+### #17 — The canon's native tests never run on target
+
+`test`/`expect` shipped and the canon carries 89 native tests (plus 279 across
+`examples/stitch/`), but every one of them runs on the **host** — `canon.rs`
+drives `stitch::test_runner` under `cargo xtask test` and nothing else does.
+
+The gap is a claim, not a crash. The canon stratum's justification in
+[generative-ladder.md](generative-ladder.md) is that these programs are
+*validated by use* — shipped in `fs-image/`, run in itests, continuously
+re-validated by the whole gate. That holds for the programs and **not for their
+test suites**, which no booted kernel has ever executed. So a canon suite could
+depend on host-only behaviour (or on a native the target lacks) and stay green
+forever.
+
+Closing it is increment 9 of
+[../plans/stitch-native-tests.md](../plans/stitch-native-tests.md): a span per
+test and an event per assertion (the collector already decodes those frames, so
+the runner becomes a collector and results land beside the kernel's own spans), a
+`stitch test` verb, and one itest scenario running the canon's suites under a
+booted kernel. The runner was deliberately built as a pure function over parsed
+items — no I/O, no printing, no exit — precisely so it can run where there is no
+stdout.
+
+Measured cost of the tests that already ship in the image (`prelude.st`, which is
+parsed at every program start, on target too): source 3505 → 8456 bytes, parse
+517µs → 725µs (+40%), `build_env` unchanged at ~135µs — `Item::Test` lowers to a
+`CoreItem::Test` that binds no name, so the cost is parse-only. Stripping tests
+from the metal build is therefore an optimisation, not a prerequisite.
+
 ### #8 — `kernel::sync` is one-flavor
 
 No `lock` vs `lock_irqsave` split (`kernel/src/smp/sync.rs`); deferred until a

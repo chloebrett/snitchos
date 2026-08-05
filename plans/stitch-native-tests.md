@@ -1,13 +1,24 @@
 # Native Stitch tests (TDD plan)
 
-**Status:** 📐 **PLAN — starting.** Implements
+**Status:** 🟡 **Increments 1–8 DONE (2026-07-26 → 07-29). Increment 9 is all
+that remains.** Implements
 [../docs/stitch-testing-design.md](../docs/stitch-testing-design.md): `test` and
 `expect` as structural keywords, the runner, and the migration of the suites
-that are currently Stitch-in-Rust-strings.
+that were Stitch-in-Rust-strings.
 
-Blocks increment 3 of [stage-0-validator-funnel.md](stage-0-validator-funnel.md)
-(sift's run stage = "run the candidate's own tests"). Increments 1–2 and 4–8 of
-that plan are independent and can proceed in parallel.
+Landed: `stitch::test_runner`, the `canon.rs` gate + anti-vacuity ratchet, and
+the migration — `stim_fsm.rs` went 1021 lines / 61 tests → 61 lines / 5 `insta`
+snapshots. The canon carries **89** native tests; `examples/stitch/` carries
+**279** across 30 programs, and the corpus gate's run stage is built on this.
+
+**Outstanding — increment 9 (below): the tests only ever run on the host.**
+Nothing executes a canon suite under a booted kernel, so "validated by use, on
+the metal" — the canon stratum's whole claim in
+[../docs/generative-ladder.md](../docs/generative-ladder.md) — is currently
+overstated with respect to the test suites themselves. Tracked as debt #17.
+
+Unblocked increment 3 of [stage-0-validator-funnel.md](stage-0-validator-funnel.md)
+(sift's run stage = "run the candidate's own tests").
 
 **Keyword collision check (done):** neither `test` nor `expect` appears as an
 identifier in the canon (`fs-image/`, `prelude.st`) or in babble's wordlist, so

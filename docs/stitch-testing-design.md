@@ -1,9 +1,17 @@
 # Native testing in Stitch
 
-**Status:** 📐 **DESIGN — not started.** Stitch programs are currently tested
-from Rust. This page argues that the tests belong in Stitch, designs the form
-they take, and shows why the language already has every primitive the design
-needs — the work is a keyword, a runner, and a migration, not a new mechanism.
+**Status:** ✅ **SHIPPED (2026-07-26 → 07-29), except the on-target half.**
+`test`/`expect`, the runner, the gate and the migration are all in
+([../plans/stitch-native-tests.md](../plans/stitch-native-tests.md) increments
+1–8); the canon carries 89 native tests and `examples/stitch/` 279 more. **What
+is not done is increment 9** — a span per test, a `stitch test` verb, an itest
+scenario. Until it lands the suites run on the host only, so the canon's claim to
+be *validated by use, on the metal* does not yet cover its own tests. Devlog:
+[../posts/stitch-17-the-tests-were-already-stitch.md](../posts/stitch-17-the-tests-were-already-stitch.md).
+
+This page argues that the tests belong in Stitch, designs the form they take, and
+shows why the language already had every primitive the design needs — the work
+was a keyword, a runner, and a migration, not a new mechanism.
 
 Related: [language-design.md](language-design.md) (the grammar, `uses`,
 `handle`/`with`/`without`, contracts), [generative-ladder.md](generative-ladder.md)
