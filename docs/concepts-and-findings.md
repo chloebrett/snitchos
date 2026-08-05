@@ -115,21 +115,47 @@ it see; anything you *assert*, it takes on trust.
   ([74](../posts/post-74-the-emulator-was-shouting.md))
 
 **3. Checked by something that shares the defect's assumption.** The worst case,
-because a check *is* running and reporting success.
+because a check *is* running and reporting success. Every instance below comes
+from the [corpus MVP spike](../plans/corpus-mvp-spike.md) — the only one of the
+three ways with no devlog post behind it, which makes the spike doc the sole
+record and this section the only place the three sit together.
 
 - Stitch's typing is **gradual**, so its diagnostics are advisory. Across the
   first five generated candidates, parse caught two and the programs' own tests
   caught three; the type checker caught **none**. A stage that cannot fail is not
-  a gate.
+  a gate. ([spike, "the stage that caught nothing"](../plans/corpus-mvp-spike.md))
 - Generated candidate 006 parses, type-checks and passes all five of its own
   tests **while being wrong** — it compares only the head of a list against the
   tail. Code and tests agree because both were written from the same
   misunderstanding. This is the concrete argument for scoring a suite by
   *mutants killed* rather than by passing.
+  ([spike, "006 is the mutation-scoring argument"](../plans/corpus-mvp-spike.md))
 - Self-repair, handed a broken program with no diagnostic, fixed 2 of ~9 errors —
   both syntactic, precisely the class a grammar mask makes impossible anyway.
   **The diagnostic is the load-bearing half of a repair, not the model's
   introspection.**
+  ([spike, "009 — self-repair without a diagnostic"](../plans/corpus-mvp-spike.md))
+- **Unconstrained parse rate is inflated by comment content.** 47% of a generated
+  corpus's *tokens* are `//` prose, so a sampled program can spend its whole
+  96-token budget on comments — and a file of pure comments parses trivially. Of
+  20 parsing samples, 5 contained no code line at all; parsing samples averaged
+  67% comment text against 37% for failing ones. The metric and the corpus share
+  the assumption that a parsing program is a program.
+  ([notes/batch9-findings.md](../notes/batch9-findings.md))
+
+**4. Reported by an instrument that cannot see the failure.** A number arrives
+every step, is correct, and is blind to the thing that is going wrong.
+
+- The training loop reported **training loss only**, which cannot distinguish
+  learning from memorising — and at drivel's size memorising is the *expected*
+  failure. Every overfitting knee in the corpus experiments was invisible until
+  `train()` took a held-out slice and `Progress` grew a `held_out_loss` column.
+  ([notes/batch9-findings.md](../notes/batch9-findings.md))
+- And the instrument that *was* there could not resolve the question: parse rate
+  put two checkpoints at 23.5% and 25.0% — inside sampling error — while held-out
+  loss separated the same pair by **0.48 nats**. A coarse metric does not report
+  "I cannot tell"; it reports a tie.
+  ([notes/batch9-findings.md](../notes/batch9-findings.md))
 
 ## The mirror image: plausible stories the measurement refused
 
@@ -181,3 +207,70 @@ Two corollaries worth keeping:
   customer within two days — announcing itself in one attributable line instead
   of corrupting silently
   ([72](../posts/post-72-the-unit-was-already-on.md)).
+
+# Two more recurring patterns, adjacent but distinct
+
+Neither of these is a claim getting out of reach, so they sit beside that pattern
+rather than inside it. Both were rediscovered independently four times, which is
+the same tell.
+
+## A signal must not share fate with the thing it reports on
+
+The check *runs*, and the answer is *correct* — it just cannot reach anyone,
+because the path carrying it is downstream of the break. The bug is in the
+plumbing of the diagnostic, not in the diagnosis.
+
+- snemu's whole design contract is that an unmodelled instruction halts and names
+  itself. The itest harness wrote `if self.machine.step().is_err()`, so the
+  loudest error in the system arrived as the vaguest one — "no frame arrived" —
+  and the scenario blamed whatever it was waiting for.
+  ([74](../posts/post-74-the-emulator-was-shouting.md))
+- `serve_model` correctly refuses a checkpoint/vocab mismatch and then answers
+  `Malformed` forever instead of exiting. A client blocked in `call` on a dead
+  endpoint has neither refusal nor timeout, so the symptom surfaces two processes
+  away as a REPL that completes to nothing.
+  ([74](../posts/post-74-the-emulator-was-shouting.md))
+- snemu's interactive mode first routed `Ctrl-C` to the guest by clearing `ISIG`
+  — making the escape hatch depend on the input path working, which is precisely
+  what fails. `ISIG` stays on; `Ctrl-]` is a *second* way out, never the only one.
+  ([76](../posts/post-76-a-tool-must-be-interruptible.md))
+- `cargo xtask test` ran `cargo metadata` through `Command::output()`, which
+  captures **both** streams — so cargo's "blocking waiting for file lock" went to
+  a swallowed stderr and a wait looked like a hang.
+  ([67](../posts/post-67-the-build-watched-what-it-wrote.md))
+
+Post 76 states the general form: **a debugging tool must remain interruptible
+while it is misbehaving, and that is exactly when its own handling cannot be
+trusted.** Generalised: a diagnostic is only as good as its worst hop, and the
+hops are usually owned by different code than the diagnostic. Ask of any
+reporting path — *if the thing under test is broken, does this still get out?*
+
+## A decision needs a single home
+
+A decision that is correct is still wrong in *n−1* places if it is made in *n*.
+The fix is never cleverer code; it is arranging that there is only one site where
+the decision can be spelled at all.
+
+- Which wire telemetry leaves on was chosen correctly by the live emit path and
+  baked wrong into `send_hello` and `flush_pre_init`, so the two most important
+  frames ignored `net=`. One `transmit_bytes` now names a device; nothing else
+  can. ([70](../posts/post-70-the-wire-was-never-load-bearing.md))
+- Every hand-written SBI `ecall` carried its own register constraints, and
+  several were wrong the same way. One reviewed `ecall()` wrapper with the
+  clobber list written once — a wrong `in()` can no longer be typed, because
+  nobody types the `in()`.
+  ([68](../posts/post-68-two-promises-the-hardware-never-made.md))
+- `satp_for` was open-coded a second time inside `mmu::enable`, either fixable
+  without the other, with the mode-shift and PPN-mask constants ten lines apart
+  and nothing asserting they agreed.
+  ([69](../posts/post-69-the-bug-was-where-no-test-could-reach.md))
+- `image` hardcoded `["vf2"]` instead of consulting the shared workload→features
+  mapping, so a `stitch-drivel` board image was built with an empty server stub
+  and announced it only as `Parse(BadMagic)`, after a full TFTP + `booti` round
+  trip. Its own fix comment calls it "the third call site the shared mapping
+  exists to prevent."
+
+The tell is a value that is *derived* in one place and *asserted* in others. The
+[cap-id spine](capability-system-design.md) and `kernel::sync`'s
+`disallowed_types` lint are the same move made in advance: make the second
+spelling impossible rather than merely discouraged.

@@ -399,6 +399,34 @@ where `operatorPending` will not be one token. So the note's first gate is a
 read-only measurement of that assumption on the held-out corpus, before any code
 — and if it fails, the design changes shape.
 
+## Addendum: the floor moved again, the same way
+
+Weeks after this post, the same defect recurred one layer over — and it is worth
+appending here rather than filing separately, because it is this post's finding
+with the roles swapped. The floor was in the wrong place because nobody had
+measured the baseline. This time the *held-out set* was in the wrong place
+because nobody had checked its membership.
+
+`find_stitch_files` walks the repo for `.st` files and excludes `target/`,
+`corpora/` and `checkpoints/` — the directories that hold generated Stitch. Then
+the corpus-generation work started writing LLM output into
+`plans/corpus-candidates/`, which nothing excluded. Four of those files parse.
+Parsing was the only bar the loader applied, so **four machine-written programs
+were being scored as held-out human Stitch.**
+
+The numbers in this post predate that directory and are unaffected. What it
+threatens is every comparison *after* it: held-out means human-written, and
+machine-written Stitch in the held-out set flatters exactly the rung that
+produced it — the model is scored partly on its own distribution and reports a
+win. Fixed by adding `corpus-candidates` to `NOT_CORPUS`, with a test, and the
+comment there says the part worth keeping: *parsing is not the bar.*
+
+The shape is the one `target/` already taught, and it recurred because the
+exclusion list is a **denylist** — it enumerates what is not corpus, so every new
+directory is corpus by default and each one has to be noticed. An allowlist of
+human-authored roots would not have this failure mode. That is the real fix and
+it is not done; the denylist is one directory less wrong.
+
 ---
 
 ## Things worth remembering
@@ -428,3 +456,10 @@ read-only measurement of that assumption on the held-out corpus, before any code
   same category error as comparing loss across corpora, one level up.
 - **Score the calibration control against something you cannot be wrong about.**
   A cheater must score zero; that assumes nothing about the question being asked.
+- **A held-out set needs its membership checked, not just its size.** "Every real
+  `.st` file in the repo" stopped being true the moment generated Stitch was
+  written somewhere the walker looked, and parsing was never evidence of
+  provenance.
+- **A denylist makes every new thing a member by default.** `NOT_CORPUS` has now
+  been wrong twice for the same structural reason; the exclusions are correct and
+  the *direction* is not.

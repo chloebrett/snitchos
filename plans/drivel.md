@@ -419,6 +419,38 @@ increment 2's real corpus exists, and the frozen vocab is trained on the
 *training split only*. The freeze is not "the first vocab we trained"; it is "the
 vocab the ladder ships with". Probes freeze nothing.
 
+### A comparison must fix the vocab, or report bits-per-byte
+
+The section above says *which* vocab to freeze. This one says why two runs may
+not each train their own, and it is a separate trap with a separate victim.
+
+`xtask cram` trains a fresh probe vocab per run by default. Two arms that do so
+tokenize the same held-out bytes into **different numbers of tokens**, so their
+mean per-token NLL has a different denominator — the metric measures the
+tokenizer as much as the model. Worse, it is biased in the direction that hides
+it: the arm whose vocab was trained closer to the eval distribution needs fewer
+tokens per byte, and a per-token mean over fewer, individually-harder decisions
+is not obviously wrong-looking. Both arms report a plausible number and the wrong
+one can win.
+
+This is the same category error as *loss is not comparable across corpora* one
+axis over, and it belongs in the
+[ladder-is-a-matrix](../docs/generative-ladder.md) reading of a checkpoint: the
+vocab is a variant column, not a free parameter.
+
+Two ways out, and the batch9/batch10 experiment used the first:
+
+- **Fix one vocab across every arm.** `--vocab-file` trains against a frozen
+  vocab instead of a fresh probe. The batch10 arms all ran against the frozen
+  2048-entry `corpora/kvetch-batch9.vocab`, which is the only reason A, B and C
+  are comparable to each other and to the noise-floor reruns.
+- **Report bits-per-byte**, which is denominator-independent and therefore
+  comparable across tokenizations by construction.
+
+Prefer both: the frozen vocab makes the comparison valid, bits-per-byte makes it
+*checkable* by someone who does not know which vocab was used. A held-out NLL
+quoted without naming its vocab is not a number anyone can reuse.
+
 ## Placement decisions
 
 Two load-bearing calls, and neither is about drivel:

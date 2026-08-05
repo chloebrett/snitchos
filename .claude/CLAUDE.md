@@ -289,7 +289,47 @@ cargo xtask snemu boot --interactive --release --workload stitch-kvetch   # driv
 cargo xtask cram --rung drivel    # train a ladder rung end to end: corpus (generated or cached) → vocab → model → checkpoint + loss curve
 cargo xtask cram --eval           # score the ladder: floor rows (babble, uniform) on held-out real Stitch, + parse rate with samples
 cargo xtask cram --eval --checkpoint c.kvetch --eval-vocab c.vocab   # ...including a trained rung's parse rate
+cargo xtask cram --batch-dir corpora/batch9 --batch-dir corpora/batch10 --real-root . \
+  --held-out-root corpora/heldout --vocab-file corpora/kvetch-batch9.vocab \
+  --steps 30000 --name drivel-b9b10        # train on REAL .st files, not babble (see below)
 ```
+
+**Training on real `.st` files.** With no `--real-root`/`--batch-dir` the corpus is
+babble, exactly as it always was. Adding either opts into the real corpus:
+
+| flag | what it does |
+|---|---|
+| `--real-root <d>` | every real `.st` under `<d>` (reuses `cram_eval`'s walker, so the training and eval sides cannot disagree about what "real" means) |
+| `--batch-dir <d>` | a `cram-gen` batch directory; repeatable |
+| `--drop-stage <s>` | exclude batch candidates by gate stage — **measured harmful, see below** |
+| `--held-out-every <n>` | 1-in-n held out, **per source** and by stride (default 5) |
+| `--write-held-out <d>` / `--held-out-root <d>` | write a split out / reuse one written earlier |
+| `--strip-comments` | drop `//` comments from **both** sides — measured harmful, off by default |
+| `--vocab-file <p>` / `--save-vocab <p>` | use a frozen vocab / train and freeze one |
+| `--name <stem>` | names checkpoint+vocab+curve; without it a step sweep overwrites itself |
+| `--eval-every <n>` / `--eval-batch <n>` | held-out loss cadence and sample size |
+
+Three rules that are not style preferences — each was measured, and getting one
+wrong produces a number that looks fine and means nothing:
+
+- **Always `--held-out-root` a frozen split, and always `--vocab-file` a frozen
+  vocab.** Two runs are comparable only if they share both. `corpora/heldout` (116
+  programs) and `corpora/kvetch-batch9.vocab` (2048 entries) are the current pair.
+  Held-out exclusion is keyed on the program's *comment-stripped* text, so a
+  stripped copy of the split still excludes its unstripped original.
+- **Do not filter the corpus.** Dropping parse-dead candidates cost 0.37 nats;
+  stripping comments cost 0.27; tripling the rung bought 0.030. Volume is the
+  binding constraint at drivel/quip size — see
+  [notes/batch10-training-findings.md](../notes/batch10-training-findings.md) for
+  the σ-decomposition that isolates it.
+- **Raise `--eval-batch` to ~1024 before quoting a held-out loss.** The default 64
+  windows are fine for comparing two runs on one stream and too noisy to quote
+  standalone; re-ordering the same held-out programs moved it by 0.085.
+
+**A token count is meaningless without naming its vocab.** The same 9.8 MB of
+training text is 6.40M tokens under a babble-trained 1024 vocab and 2.93M under
+the batch9-trained 2048 one. Quote bytes; name the vocab beside any token count.
+Same trap one level down from "loss is not comparable across corpora".
 
 **Training (`cargo xtask cram`) reports on itself.** Loss, smoothed loss,
 learning rate, gradient norm, tok/s, elapsed and ETA every N steps, plus a TSV

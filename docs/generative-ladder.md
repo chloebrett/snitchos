@@ -47,8 +47,17 @@ cell is what a number can be attributed to:
 |---|---|---|
 | **rung** | babble, drivel, quip, cliché, ballad, saga | `ModelConfig` |
 | **corpus** | babble-generated, real, mixed | corpus manifest + mix ratios |
+| **vocab** | per-run probe, a named frozen vocab | `--vocab-file`, else a fresh probe |
 | **comments** | absent, input-only (loss-masked), full | tokenizer + loss mask at train time |
 | **objective** | next-token, FIM, mixture | training loop |
+
+The **vocab** axis is the one that hides. The others change a number visibly; a
+different tokenizer changes the *denominator* of mean per-token NLL, so two arms
+report plausible, similar-looking numbers that were never comparable — and the
+bias favours the arm whose vocab fits the eval set. Fix the vocab across a
+comparison (`--vocab-file`, as the batch9/batch10 arms did) or report
+bits-per-byte, which is denominator-independent. Rationale in
+[drivel.md](../plans/drivel.md).
 
 **Most cells are empty, and some are uninhabitable.** babble emits no comments,
 so *(babble-corpus × input-only)* and *(babble-corpus × full)* do not exist.
