@@ -86,12 +86,50 @@ The VF2's own ISA string, read off the live board, is
 `-C target-feature=+zba,+zbb` in that stanza is a one-line change. Zba's
 `sh1add`/`sh2add`/`sh3add` collapse the index arithmetic that dominates a
 bounds-checked scalar kernel; Zbb's `min`/`max`/`clz` help the lexer and the softmax
-reduction. Modest — single-digit percent, probably — but free, and safe: QEMU `virt`
-advertises `zba zbb zbc zbs`, a strict superset, so the emulated path is unaffected.
+reduction. Modest — single-digit percent, probably.
 
-Caveat: `kernel/build.rs:194` scrubs `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` from the
-nested userspace build, so this **must** go in `.cargo/config.toml` and cannot be
-injected by env var. That is the right place anyway.
+> **⚠ It is not a one-line change, because snemu would silently mis-execute the
+> result.** Checked 2026-08-06. `Cpu::op` (`snemu/src/cpu.rs:1172-1195`) tests
+> `funct7 == MULDIV` and then dispatches on `funct3` alone, with only `instr[30]`
+> separating add/sub and srl/sra. **Every other `funct7` is ignored rather than
+> refused**, so a Zb instruction falls through to a base-ISA arm and produces a wrong
+> answer with no halt and no diagnostic:
+>
+> | instruction | funct7 | funct3 | snemu runs |
+> |---|---|---|---|
+> | `sh1add` / `sh2add` / `sh3add` | 0x10 | 2 / 4 / 6 | `slt` / `xor` / `or` |
+> | `min` / `minu` / `max` | 0x05 | 4 / 5 / 6 | `xor` / `srl` / `or` |
+> | `andn` / `orn` / `xnor` | 0x20 | 7 / 6 / 4 | `and` / `or` / `xor` |
+> | `rol` / `ror` | 0x30 | 1 / 5 | `sll` / `sra` |
+>
+> `clz`/`ctz`/`cpop`/`rev8`/`sext.b` are the same on the OP-IMM side (decoded as
+> `slli`, funct12 reinterpreted as a shift amount), and `block.rs:155` carries the
+> identical guard so the JIT compiles the same wrong op. QEMU `virt` advertising
+> `zba zbb zbc zbs` is irrelevant — **the gate runs under snemu.**
+>
+> This directly violates snemu's own contract that an unmodelled instruction halts
+> and names itself (post 65's rule, and the `keep-the-halt-reason` lesson).
+
+So the order is:
+
+1. **Make an unrecognised `funct7` reject.** `op`/`op_imm` (and `op_32`/`op_imm_32`)
+   should reach `self.unimplemented(instr.0)` instead of falling through. Pure
+   diagnostic fix, independent of any perf work, and worth landing on its own — the
+   silent-mis-execution class exists today whether or not we ever enable the feature.
+2. **Implement Zba + Zbb in snemu**, interpreter and `block.rs` both. The ops are
+   one-liners (`sh2add` = `(a << 2) + b`, `cpop` = `count_ones`); the work is
+   restructuring the two dispatch sites to key on funct7 first. `--engine qemu` is a
+   real differential oracle here, since QEMU implements all of it.
+3. **Then** enable `+zba,+zbb`. Step 1 gives step 3's RED for free: turn the feature
+   on, watch the suite halt loudly at a named instruction, implement until green.
+
+Caveat on placement: `kernel/build.rs:194` scrubs `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`
+from the nested userspace build, so this **must** go in `.cargo/config.toml` and
+cannot be injected by env var. That is the right place anyway.
+
+Honest ranking note: this is the *smallest* lever in this document and just became
+the most expensive. Do step 1 for its own sake; do steps 2–3 only if the profile says
+address arithmetic matters, or as a deliberate snemu-fidelity milestone.
 
 ---
 
@@ -428,6 +466,11 @@ confused with a board lever.
 6. **Row-order GEMM in `kvetch-model`** (§3a), lifted from `cram::blocked_band`, with
    the bit-identity assertion re-run as the gate.
 7. Re-measure, then choose between §3c (head-major KV) and §4a (forced tokens).
+
+Separately and **not** as part of this thread: **make snemu reject an unrecognised
+`funct7`** (§1b step 1). It is a correctness bug that exists today, it is what turns
+"enable `+zba,+zbb`" from a trap into a normal RED, and it is unrelated to whether
+any of the above is worth doing.
 
 Steps 2–6 are independent and each is small. Every one of them is bit-identical
 except §1a, so `stitch-drivel-completes` stays the gate throughout — which is the
