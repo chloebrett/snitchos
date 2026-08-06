@@ -203,49 +203,81 @@ half the cross-seed spread, as it should be.
 Against σ = 0.013 a single one of these is 1.2–1.8σ and **not quotable on its own** —
 which is why the design has three of them and two seeds.
 
-### What that is worth per token — and why the ratio is a ceiling
+One confound runs *against* the result, which is worth stating: F1's slice carries
+43.2% comment tokens against the exemplars' 36.3%, and comments are known to help
+(stripping them cost 0.27 nats). F1 had the comment advantage and still lost.
 
-The swap measures a **difference**, not an absolute: exemplar-minus-generated ≈
-0.022 / 0.0574M = 0.38 nats/Mtok. Getting the exemplar's own per-token value means
-adding back the generated baseline at this corpus size. Fitting loss ≈ a − b·ln(N)
-to E → D gives b ≈ 0.0995, so the *local* rate at 4.94M tokens is 0.020 nats/Mtok —
-not the 0.0172 average over the whole E → D step. That puts exemplars near 0.40
-against 0.020, so **~20× per token** (~26× per byte, since exemplars tokenize denser
-at 2.69 bytes/token against 3.14).
+### The one that runs *for* it — and does not survive testing
 
-Three reasons that number is a ceiling rather than an estimate:
+Six of the 116 held-out programs **are** exemplars, 4.29% of held-out bytes. So arm E
+gets in-distribution practice for part of what it is scored on, and the measurement
+above cannot separate "exemplars teach Stitch" from "exemplars teach exemplars".
 
-- **The held-out confound could account for all of it.** See Caveats — 4.29% of
-  held-out bytes are exemplars, and this measurement cannot separate "exemplars
-  teach Stitch" from "exemplars teach exemplars". If the gain is concentrated on
-  those six programs the true ratio is near 1×.
-- **It is a local derivative at 1.16% of corpus.** The 200th hand-polished program
+Arms G and H test it directly, against `corpora/heldout-noex` — the frozen set with
+its six exemplars removed, 110 programs. G trains on all 30 exemplars (only 2 real
+programs are held out now), H swaps them for `b11-stride30`, 35 programs / 71 001
+tokens against the exemplars' 72 216 (−1.7%). Corpora are 4 954 911 and 4 950 161
+tokens, 0.10% apart.
+
+| arm | real side | replacement | seed 0 | seed 1 |
+|---|---|---|---|---|
+| **G** | all 38 (30 exemplars train) | — | **2.5388** | **2.5000** |
+| **H** | 8 non-exemplar | b11-stride30 | 2.5472 | 2.5278 |
+
+| effect | seed 0 | seed 1 | paired mean |
+|---|---|---|---|
+| **H − G** (exemplar-free held-out) | +0.0084 | +0.0278 | **+0.0181** |
+
+**The effect survives.** Removing the held-out exemplars leaves 84% of it — +0.0181
+against the confounded +0.0216 — so the confound is worth roughly 0.0035 nats, a
+sixth of the total, not the whole thing. Both seeds keep the sign.
+
+Absolute losses here are **not** comparable to E/F1/F2 or to anything else in this
+note; the held-out set is different. Only the G − H delta is.
+
+### What that is worth per token
+
+The swap measures a **difference**, not an absolute: 0.0181 / 0.0722M = 0.25
+nats/Mtok. Getting the exemplar's own per-token value means adding back the generated
+baseline at this corpus size. Fitting loss ≈ a − b·ln(N) to E → D gives b ≈ 0.0995,
+so the *local* rate at 4.94M tokens is 0.020 nats/Mtok — not the 0.0172 average over
+the whole E → D step. That puts exemplars near 0.27 against 0.020:
+
+| measurement | held-out | per-token multiple |
+|---|---|---|
+| F1/F2 − E | includes 6 exemplars | ~20× |
+| **H − G** | exemplar-free | **~13×** |
+
+**Take the ~13×.** The confounded arms flatter the exemplars, exactly as expected.
+
+Three things it still does not license:
+
+- **It is a local derivative at ~1.3% of corpus.** The 200th hand-polished program
   would not be worth what the 1st was — diminishing returns apply to exemplars too,
-  for exactly the reason Task 1 just demonstrated for generated corpus. This does
-  not license "hand-write the corpus".
-- **In absolute terms batch11 still delivered more** — 0.031 nats against 0.022. Per
+  for exactly the reason Task 1 just demonstrated for generated corpus. This is not
+  an argument for hand-writing a corpus.
+- **In absolute terms batch11 still delivered more** — 0.031 nats against 0.018. Per
   token the exemplars win by an order of magnitude; per *hour spent* the two are
   probably comparable, and the exemplars' real edge is that the same session also
   produced 279 native tests and several genuine interpreter bugs, which generated
   corpus does not.
+- **This pair is the noisiest in the note.** G's own seed spread is 0.0388 — the
+  exemplar-free held-out set is a smaller, higher-variance metric. The paired
+  standard error on H − G is ≈ 0.010, so +0.0181 is ~1.9σ *on its own*. It is
+  believable because it is the fifth same-sign measurement, not because this pair
+  alone settles it.
 
 So this does not overturn the four consecutive "volume beats purity" findings. 24
-programs cannot *substitute* for 1.8M tokens. What they do is return far more per
-token than anything else in the corpus — if the confound survives testing.
-
-The confound runs *against* the result, which is worth stating: F1's slice carries
-43.2% comment tokens against the exemplars' 36.3%, and comments are known to help
-(stripping them cost 0.27 nats). F1 had the comment advantage and still lost.
+programs cannot *substitute* for 1.8M tokens. What they do is return roughly an order
+of magnitude more per token than anything else in the corpus.
 
 ## Caveats
 
-- **Six of the 116 held-out programs are exemplars — 4.29% of held-out bytes.** The
-  exemplar arm therefore gets in-distribution practice for a slice of what it is
-  scored on. For the whole +0.022 to be this confound, the model would have to be
-  0.51 nats better on those six programs alone. **A deconfounding pair (G/H) against
-  a 110-program exemplar-free held-out set was designed and launched but not
-  finished — see Open below. Until it lands, the Task 2 magnitude is a ceiling, not
-  a point estimate.**
+- **The held-out-exemplar confound is measured, not argued away** — G/H put it at
+  ~0.0035 nats of the 0.0216, and the deconfounded effect is +0.0181. But that pair
+  is the noisiest here (paired se ≈ 0.010, so ~1.9σ alone). The claim rests on five
+  same-sign measurements across two seeds, two held-out sets and three replacement
+  slices, not on any one of them.
 - **The held-out set is batch9-flavoured** — 108 of 116 programs are batch9, 8 are
   real, and it contains no batch10 or batch11 at all. So Task 1 measures "does more
   batch10/11 help on batch9-like data", the conservative framing, and Task 2's gate
@@ -269,34 +301,53 @@ The confound runs *against* the result, which is worth stating: F1's slice carri
   then came back in this note a week later. Post 79's transcription hop, caught in the
   act: a stale caveat is cheap to copy forward and nothing type-checks a note.
 
-## Open
+## What this leaves open — is drivel full, or is the corpus?
 
-The deconfounding pair, ready to run — the corpora are built and the leak check
-covers them:
+Task 1 says marginal corpus has stopped paying **for drivel**. Two readings, and
+they give opposite advice:
 
-```
-cargo xtask cram --real-root . --batch-dir corpora/batch9 --batch-dir corpora/batch10 \
-  --held-out-root corpora/heldout-noex --vocab-file corpora/kvetch-batch9.vocab \
-  --steps 30000 --eval-every 3000 --eval-batch 1024 --seed 0 --name drivel-G-ex-noexheld
-cargo xtask cram --real-root corpora/real-noex --batch-dir corpora/b11-stride30 \
-  --batch-dir corpora/batch9 --batch-dir corpora/batch10 \
-  --held-out-root corpora/heldout-noex --vocab-file corpora/kvetch-batch9.vocab \
-  --steps 30000 --eval-every 3000 --eval-batch 1024 --seed 0 --name drivel-H-swap-noexheld
-```
+- **Capacity-bound.** drivel at 1.05M params has extracted what it can; a bigger rung
+  would keep converting data into generalisation. → scale the rung, no generation
+  hours needed.
+- **Diversity-bound.** batch11 is the *same* 500-domain recipe sheet, so marginal
+  tokens are increasingly redundant and no model size fixes it. → diversify the
+  generator, which costs the scarcest resource this project has.
 
-...and the same two at `--seed 1`. G trains on all 30 exemplars (only 2 real
-programs are held out now); H swaps them for `corpora/b11-stride30`, 35 programs /
-71 001 tokens against the 30 exemplars' 72 216 (−1.7%). Verified corpus sizes:
-G 4 954 911 tokens, H 4 950 161 (0.10% apart). **G − H is comparable to F1 − E as a
-delta; the absolute losses are not comparable to anything else here, because the
-held-out set is different.**
+The curves lean toward capacity-bound. As corpus grows the train/held-out gap nearly
+halves while held-out barely moves:
+
+| arm | tokens | epochs | train (smoothed) | held-out | gap |
+|---|---|---|---|---|---|
+| B | 4.32M | 14.2 | 2.0736 | 2.5584 | **0.485** |
+| E | 4.94M | 12.4 | 2.2212 | 2.5639 | 0.343 |
+| D | 6.72M | 9.1 | 2.2471 | 2.5309 | **0.284** |
+
+Training loss *rises* 0.17 as data is added and the model memorises much less — the
+data is behaving like data — but held-out will not follow. That is what a capacity
+ceiling near 2.53 looks like. (Partly confounded with the epoch count falling, so
+suggestive rather than settled.)
+
+The prior agrees: at 6.72M tokens `quip` (3.05M params) sits at **2.2 tokens per
+parameter** against Chinchilla's 20, ~9× starved, where drivel at 6.4 is ~3× starved.
+And the standing "corpus first, not rung" advice comes from
+[batch9](batch9-findings.md#quip-3-the-parameters-buys-003-nats), where quip bought
+0.030 nats — **measured at 2.93M tokens, a corpus that has since grown 2.3×.** That
+answer is stale.
+
+Proposed: quip on the B corpus and the D corpus, two seeds each, 30k steps, same
+frozen vocab and held-out. Four runs, ~40 min each solo. It yields both numbers at
+once — `quip@D − drivel@D` (is scaling the rung worth it *now*?) and
+`(quip@D − quip@B)` against drivel's −0.025 (is the corpus or the model the binding
+constraint?).
 
 ## Artifacts
 
-Checkpoints and curves in `checkpoints/` (gitignored): `drivel-B-repro`,
-`drivel-B-repro-s1`, `drivel-E-b9b10full`, `drivel-E-b9b10full-s1`,
-`drivel-F1-stride`, `drivel-F1-stride-s1`, `drivel-F2-ratio`,
-`drivel-D-b9b10b11`, `drivel-D-b9b10b11-s1`.
+Checkpoints and curves in `checkpoints/` (gitignored), thirteen runs:
+`drivel-B-repro`, `drivel-B-repro-s1`, `drivel-E-b9b10full`,
+`drivel-E-b9b10full-s1`, `drivel-F1-stride`, `drivel-F1-stride-s1`,
+`drivel-F2-ratio`, `drivel-D-b9b10b11`, `drivel-D-b9b10b11-s1`,
+`drivel-G-ex-noexheld`, `drivel-G-ex-noexheld-s1`, `drivel-H-swap-noexheld`,
+`drivel-H-swap-noexheld-s1`.
 
 Derived corpora in `corpora/` (gitignored, all reproducible):
 
