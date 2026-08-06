@@ -284,16 +284,18 @@ issue — it is what hid the SBI `a1` clobber for weeks. See post 68.)
 
 ### Preconditions for unpinning
 
-1. **Make `Mid` force opt-1 explicitly, before removing the default.** `Mid` is
-   currently defined by *inheriting* `build.rs`'s pin —
-   `userspace_opt_override()` returns `None` for `Low`/`Mid`. Delete the pin and
-   `Mid` silently becomes opt-3, i.e. `Max`, and the ladder collapses from four
-   rungs to three. That would throw away the exact discrimination that closed this
-   entry: "opt-2 already broke it" vs "only opt-3 breaks it" is what made the
-   `memhog` bisect cheap. Fix: `OptLevel::Mid => Some("1")`, so the ladder stays
-   monotonic Low(0) → Mid(1) → Hi(2) → Max(3) and the pin becomes a *selectable
-   regime* rather than an invisible default. Do this first, as its own change; it
-   is behaviour-preserving and independently correct.
+1. ~~**Make `Mid` force opt-1 explicitly, before removing the default.**~~ **DONE
+   2026-08-06.** `Mid` was defined by *inheriting* `build.rs`'s pin —
+   `userspace_opt_override()` returned `None` for `Low`/`Mid` — so deleting the pin
+   would have silently made `Mid` opt-3, i.e. `Max`, collapsing the ladder from four
+   rungs to three and throwing away the exact discrimination that closed this entry
+   ("opt-2 already broke it" vs "only opt-3 breaks it" is what made the `memhog`
+   bisect cheap). `OptLevel::Mid => Some("1")` now, so the ladder is monotonic
+   Low(0) → Mid(1) → Hi(2) → Max(3) by declaration and the pin is a *selectable
+   regime* rather than an invisible default. Behaviour-preserving, as predicted:
+   `cargo xtask itest` unchanged at 130/130. `Low` deliberately stays `None` — the
+   pin lives inside `build.rs`'s `profile == "release"` branch, so a debug kernel
+   builds a debug userspace and an override there would go unread.
 2. **Decide what exercises the level nobody defaults to.** There is no CI in this
    repo (no `.github/workflows`) — the gate is whatever a human runs. Today the
    default gate run is `Mid`, so opt-1 is exercised constantly and opt-2/3 only

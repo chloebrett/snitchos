@@ -97,14 +97,14 @@ pub fn base_command_ex(
 ///   whole suite (supervision included) is green here, so a Low failure is a real
 ///   logic bug, not a codegen artifact. (The old note that "supervision fails under
 ///   Low" predates supervision being built — it's now green.)
-/// - **Mid** — release kernel (opt-3) with the embedded userspace pinned to opt-1,
-///   by *inheriting* `build.rs`'s default rather than asking for it. Fast (the
-///   former `--release`), but this is where **release-codegen-vs-debug divergences
-///   surface under snemu**: a scenario green under Low + QEMU can still fail here.
-///   (The pin was added to dodge a "userspace opt≥2 UB class" that does not exist —
-///   docs/debt-register.md #16. Note the inheritance: dropping the `build.rs`
-///   default silently turns `Mid` into `Max`, which is why unpinning starts by
-///   making this rung force opt-1 explicitly.)
+/// - **Mid** — release kernel (opt-3) with the embedded userspace at opt-1, asked
+///   for explicitly. Fast (the former `--release`), but this is where
+///   **release-codegen-vs-debug divergences surface under snemu**: a scenario green
+///   under Low + QEMU can still fail here. (opt-1 originated as a pin dodging a
+///   "userspace opt≥2 UB class" that does not exist — docs/debt-register.md #16.
+///   This rung used to *inherit* that pin rather than name it, so deleting the
+///   `build.rs` default would have silently turned `Mid` into `Max`; it now names
+///   its own level, which is precondition 1 of unpinning.)
 /// - **Hi** — release kernel, userspace at opt-**2**. Distinct from `Max` so a
 ///   bisect can tell "opt-2 already broke it" (fewer transforms to blame) from
 ///   "only opt-3 breaks it" — which is exactly how debt #16 was closed.
@@ -130,13 +130,22 @@ impl OptLevel {
         !matches!(self, OptLevel::Low)
     }
 
-    /// The userspace opt-level this regime forces via `SNITCHOS_USERSPACE_OPT`,
-    /// or `None` to leave `build.rs`'s default (opt-1) in place. `Low`/`Mid` take
-    /// the default; `Hi`/`Max` raise it. (`Hi`/`Max` were "opt in to the
+    /// The userspace opt-level this regime forces via `SNITCHOS_USERSPACE_OPT`.
+    ///
+    /// Every release rung names its own level rather than inheriting one. `Mid`
+    /// used to return `None` and take `build.rs`'s opt-1 default, which made the
+    /// rung's identity live in another crate: deleting that default would have
+    /// silently turned `Mid` into `Max` and collapsed the ladder to three rungs.
+    /// Now the ladder is legible here. (`Hi`/`Max` were once "opt in to the
     /// UB-exposing levels on purpose"; that class was disproven — debt #16.)
+    ///
+    /// `Low` is `None` because `build.rs` only reads the variable inside its
+    /// `profile == "release"` branch — a debug kernel builds a debug userspace,
+    /// and an override here would be a value nothing consults.
     fn userspace_opt_override(self) -> Option<&'static str> {
         match self {
-            OptLevel::Low | OptLevel::Mid => None,
+            OptLevel::Low => None,
+            OptLevel::Mid => Some("1"),
             OptLevel::Hi => Some("2"),
             OptLevel::Max => Some("3"),
         }
@@ -195,9 +204,11 @@ pub fn build_kernel_profiled(
     if opt.is_release() {
         cmd.arg("--release");
     }
-    // `Hi`/`Max` lift the embedded userspace to opt-2/opt-3; the kernel's `build.rs`
-    // reads this to override its default opt-1 userspace pin (so `Low`/`Mid` leave it
-    // unset and get the pin). Building the UB class on purpose is the point of both.
+    // Every release rung states its embedded-userspace opt level (1/2/3) and the
+    // kernel's `build.rs` obeys it, so the rung is legible from here rather than
+    // half-defined by a default in another crate. `Low` sets nothing: `build.rs`
+    // reads this only in its release branch, so a debug kernel gets a debug
+    // userspace and a value here would go unread.
     if let Some(us_opt) = opt.userspace_opt_override() {
         cmd.env("SNITCHOS_USERSPACE_OPT", us_opt);
     }
@@ -226,14 +237,28 @@ mod tests {
         assert!(OptLevel::Max.is_release());
     }
 
+    /// **Every release rung names its own userspace opt level.** `Mid` used to
+    /// return `None` and inherit `build.rs`'s opt-1 default, which made the rung
+    /// invisible from here: deleting that default would silently turn `Mid` into
+    /// `Max` and collapse the four-rung ladder to three, taking with it the
+    /// "opt-2 already broke it" vs "only opt-3 breaks it" discrimination that
+    /// closed docs/debt-register.md #16. Declaring it is precondition 1 of
+    /// unpinning, and is behaviour-preserving: `build.rs` already defaults to `1`.
     #[test]
-    fn userspace_opt_override_climbs_the_ladder() {
-        // Low/Mid inherit build.rs's default (opt-1) pin; Hi/Max raise it explicitly.
-        // If `Mid` ever returns `Some("1")` instead of `None`, that is the unpinning
-        // work from docs/debt-register.md #16 — and this assertion is where it starts.
-        assert_eq!(OptLevel::Low.userspace_opt_override(), None);
-        assert_eq!(OptLevel::Mid.userspace_opt_override(), None);
+    fn every_release_rung_declares_its_userspace_opt_level() {
+        assert_eq!(OptLevel::Mid.userspace_opt_override(), Some("1"));
         assert_eq!(OptLevel::Hi.userspace_opt_override(), Some("2"));
         assert_eq!(OptLevel::Max.userspace_opt_override(), Some("3"));
+    }
+
+    /// `Low` is the exception, and not by omission: `build.rs` only consults
+    /// `SNITCHOS_USERSPACE_OPT` inside its `profile == "release"` branch, so a
+    /// debug kernel builds a **debug** userspace (opt-0) and an override here
+    /// would be a value nothing reads. The ladder is monotonic Low(0) → Mid(1) →
+    /// Hi(2) → Max(3); only the top three rungs express that through this knob.
+    #[test]
+    fn the_debug_rung_has_no_override_because_nothing_would_read_it() {
+        assert_eq!(OptLevel::Low.userspace_opt_override(), None);
+        assert!(!OptLevel::Low.is_release());
     }
 }

@@ -168,10 +168,11 @@ fn build_and_embed_user(kernel_dir: &str) {
             // The pin therefore survives on inertia, not evidence — but removing it
             // is still not a one-liner. Three things first, in order (the register
             // has the long version):
-            //   1. `OptLevel::Mid` (xtask-qemu) is defined by *inheriting* this
-            //      default, so deleting the line silently turns `Mid` into `Max` and
-            //      collapses the bisect ladder that closed #16. Make `Mid` force
-            //      opt-1 explicitly first.
+            //   1. DONE. `OptLevel::Mid` (xtask-qemu) used to be defined by
+            //      *inheriting* this default, so deleting the line would silently
+            //      have turned `Mid` into `Max` and collapsed the bisect ladder that
+            //      closed #16. Every release rung now names its own level, so this
+            //      default is only ever reached by a caller that sets no env var.
             //   2. Decide what exercises whichever level stops being the default —
             //      there is no CI here, and today's gate runs `Mid`, so unpinning
             //      means opt-1 stops being run at all.
