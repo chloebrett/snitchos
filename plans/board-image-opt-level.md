@@ -116,12 +116,18 @@ default. An unknown level is a parse error, not a silent fallback.
 **REFACTOR**: None expected.
 **Done when**: parse tests green, both levels produce an image, `cargo xtask test` green.
 
-> **⚠ One decision needs approval before this step: what is the default?**
-> `max` removes the footgun — a debug board image has now hidden two release-only
-> bugs and silently overwrote a hand-built optimized one — but it changes what every
-> existing `cargo xtask image` produces, and with no CI the gate is whatever a human
-> runs. Recommendation: **default `max`, keep `--opt low` for bring-up.** Do not write
-> code for this step until it is settled.
+> **DECIDED 2026-08-06: the default is `Max`** — opt-3 kernel *and* opt-3 userspace.
+> `--opt low` stays available for bring-up.
+>
+> Why, given `Mid` is the better-tested level (the default itest gate runs it every
+> day, where opt-3 userspace is only exercised on demand): **drivel's forward pass
+> runs in userspace**, so the userspace opt level is not a detail of this plan, it is
+> the plan. `Mid` would ship a release kernel wrapped around an opt-1 transformer and
+> leave most of the win on the table.
+>
+> The cost is accepted knowingly: this changes what every existing `cargo xtask image`
+> produces, and `vf2` + release is untested either way (see "Risk"). Step 4 is what
+> discharges it, and it is why step 4 is a step.
 
 ### Step 4: prove it on hardware, and record both numbers
 

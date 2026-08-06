@@ -41,6 +41,23 @@ enum Cmd {
         /// `itest-workloads` and are inert in a board image.
         #[arg(long)]
         workload: Option<String>,
+
+        /// Build regime, defaulting to `max` — opt-3 kernel **and** opt-3
+        /// userspace.
+        ///
+        /// The default used to be `low`, which is a debug kernel *and* a debug
+        /// userspace: `kernel/build.rs` only passes `--release` to its nested
+        /// userspace build in a release profile, so every board image shipped an
+        /// opt-0 userspace. For a compute-bound workload that is the whole cost —
+        /// `workload=stitch-drivel` runs its transformer forward pass in
+        /// userspace. See docs/debt-register.md #19.
+        ///
+        /// `--opt low` is still the right choice for bring-up, where `ph!` markers
+        /// and single-stepping want unoptimized code. Note that release codegen is
+        /// the regime both the `tp` truncation and the SBI `a1` clobber lived in,
+        /// and that they were hidden *because* board images were debug builds.
+        #[arg(long, value_enum, default_value_t = qemu::OptLevel::Max)]
+        opt: qemu::OptLevel,
     },
     /// Everything that runs the kernel under the snemu emulator: the
     /// meta-loop driver (`boot`), the QEMU differential oracle (`diff`), the
@@ -531,6 +548,46 @@ mod cli_surface_tests {
         assert!(Cli::try_parse_from(["xtask", "not-a-real-command"]).is_err());
     }
 
+    /// **A board image is optimized unless you ask otherwise.**
+    ///
+    /// The default was `Low` — a debug kernel wrapped around an *opt-0* userspace,
+    /// because `build.rs` only passes `--release` to the nested userspace build in a
+    /// release kernel profile. That is the regime that hid the `tp` truncation and
+    /// the SBI `a1` clobber, and it silently overwrote a hand-built optimized image
+    /// (docs/debt-register.md #19). Flipping the default is the point of the flag;
+    /// a flag nobody remembers to pass would have fixed nothing.
+    #[test]
+    fn a_board_image_is_optimized_by_default() {
+        let cli = Cli::try_parse_from(["xtask", "image"]).expect("bare image parses");
+        let Cmd::Image { opt, .. } = cli.cmd else { panic!("expected Image") };
+        assert_eq!(opt, qemu::OptLevel::Max);
+    }
+
+    /// ...and debug stays reachable, because bring-up wants it: an unoptimized
+    /// kernel is what `ph!` markers and single-stepping are legible in.
+    #[test]
+    fn a_board_image_can_still_be_asked_for_at_any_rung() {
+        for (arg, want) in [
+            ("low", qemu::OptLevel::Low),
+            ("mid", qemu::OptLevel::Mid),
+            ("hi", qemu::OptLevel::Hi),
+            ("max", qemu::OptLevel::Max),
+        ] {
+            let cli = Cli::try_parse_from(["xtask", "image", "--opt", arg])
+                .unwrap_or_else(|e| panic!("--opt {arg} should parse: {e}"));
+            let Cmd::Image { opt, .. } = cli.cmd else { panic!("expected Image") };
+            assert_eq!(opt, want, "--opt {arg}");
+        }
+    }
+
+    /// A misspelled level must fail loudly rather than fall back to a default —
+    /// the failure mode being avoided is flashing a board with a build you did not
+    /// ask for and cannot tell apart from the one you wanted.
+    #[test]
+    fn an_unknown_opt_level_is_refused_rather_than_defaulted() {
+        assert!(Cli::try_parse_from(["xtask", "image", "--opt", "turbo"]).is_err());
+    }
+
     /// `stack` stays a native subcommand group in lean `xtask`, so it still
     /// rejects a missing or bogus member. (`diagram` is now a passthrough — its
     /// validation moved to `xtask-itest`.)
@@ -621,7 +678,7 @@ fn main() -> ExitCode {
     scrub_inherited_cargo_env();
     match Cli::parse().cmd {
         Cmd::Build => build(),
-        Cmd::Image { workload } => image(workload.as_deref()),
+        Cmd::Image { workload, opt } => image(workload.as_deref(), opt),
         Cmd::Snemu { args } => delegate_itest("snemu", &args),
         Cmd::Boot { features, workload, burst, ramfb, display } => {
             boot(&features, workload.as_deref(), burst, ramfb, display.as_deref())
@@ -825,7 +882,7 @@ mod image_feature_tests {
 /// for U-Boot `booti` on the VisionFive 2. The 64-byte Image header is embedded at
 /// the start of the kernel by `entry.S`, so this is a straight ELF→binary copy —
 /// no header to prepend, so the kernel's link addresses stay intact.
-fn image(workload: Option<&str>) -> ExitCode {
+fn image(workload: Option<&str>, opt: qemu::OptLevel) -> ExitCode {
     // Board build: RAM base 0x4000_0000 (the `vf2` feature), and nothing else —
     // `--workload` deliberately does NOT imply `itest-workloads`. Every build
     // reads `/chosen/bootargs`, so real workloads (`stitch-repl`, `userspace`,
@@ -841,10 +898,9 @@ fn image(workload: Option<&str>) -> ExitCode {
     }
     // One binding, used twice: the profile we build and the ELF we objcopy cannot
     // disagree. They used to — `build_kernel` (debug) and a hardcoded
-    // `kernel_bin(false)` were independent statements of the same fact, which is
-    // harmless only while there is exactly one level to choose. `--opt` is what
-    // makes it dangerous, so this lands first.
-    let opt = qemu::OptLevel::Low;
+    // `kernel_bin(false)` were independent statements of the same fact, which was
+    // harmless only while there was exactly one level to choose. `--opt` is what
+    // made it dangerous, which is why it landed second.
     let status =
         qemu::build_kernel_profiled(&image_features(workload), opt).expect("failed to invoke cargo");
     if !status.success() {
