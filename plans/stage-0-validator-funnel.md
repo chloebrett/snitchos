@@ -1,9 +1,79 @@
 # Stage 0 — the validator funnel (TDD plan)
 
-**Status:** 📐 **PLAN — not started.** Stage 0 of the bootstrap table in
+**Status:** 🟡 **PARTLY DELIVERED — the funnel is built and in daily use; the diversity
+and augmentation half is not.** Stage 0 of the bootstrap table in
 [../docs/generative-ladder.md](../docs/generative-ladder.md). Pure host work, no
 model calls, no GPU: the harness that decides whether a generated candidate is a
 training token or garbage, and *reports why* when it is garbage.
+
+**Everything downstream was blocked on this, and is now unblocked.** The funnel exists,
+three batches (~2 900 candidates) have run through it, and drivel trains on the result.
+What landed did so **inside `cram-gen` and `stitch/src/gate.rs`** rather than as the
+planned standalone `sift` crate — the corpus MVP needed a working gate before this plan
+was picked up, so the gate was built where it was needed. See
+[corpus-mvp.md](corpus-mvp.md) for that side.
+
+**Splitting out `sift` is still open**, and so is the rest of the backlog below. Nothing
+here has been cancelled; increments 4–8 and 11 are simply unbuilt.
+
+## Increment status, checked against the tree 2026-08-06
+
+| # | increment | status |
+|---|---|---|
+| 1 | funnel report, end to end | ✅ in substance — `Outcome` (`stitch/src/gate.rs`) + `Tally` (`cram-gen`). Not the planned `Funnel`/`Verdict` structs, and the report is a `Display` line plus a JSON manifest rather than a diffable struct |
+| 2 | the type stage | 🟡 built, but **`canon.rs` does not call it** — see below |
+| 3 | the run stage | ✅ built — `Outcome::Tests`, the candidate's own native `test` items, fuel-capped with `Verdict::Exhausted` as its own cause |
+| 4 | alpha-normalization | ❌ unbuilt |
+| 5 | MinHash dedup | ❌ unbuilt — and there is no exact dedup either |
+| 6 | production coverage + curve | ❌ unbuilt |
+| 7 | per-recipe yield + dedup rate | 🟡 the *data* exists (every manifest row carries domain/size/shape), and the findings notes analyse it by hand; no built-in report |
+| 8 | distribution-vs-real deltas | ❌ unbuilt — computed ad hoc in the findings notes (comment share, median bytes, degenerate-file counts, a Jaccard leak check) |
+| 9 | the recipe-tuple generator | ✅ built — `cram-gen/src/recipe.rs`, as frozen per-batch sheets rather than a live crossing sampler |
+| 10 | CLI + machine-readable report | 🟡 JSON manifest per batch; **no `cargo xtask cram sift` verb** — generation is `cargo xtask cram --gen` |
+| 11 | the augmentation tier | ❌ unbuilt |
+
+### Increment 2's actual requirement is unmet, and it matters
+
+The increment says: *"Lift `canon.rs`'s logic into the funnel and **have `canon.rs` call
+it**, so the two cannot drift."*
+
+The lift happened; the call did not. `stitch/src/gate.rs:64-73` and
+`stitch/tests/canon.rs:39-44` are two independent spellings of the same chain —
+`parse_program` → `lower_items_to_core` → `check_program` filtered to `Severity::Error`.
+`gate.rs`'s own doc comment asserts *"The chain matches `tests/canon.rs` exactly"*, which
+is a claim with nothing enforcing it — the same shape as the `satp_for` double-encode
+(debt #13) and post 70's sink-bypass. **Making `canon.rs` call `gate::run` is a small
+change and closes the increment as written.**
+
+### Two decisions the code has quietly made
+
+- **Untested candidates pass the gate.** Increment 3 below says a candidate with no
+  `test` items must die at the run stage — *"an untested candidate is not a validated
+  token."* `gate.rs` returns `Ok { tests }` with `tests == 0` allowed. **Open question,
+  not yet settled:** whether the rule was deliberately relaxed (the corpus is trained on
+  parse-dead candidates too, so the bar for "validated" moved generally) or whether the
+  gate silently stopped enforcing it. Worth deciding before the next batch, since it
+  changes what "ok" means in every manifest written so far.
+- **The no-floats constraint is obsolete.** Increment 3 says the funnel should reject
+  float literals because userspace FP is illegal and panics the kernel. Userspace FP has
+  since shipped, including context switching, so that restriction should be lifted rather
+  than implemented.
+
+### What the volume knee changes about the backlog
+
+[../notes/batch11-training-findings.md](../notes/batch11-training-findings.md) measured
+that corpus volume has largely stopped paying — +55.7% more corpus bought 0.025 nats,
+against +47% buying 0.111 one batch earlier. Everything unbuilt in this plan (dedup,
+coverage curve, distribution deltas, augmentation) is a **diversity** instrument, and
+diversity is the axis nobody has measured, so this backlog is arguably more valuable now
+than when it was written. Two specific hooks:
+
+- batch11's own analysis found domains collapsing toward ~8 structural archetypes.
+  Increment 5's per-recipe dedup rate is the instrument designed to catch exactly that,
+  and it is the one that would say whether the axes are mined out.
+- Increment 11's augmentation tier is a 2–4× multiplier on survivors that costs no
+  generation wall-clock — which is a different lever from "generate more", and the one
+  the volume finding does *not* rule out.
 
 Related: [../docs/generative-ladder.md](../docs/generative-ladder.md) (the
 bootstrap table, the per-batch report spec, the canon stratum),
@@ -27,6 +97,12 @@ Concretely: `cargo xtask cram sift <candidates>` prints the funnel, the coverage
 curve, per-recipe yield, and the distribution deltas — for a batch of
 hand-written fixtures, before a single model call exists. That is the whole
 Stage 0 deliverable.
+
+**Partly met.** The funnel is emitted per batch (human line + JSON manifest) and has run
+over three real batches. The coverage curve, per-recipe yield report and distribution
+deltas are not built, and the verb is `cargo xtask cram --gen`, not `sift`. The
+"before a single model call exists" ordering did not survive contact — the gate was built
+because generation needed it, not ahead of it.
 
 ## What it is not
 
@@ -61,7 +137,14 @@ A single number collapses four different actions into one shrug.
 
 ## The name
 
-**`sift`** — the crate, and `cargo xtask cram sift` the verb.
+**`sift`** — the crate, and `cargo xtask cram sift` the verb. **Neither was taken**, and
+splitting one out remains an open option rather than a settled plan. What exists instead:
+the gate in `stitch/src/gate.rs` (which is where `bin/check.rs` and the corpus pipeline
+both want it), the funnel bookkeeping in `cram-gen`, and generation under
+`cargo xtask cram --gen`. Decision 3 below — "a new `sift` crate, depending on `stitch`
+only" — is therefore *unimplemented*, not *rejected*; the argument for it (keep the
+funnel usable by things that aren't training, keep `cram-corpus`'s job single) still
+holds, and increments 4–8 are the work that would justify a crate of its own.
 
 ## Decisions
 

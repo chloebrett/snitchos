@@ -1,8 +1,98 @@
 # Corpus MVP — get a local model writing real Stitch
 
-**Status: 📐 PLAN — not started.** A deliberate thin vertical slice through
-Stages 0–2 of the bootstrap, optimised for *seeing an LM emit semantic Stitch
-this week*, not for corpus quality.
+**Status: ✅ DELIVERED — the gate is passed, by a wide margin.** A deliberate thin
+vertical slice through Stages 0–2 of the bootstrap, optimised for *seeing an LM emit
+semantic Stitch this week*, not for corpus quality.
+
+The plan's own gate (below) asked for **500k validated tokens** and for drivel trained on
+them to beat babble-trained drivel on held-out masked NLL and unconstrained parse rate.
+Actual: **~6.7M tokens** across batch9/10/11, and drivel at **2.5309** held-out NLL
+against the uniform-over-legal floor of 2.742 — not a marginal win, a different regime.
+The pipeline it was a tracer bullet for now runs unattended for 15-hour batches.
+
+**Where it lives:** `cram-gen` (the harness crate — `Model` trait, extraction, the
+correction guard, recipes, prompt), `stitch/src/gate.rs` (the gate), and
+`xtask-cram/src/generate.rs` (the driver, behind `cargo xtask cram --gen`). The
+`sift` name was never taken; see [stage-0-validator-funnel.md](stage-0-validator-funnel.md).
+
+## Increment status, checked against the tree 2026-08-06
+
+| # | increment | status |
+|---|---|---|
+| 0 | the spike | ✅ done — [corpus-mvp-spike.md](corpus-mvp-spike.md) carries the findings, which are cited throughout `cram-gen` |
+| 1 | the gate, as a library function | ✅ done — `stitch/src/gate.rs`, and it goes **further** than scoped (see below) |
+| 2 | candidate extraction | ✅ done — `extract`, plus `<think>`-block stripping the plan didn't anticipate |
+| 3 | the recipe tuple | ✅ done — `cram-gen/src/recipe.rs` + frozen per-batch sheets |
+| 4 | the prompt builder | 🟡 done, differently — see below |
+| 5 | the runner, single-stream | 🟡 done; the **disk response cache was never built** |
+| 6 | dedup and corpus append | 🟡 append + recipe tagging + death-stage reporting done; **no dedup of any kind** |
+| 7 | constrained decoding | ⏸ not built — demoted to a future direction, see below |
+| 8 | batching | ⛔ externally blocked — LM Studio does not batch, measured on both backends |
+| 9 | the report | 🟡 the funnel tally and a JSON manifest exist; no `sift` verb |
+
+### Where the implementation went further than the plan
+
+- **The gate runs the candidate's own tests.** This plan explicitly *skipped* the
+  run/test stage ("execution adds failure modes for little MVP value"). It is built
+  anyway, because [stitch-native-tests.md](stitch-native-tests.md) landed `test`/`expect`
+  in the meantime, so `Outcome` is `Parse | Type | Tests | Ok` — the full Stage-0 funnel,
+  not the MVP's two-stage cut.
+- **A recipe sheet is frozen once a batch has been generated from it.** Not in this plan
+  at all; it came out of batch9's findings being unreadable after the axes were edited in
+  place. `assets/recipes/{batch9,batch10}.toml`, selected by `--recipes`.
+- **Corrections are captured as labelled pairs** — what the model wanted beside what the
+  language allowed — which the plan hoped Increment 7 might eventually produce. The
+  guard produces them today, and they are the repair-trace material
+  [../docs/kvetch-rl-design.md](../docs/kvetch-rl-design.md) §5 expected to have to
+  manufacture.
+
+### Where it diverged, deliberately
+
+- **Exemplars are fixed, not recipe-matched.** Increment 4 called recipe-matched
+  exemplar selection "the highest-leverage cheap trick here" and proposed bucketing
+  recipes by exemplar set to claw back prefix caching. What shipped is two fixed
+  exemplars (`fs-image/lib/{text,stats}.st`) plus the reference and the prelude,
+  `include_str!`d from their real locations so they cannot drift. That gives a
+  **fully invariant prefix** — better caching than the bucketing scheme, at the cost of
+  the matching. Whether matching is worth reintroducing is now a live question, since
+  batch11 measured hand-polished exemplars at ~20× per token.
+- **Salvage was not built.** Increment 1 wanted parse-failures truncated to their longest
+  parsing prefix and trivially repaired. The correction guard makes this mostly moot — it
+  intervenes *during* generation rather than repairing afterwards — but the "longest
+  parsing prefix" idea is unbuilt and the `long`-capped candidates are kept whole.
+- **Type-failures and parse-failures are all kept.** The plan proposed keeping
+  type-failures as a logged stratum and warned "do not train drivel on non-parsing text".
+  Measurement overruled the warning: dropping parse-dead candidates **cost 0.37 nats**.
+  Everything is kept and trained on. See [../notes/batch9-findings.md](../notes/batch9-findings.md).
+
+### Increment 7 — constrained decoding, demoted
+
+Not built, and **no longer tracked as an increment**. It stays on record as a possible
+future direction rather than outstanding work.
+
+The reason it was called "the biggest lever" was that it collapses the parse-yield term
+to ~100%. Parse yield is no longer the binding constraint: the correction guard took
+parse deaths from 45% to 14% without touching logits, and batch11 then measured that
+corpus *volume* — not yield, not quality — is what moves the gate metric, and that volume
+itself has largely stopped paying. A lever aimed at a term that no longer dominates.
+
+The upgrade path is preserved in code (`cram-gen/src/lib.rs`, `run_once_guarded`'s doc
+comment): on abandonment, re-request that one position with `top_logprobs`, drop what
+`is_doomed` rejects, splice the best survivor. A few round-trips per program rather than
+a few thousand. Worth having written down; not worth doing now.
+
+### Open, and not resolved by this plan
+
+- **No dedup at all** — not exact, not near. Increment 6 asked for exact dedup and got
+  none; the near-duplicate question belongs to
+  [stage-0-validator-funnel.md](stage-0-validator-funnel.md)'s unbuilt MinHash increment.
+  Given batch11's finding that domain axes collapse to ~8 structural archetypes, this is
+  the gap most likely to matter.
+- **No model-response cache**, so re-running the gate or the extractor over a batch costs
+  generation time. The `.raw.md` files saved beside each candidate are a partial
+  substitute nobody has built a re-scoring path over.
+- **The abandon-path byte-cap leak** — the unguarded finishing completion never learned
+  about `max_bytes`, so ~15 files per batch escape the cap. Ten-line fix, still open.
 
 Related: [../docs/generative-ladder.md](../docs/generative-ladder.md) (the full
 bootstrap table this shortcuts), [stage-0-validator-funnel.md](stage-0-validator-funnel.md)
@@ -623,7 +713,17 @@ The principled version, once there is output worth analysing.
 
 ---
 
-## The gate for this plan
+## The gate for this plan — ✅ PASSED, by a wide margin
+
+**Result:** ~6.7M tokens (13× the target) across batch9/10/11; drivel at **2.5309**
+held-out masked NLL against the uniform-over-legal floor of 2.742 and babble's 5.395.
+The original bar — "a model that is barely better than no model is a complete success
+here" — was cleared so thoroughly that the interesting question moved on twice: first to
+which corpus properties pay ([../notes/batch10-training-findings.md](../notes/batch10-training-findings.md)),
+then to the fact that **volume has largely stopped paying**
+([../notes/batch11-training-findings.md](../notes/batch11-training-findings.md)).
+
+*Original text:*
 
 500k validated tokens exist, and **drivel trained on them beats
 babble-trained drivel** on:

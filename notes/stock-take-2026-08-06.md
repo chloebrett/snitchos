@@ -1,5 +1,15 @@
 # Stock-take, 2026-08-06
 
+> **Superseded in part, within hours — by design.** Since this was committed
+> (`07d1658`) the tree has moved: debt **#16's first precondition is DONE**
+> (`OptLevel::Mid => Some("1")`, so the four-rung ladder is declared rather than
+> inherited), debt **#19 has a plan** ([../plans/board-image-opt-level.md](../plans/board-image-opt-level.md)),
+> and three of the Stitch gaps §2C lists now have plans of their own
+> ([stitch-language-improvements.md](../plans/stitch-language-improvements.md),
+> [stitch-map-you-can-build.md](../plans/stitch-map-you-can-build.md)) with work in
+> flight in `stitch/src/natives.rs`. Per-item corrections are inline below. A
+> stock-take is a snapshot, and this line exists so nobody reads it as a standing claim.
+
 Where the project is, what's genuinely in flight, and what's dangling. Written by
 reading `plans/` status headers, `docs/debt-register.md`, `docs/roadmap-and-milestones.md`,
 `notes/loose-ends-2026-07-29.md`, `notes/batch11-training-findings.md`, and posts
@@ -93,6 +103,11 @@ The stitch-18 batch left a specific, well-characterised list open:
   to method calls and higher-order calls entirely.** This is the one that reads as a real
   inconsistency rather than a documented gap.
 
+**Update (same day):** this list is no longer just a list — `Map` construction now has
+[stitch-map-you-can-build.md](../plans/stitch-map-you-can-build.md) and the rest are
+scoped in [stitch-language-improvements.md](../plans/stitch-language-improvements.md),
+with work in flight in `stitch/src/natives.rs`.
+
 ### D. VisionFive 2 — booting, mostly blocked on one driver
 
 M1 first light achieved on hardware. UART telemetry (M2) and UDP telemetry (M2.5) are
@@ -121,6 +136,33 @@ machinery is pure overhead. Pays for audio and on-target Stitch floats, not just
 `cram-gen` produced batch10 and batch11 against a frozen recipe sheet: parse deaths
 45% → 15% → 14%, wall clock 87s → 59s per candidate. The `long` cap, `abandoned` field,
 and incremental manifest writes all landed.
+
+**`corpus-mvp.md` is delivered and its gate passed by 13×** — it asked for 500k validated
+tokens and drivel beating babble-trained drivel; there are ~6.7M tokens and drivel sits
+at 2.5309 against the 2.742 uniform floor. Three named gaps survive it: **no dedup of any
+kind** (increment 6), **no model-response cache** (increment 5), and **exemplars are
+fixed rather than recipe-matched** (increment 4 — the fixed pair buys a fully invariant
+prompt prefix instead, which is better caching than the plan's bucketing scheme, but it
+forgoes matching just as batch11 measured exemplars at ~20×/token). Increment 7,
+constrained decoding, is **demoted from "the biggest lever" to a recorded future
+direction** — it collapses the parse-yield term, and parse yield stopped being the
+binding constraint the moment the rewind guard took deaths to 14%.
+
+**`stage-0-validator-funnel.md` is partly delivered.** The funnel is built and in daily
+use — but it landed inside `cram-gen` + `stitch/src/gate.rs` rather than as the planned
+standalone `sift` crate, because the corpus MVP needed a gate before this plan was picked
+up. Increments 1–3, 9 are done (and the run stage is *better* than scoped, since native
+`test`/`expect` landed in time). Increments 4–8 and 11 — alpha-normalization, MinHash
+dedup, the production-coverage curve, the per-recipe yield report, distribution-vs-real
+deltas, and the augmentation tier — are unbuilt. Splitting out `sift` remains open.
+
+**That backlog is worth more now than when it was written.** Everything unbuilt in it is
+a *diversity* instrument, and diversity is the axis nobody has measured — while volume,
+the axis that was carrying everything, has just stopped paying. batch11's own analysis
+noticed domains collapsing toward ~8 structural archetypes, which is exactly what
+increment 5's per-recipe dedup rate exists to detect. Increment 11's augmentation tier is
+also the one lever the volume finding does *not* rule out: a 2–4× multiplier on survivors
+that costs no generation wall-clock.
 
 ---
 
@@ -162,11 +204,13 @@ shape. Three arcs have now bumped into it.
 Correctness gaps and deferred placeholders that are current:
 
 - **#16 — the opt-1 userspace pin.** No longer a mystery; now a *decision* with three
-  written preconditions: make `Mid` force opt-1 explicitly (else deleting the pin
-  silently collapses `Mid` into `Max` and the four-rung ladder becomes three), decide
-  what exercises whichever level stops being the default (there is no CI; the gate is
-  what a human runs), and guard the latent FS talc-OOM symptom before removing the thing
-  that would mask it. Its tell is a flood of 68 KiB `MapAnon`s.
+  written preconditions. **Precondition 1 landed 2026-08-06** — `OptLevel::Mid =>
+  Some("1")`, so the ladder is monotonic Low(0) → Mid(1) → Hi(2) → Max(3) by declaration
+  instead of by inheriting `build.rs`'s default, and the pin is a selectable regime
+  rather than an invisible one. Behaviour-preserving, as predicted. **Still open:**
+  deciding what exercises whichever level stops being the default (there is no CI; the
+  gate is what a human runs), and guarding the latent FS talc-OOM symptom before removing
+  the thing that would mask it. Its tell is a flood of 68 KiB `MapAnon`s.
 - **#17 — the canon's 89 native tests (plus 279 in `examples/`) have never run on
   target.** The canon stratum's whole justification is "validated by use"; that holds for
   the programs and not for their test suites. Closing it *is* stitch-native-tests
@@ -180,6 +224,10 @@ Correctness gaps and deferred placeholders that are current:
   `cargo xtask image` silently overwrites it**. Note that landing this makes release
   `vf2` images routine — and that regime is where both the `tp`-truncation and the SBI
   `a1`-clobber bugs lived, the latter hidden *precisely because* board images are debug.
+  **Now has a plan** ([../plans/board-image-opt-level.md](../plans/board-image-opt-level.md)),
+  which adds the detail that `Low` passes no `--release`, so the embedded userspace is
+  **opt-0** rather than the opt-1 I assumed — and that the hand-built opt-3 image has
+  never been recorded as booting, so optimized-on-hardware is unproven.
 - **#8/#9/#10** — one-flavour `kernel::sync`, the `TX_STAGING` hack, hardcoded QEMU-`virt`
   MMIO + the parked DTB walk. All genuine deferrals.
 
@@ -233,6 +281,18 @@ The original findings:
 9. **The itest scenario count.** Posts 71–80 and several plans quote **130**; the
    harness reports **132**. Each quote was true when written. Worth noting because it is
    the benign version of the same drift — a number copied forward past its source.
+10. **`plans/corpus-mvp.md` and `plans/stage-0-validator-funnel.md`** — both said
+    "📐 PLAN — not started". The first is delivered with its gate passed 13× over; the
+    second is partly delivered. Both now carry per-increment status tables.
+
+    **This one is worth recording as a method failure, not just a stale header.** In the
+    first pass I declined to touch these two, on the grounds that I could see a funnel in
+    `cram-gen` but couldn't cheaply tell whether it *superseded* the plans or was a
+    narrower slice. That was the wrong test. The plans are lists of numbered increments,
+    and the cheap check was to walk the list — nine greps, about ten minutes — not to
+    reason about whether a subsystem "corresponds". I applied the caution correctly and
+    to the wrong question, which is a subtler version of the same error post 79 describes:
+    the check I ran was the one that came to mind, not the one that would have settled it.
 
 ---
 
@@ -265,6 +325,21 @@ rediscovered expensively":
   lands, the ~20×-per-token exemplar figure is a ceiling.
 - **The `--drop-stage` / comment-stripping findings** are measured-harmful and off by
   default; that's settled, not open — recorded here so nobody re-opens it.
+- **`canon.rs` does not call `gate::run`.** `stitch/src/gate.rs:64-73` and
+  `stitch/tests/canon.rs:39-44` are two independent spellings of the same
+  parse → lower → check chain, and `gate.rs`'s doc comment *asserts* they match with
+  nothing enforcing it. `stage-0-validator-funnel.md` increment 2 required the call
+  specifically so they could not drift. Small fix; same shape as debt #13's
+  double-encoded `satp_for`.
+- **Untested candidates pass the corpus gate.** stage-0 increment 3 says a candidate with
+  no `test` items must die at the run stage; `gate.rs` allows `Ok { tests: 0 }`.
+  Unresolved whether that is a deliberate relaxation or drift — flagged in the plan.
+- **No dedup in the corpus pipeline, exact or near.** corpus-mvp increment 6 asked for
+  exact dedup; stage-0 increments 4–5 for alpha-normalization + MinHash. None built.
+  batch11 found domains collapsing toward ~8 structural archetypes, which is precisely
+  what the per-recipe dedup rate was designed to detect.
+- **No model-response cache**, so re-running the gate or extractor over a batch costs
+  generation time rather than replaying saved `.raw.md` files.
 
 ---
 
