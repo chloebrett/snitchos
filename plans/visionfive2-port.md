@@ -56,8 +56,23 @@ deviation is **gone** — see the fixed callout below.
 > trampoline.* Third instance of the family after the `tp` truncation and the
 > `entry_pa` loop-invariant miscompile — fixed structurally, not case-by-case.
 
-Next: **M2 — telemetry over UART** (the `hb` line above is a debug `println!`, not
-the frame pipeline; the board has no telemetry transport yet). Of the smaller
+**Since first light (updated 2026-08-06):** M2 and M2.5 both landed on the software
+side. **M2 (UART)** — COBS wire format, recoverable decode, `console=` mode selection,
+the TX ring with a full PLIC/THRE interrupt path, and `UartFrameSink` are all shipped
+and gate-green; the one step left is the collector's `--serial` source
+([uart-telemetry.md](uart-telemetry.md) Step 10), so the board's frames reach the wire
+but not yet Grafana. **M2.5 (Ethernet)** — the whole packet layer, `UdpBatcher`,
+virtio-net driver, snemu device model, deterministic itest and collector `--udp` source
+are shipped ([network-telemetry.md](network-telemetry.md) PRs 1–7); the **JH7110 GMAC
+driver (PR 8) is the only remaining hardware step**, and it is a project of its own.
+
+Two board-side items are open and tracked in the [debt register](../docs/debt-register.md):
+**#18** — no `ConsoleMode::Quiet`, so the `hb` pulse shreds any workload that owns the
+console (measured on hardware: `// he` + `hb 7` + `llo`); and **#19** — `cargo xtask
+image` has no `--opt`, so every board image is a *debug* build, which is the same
+condition that hid the SBI `a1` clobber for weeks.
+
+Of the smaller
 debts (2026-07-24): the ~21 `vf2` dead-code warnings are **gone**, and the
 `cfg(vf2)` ramfb skip is **replaced by DTB discovery** (`dtb::has_fw_cfg`). The
 `ph:` phase markers were dropped and then **deliberately restored** as a `ph!`

@@ -176,7 +176,20 @@ to two scenarios, and it's confirmed on the QEMU oracle so it isn't a snemu arti
 Related and unclosed: `plans/corpus-recipe-axes.md:69` — clauses for domains added
 later still have to be hand-written.
 
-## 9. glitch stalled at the Increment 5 boundary
+## 9. ❌ WRONG — glitch was not stalled; I read a stale header
+
+**Corrected 2026-08-06.** The claim below was read off `plans/glitch.md`'s *status
+header* and is false. The body of that same file marks increments 1–8 ✅ DONE, carries a
+`## v1 COMPLETE` section, and records the in-kernel beep as retired — **5a had landed,
+so the layering violation was already fixed.** v2 (the async ring) has since shipped
+increments 1–5 as well. The header has been corrected.
+
+This is the same failure as #7 one row up and as post 79's: the header is the part
+everyone reads and the part nothing checks, so a stale one doesn't sit inertly — it
+manufactures a confident wrong finding in the next document that cites it. The tell I
+missed: I quoted `:6-9` without reading `:70+`.
+
+<details><summary>original (wrong)</summary>
 
 `plans/glitch.md:6-9` — kernel spine (1–4) shipped and mutation-verified;
 **Increment 5 not started.** The first move is a structural one, not a feature:
@@ -185,6 +198,8 @@ later still have to be hand-written.
 > `user/` must not depend on `kernel-devices`)"
 
 So the layering violation it exists to fix is still standing.
+
+</details>
 
 ## 10. ✅ FIXED — `prelude.st` had never had a test
 

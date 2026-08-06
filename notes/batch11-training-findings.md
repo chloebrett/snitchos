@@ -260,9 +260,14 @@ The confound runs *against* the result, which is worth stating: F1's slice carri
   cannot resolve checkpoints half a nat apart, and it is partly measuring comment
   fraction ([post 77](../posts/post-77-the-number-that-could-not-see-it.md)). Held-out
   NLL is the gate metric.
-- **`cargo xtask test` has one pre-existing failure on a clean tree**
+- ~~**`cargo xtask test` has one pre-existing failure on a clean tree**
   (`mutant_plan_tests::the_derived_plan_matches_the_previously_hardcoded_set`) —
-  unrelated to this work, predates it.
+  unrelated to this work, predates it.~~ **Retracted 2026-08-06:** verified on a clean
+  tree, `cargo nextest run -p xtask` is **48/48 green**, that test included. The failure
+  was real once, was fixed on 2026-07-29, and
+  [loose-ends-2026-07-29.md](loose-ends-2026-07-29.md) already retired the claim — it
+  then came back in this note a week later. Post 79's transcription hop, caught in the
+  act: a stale caveat is cheap to copy forward and nothing type-checks a note.
 
 ## Open
 

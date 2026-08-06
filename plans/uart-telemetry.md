@@ -1,9 +1,18 @@
 # Plan: B3 — Telemetry over UART (M2)
 
 **Branch**: `main` (this repo works directly on main — no feature branches)
-**Status**: Active
+**Status**: 🟡 **Steps 0–4, 6, 8 and 9 SHIPPED. Step 10 (collector `--serial`) is the
+last one on the critical path**; Step 5b (interactive relay) follows it, and Step 7
+(programming the baud) is deferred as optional headroom — Step 6 measured steady-state
+telemetry at single-digit throughput, so 115200 suffices.
 **Design**: [docs/uart-telemetry-design.md](../docs/uart-telemetry-design.md)
 **Milestone**: M2 in [plans/visionfive2-port.md](visionfive2-port.md)
+**Write-up**: [post 68 — two promises the hardware never made](../posts/post-68-two-promises-the-hardware-never-made.md)
+
+Verified in-tree 2026-08-06: `UartFrameSink` exists and is host-tested
+(`kernel-obs/src/uart_sink.rs`, 8/8 mutants killed), and the collector has **no** serial
+source yet — `collector/src/source.rs:5` still names it as future work. So Step 9 is
+done and Step 10 is not; the board's frames reach the wire but not yet Grafana.
 
 ## Goal
 

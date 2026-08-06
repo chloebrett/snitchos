@@ -1,6 +1,26 @@
 # Stitch examples corpus — 30 programs
 
-**Status: 📐 PLAN — not started.** Tracking doc for a batch of new `.st` example
+**Status: ✅ COMPLETE — all 30 programs shipped.** `examples/stitch/` carries 30
+programs, ~6,300 lines and **279 native tests**, every one parsing, type-checking and
+passing its own suite under `stitch/tests/examples.rs`. Write-up:
+[stitch 18](../posts/stitch-18-a-binding-is-not-a-boundary.md); findings:
+[stitch-examples-findings.md](stitch-examples-findings.md).
+
+The exercise paid for itself the way it was designed to — the friction *was* the data.
+It found a real interpreter defect (`Env::bind` reset `self_closure`, silently disabling
+the tail-call trampoline for any function that bound a name before its recursive call —
+i.e. most of them), corrected `docs/language-design.md`'s `mut` aliasing semantics in
+three places, added two natives (`Str.parseInt`, `toStr`), and turned up four
+manifestations of one maximal-munch grammar fact plus two stdlib types (`Set<T>`,
+`Either`) that were designed and never built.
+
+**What the exemplars turned out to be worth**, measured afterwards in
+[batch11-training-findings.md](../notes/batch11-training-findings.md): swapping the 24
+that reach training for an equal token count of generated corpus costs ~0.022 nats —
+about **20× per token** against generated Stitch. That figure is a *ceiling*, not a point
+estimate, pending the deconfounding pair described in that note's "Open" section.
+
+Tracking doc, as originally written, for a batch of new `.st` example
 programs, proposed and approved 2026-07-26. Each is ~100+ lines (1000 is a
 guideline, not a cap — let the program's natural size win), lands in
 `examples/stitch/`, and includes native `test "…" { expect … }` blocks (see

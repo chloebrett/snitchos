@@ -1,12 +1,30 @@
 # drivel — the 1M model (TDD plan)
 
-**Status:** 📐 **PLAN — not started.** Rung 1 of the
+**Status:** ✅ **DELIVERED — the pipe works end to end, and then some.** Rung 1 of the
 [generative ladder](../docs/generative-ladder.md): the first rung with weights.
-This plan is a **tracer bullet for the training infrastructure**, not an attempt
-to build a useful model. The deliverable is a working pipe — corpus → frozen
+This plan was a **tracer bullet for the training infrastructure**, not an attempt
+to build a useful model. The deliverable was a working pipe — corpus → frozen
 vocab → training rig → checkpoint → evaluation — proved by drivel *marginally*
 outscoring [babble](babble.md) on one honest metric. A model that is barely
-better than no model is a complete success here.
+better than no model was a complete success here.
+
+It cleared that bar and kept going: drivel trains on the **real** `.st` corpus against a
+frozen 2048 vocab and a frozen 116-program held-out set, and **answers Tab at the
+on-target Stitch prompt**, byte-identical through the emulator, with a vocab-fingerprint
+provenance check and a KV cache ([post 80](../posts/post-80-the-control-passed-twice.md);
+plan archived at [legacy/kvetch-drivel-on-target.md](legacy/kvetch-drivel-on-target.md)).
+Best checkpoint to date is `drivel-D-b9b10b11` at **2.5309** held-out NLL — deliberately
+*not* promoted to the embedded checkpoint, since `drivel-b9b10-30k` is committed,
+itest-asserted byte-exact and embedded in a booting guest.
+
+> **The live question is no longer this plan's.** batch11 measured that **corpus volume
+> has largely stopped paying** — +55.7% more corpus bought 0.025 nats against +47%
+> buying 0.111 one batch earlier, a 4.6× collapse in marginal return. The four-batch
+> "volume beats purity" doctrine has hit its knee and has no written successor. See
+> [../notes/batch11-training-findings.md](../notes/batch11-training-findings.md).
+
+*(The two `**Status: COMPLETE**` markers further down mark individual sections — the
+evaluation harness and the training command — and predate this header.)*
 
 Related: [../docs/llm-design.md](../docs/llm-design.md) (runner, corpus tiers,
 the four oracle consumers), [../docs/generative-ladder.md](../docs/generative-ladder.md)

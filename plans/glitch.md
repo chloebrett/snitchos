@@ -1,12 +1,25 @@
 # `glitch` — the userspace audio server (v1)
 
-**Status:** 🚧 **IN PROGRESS — kernel spine done (Increments 1–4).** `Object::AudioSink`
-+ `Rights::AUDIO` + `authorize_audio`, the `AudioWrite` syscall + cap-gated handler +
-`pwmdac::play_samples`, and the `glitch-proto` `Play`/`Reply` codec all shipped, TDD'd,
-mutation-verified; kernel builds, `audio-beep` itest still green. **Next: Increment 5**
-(the userspace server) — start with **5a** (extract `synth` crate, `Tone`/`Gain` out of
-`kernel-devices`; `user/` must not depend on `kernel-devices`), then **5b** (`user/runtime`
-`AudioWrite` wrapper), then **5c** (the `serve` loop). `glitch` makes the PWMDAC a **capability** held
+**Status:** ✅ **v1 COMPLETE — all eight increments done, and the in-kernel beep retired.**
+`Object::AudioSink` + `Rights::AUDIO` + `authorize_audio`, the `AudioWrite` syscall +
+cap-gated handler + `pwmdac::play_samples`, the `glitch-proto` `Play`/`Reply` codec, the
+extracted `synth` crate (5a — `user/` no longer depends on `kernel-devices`), the server,
+the `beep` client, the boot layout + AudioSink grant, and the `glitch-beep-plays`
+acceptance itest all shipped, TDD'd and mutation-verified. See `## v1 COMPLETE` below for
+the closing note.
+
+**Work continues in [glitch-v2-async-ring.md](glitch-v2-async-ring.md)** (increments 1–5
+shipped, 6–9 remain). This plan is kept in `plans/` rather than archived because v2 cites
+it as its foundation; archive both together when v2 closes.
+
+> *Stale-header note (2026-08-06): this block said "IN PROGRESS — kernel spine done
+> (Increments 1–4). Next: Increment 5" long after every increment was marked ✅ DONE in
+> the body below. `notes/loose-ends-2026-07-29.md` §9 read the header rather than the
+> body and reported glitch as stalled with its `kernel-devices` layering violation still
+> standing — 5a had in fact landed. A plan's header is the part everyone reads and the
+> part nothing checks.*
+
+`glitch` makes the PWMDAC a **capability** held
 by a userspace server, so every source of sound is a *client* of one disciplined thing
 rather than code racing `WDATA` directly. v1 establishes that spine — the DAC-as-cap
 boundary — with the existing beep re-cast as glitch's first client. It is the foundation

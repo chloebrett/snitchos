@@ -1,9 +1,24 @@
 # Plan: Network telemetry (M2.5 — UDP frame transport)
 
 **Branch**: main (this repo works directly on main; the user commits)
-**Status**: Active
+**Status**: 🟡 **PRs 1–7 SHIPPED and gate-green; PR 8 (the JH7110 GMAC driver) is all
+that remains — and it is its own project, not a step here.**
 **Design**: [docs/network-telemetry-design.md](../docs/network-telemetry-design.md)
 **Milestone**: M2.5 in [plans/visionfive2-port.md](visionfive2-port.md)
+**Write-up**: [post 70 — the wire was never load-bearing](../posts/post-70-the-wire-was-never-load-bearing.md)
+
+Verified in-tree 2026-08-06: the `kernel-net` crate exists, the `net-telemetry-over-udp`
+scenario is registered (`xtask-itest/src/itest.rs:201`) and passes under snemu, and the
+collector carries a `--udp` source (`collector/src/main.rs:74`). The whole chain is live:
+`net=` parse → `UdpBatcher` → virtio-net TX → snemu strips 54 header bytes → decoder
+reads Hello, boot and heartbeat off UDP.
+
+**Also deferred, deliberately** (from post 70's close): QEMU `--engine qemu` parity
+(needs `-device virtio-net-device` + a host UDP capture), heartbeat-driven batching
+(today it is one datagram per frame — correct but wasteful, since telemetry trickles
+below the MTU so batch-overflow never flushes), and the `virtio_mmio` DEDUP —
+`virtio_net.rs`'s `read_reg`/`write_reg`/`transmit` mirror the console driver and can't
+be shared while each device owns its own `static mut` queues.
 
 ## Goal
 
@@ -32,21 +47,25 @@ it); confirm it is committed before starting PR 4.
 
 ## Acceptance Criteria
 
-- [ ] `kernel-net` builds a valid Ethernet II / IPv4 / UDP datagram from a
+All eight met by PRs 1–7. The last three are jointly evidenced by the
+`net-telemetry-over-udp` scenario, which is in the deterministic gate and passes plain
+and under `--scramble`.
+
+- [x] `kernel-net` builds a valid Ethernet II / IPv4 / UDP datagram from a
       static config + payload, host-tested against golden bytes, checksums correct.
-- [ ] `UdpFrameSink` encodes frames (COBS), batches them up to an MTU, and hands
+- [x] `UdpFrameSink` encodes frames (COBS), batches them up to an MTU, and hands
       complete datagrams to a `NetDevice`; drops-and-counts when the device is full.
-- [ ] A `net=<our-ip>,<our-mac>,<dst-ip>,<dst-mac>,<dst-port>` bootarg parses
+- [x] A `net=<our-ip>,<our-mac>,<dst-ip>,<dst-mac>,<dst-port>` bootarg parses
       (host-tested in kernel-boot), and an invalid one is refused, not silently ignored.
-- [ ] The virtio-net TX path (queue setup, virtio-net header, feature
+- [x] The virtio-net TX path (queue setup, virtio-net header, feature
       negotiation) is host-tested in kernel-devices over the `MmioTransport` mock.
-- [ ] Booting QEMU/snemu with `net=…` emits telemetry as UDP datagrams whose
+- [x] Booting QEMU/snemu with `net=…` emits telemetry as UDP datagrams whose
       payload decodes to the same `Frame`s the virtio-console path produces.
-- [ ] A deterministic `itest` scenario boots under snemu with `net=…` and asserts
+- [x] A deterministic `itest` scenario boots under snemu with `net=…` and asserts
       decoded frames arrive over the modelled NIC — the whole IP path in the gate.
-- [ ] The collector's `--udp <port>` source decodes datagram payloads, treats
+- [x] The collector's `--udp <port>` source decodes datagram payloads, treats
       decode errors as non-fatal (resync + count), and exports a resync/loss counter.
-- [ ] The QEMU/snemu virtio-console path and the full test gate are unchanged
+- [x] The QEMU/snemu virtio-console path and the full test gate are unchanged
       (`cargo xtask test && cargo xtask itest && cargo xtask itest --scramble`).
 
 ## Steps
