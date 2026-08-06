@@ -1,4 +1,4 @@
-# Post 77 — the control passed twice
+# Post 80 — the control passed twice
 
 - this is the tail of the drivel-on-target arc from [post 74](post-74-the-emulator-was-shouting.md): the last correctness piece, two defects that post confessed to in print, and a bug I introduced by fixing something correctly in one place.
 - they turned out to be one story. **every guard here was already passing while checking nothing**, and each needed a different kind of evidence to admit it. not "the test was missing" — post 69's theme, and stitch 17's. these tests existed, ran, and went green against exactly the failure they were built to catch.

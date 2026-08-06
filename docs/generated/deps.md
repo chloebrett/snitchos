@@ -161,7 +161,10 @@ graph LR
     xtask_itest --> diagram
     xtask_itest --> fs_proto
     xtask_itest --> itest_harness
+    xtask_itest --> kvetch_model
     xtask_itest --> kvetch_proto
+    xtask_itest --> kvetch_serve
+    xtask_itest --> kvetch_vocab
     xtask_itest --> magnitude
     xtask_itest --> protocol
     xtask_itest --> snemu
