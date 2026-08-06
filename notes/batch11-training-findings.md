@@ -271,6 +271,119 @@ So this does not overturn the four consecutive "volume beats purity" findings. 2
 programs cannot *substitute* for 1.8M tokens. What they do is return roughly an order
 of magnitude more per token than anything else in the corpus.
 
+## What the checkpoints actually emit
+
+Recorded because a bare loss number cannot be sanity-checked, and because the
+comparison below is a worked example of an eyeball test getting the ranking wrong.
+
+Twenty unconstrained 96-token samples per checkpoint, same seeds, same tiny eval
+root, `cargo xtask cram --eval --checkpoint <ck> --eval-vocab <vocab> --samples 20`.
+The three shown per model are seeds 0–2, i.e. the first three of the twenty, not a
+selection.
+
+| checkpoint | held-out NLL | parse rate (n=20) |
+|---|---|---|
+| `drivel-all-30k` *(embedded)* | 2.688 | 25% |
+| `drivel-B-b9b10` *(previous best)* | 2.5584 | **15%** |
+| `drivel-D-b9b10b11` *(new best)* | **2.5309** | 30% |
+
+**`drivel-D-b9b10b11`** — seed 1, which parses:
+
+```
+// Bool to find the specific amount that has not. Returns a Result containing a list of spops.
+contract HandarRequest {
+    hasOccupiedDate(Str) -> Bool
+    hasOccupied() -> Bool
+    unwrap()
+    credit(freeStep) -> List<LoanStep>
+}
+```
+
+seed 0, which does not — note the collapse in the last `expect`:
+
+```
+test "calcCalcProration returns no change" {
+    expect calcCalcProration(calcAmount(1000, 8), 10, 100) == 50
+}
+
+test "calcProration handles dm from change after period duration" {
+    expect calcCycle(1000, 10) == 100
+    expect calcCalcVolume(p, 0).unwrap().itillCycle(1000, 80, 5Selied.0)) == 30
+}
+```
+
+seed 2, which runs out of budget mid-declaration rather than emitting anything wrong:
+
+```
+// --- Types ---
+
+// A list of items checking parties.
+// Remove squares used in inventory.
+ext prod Peries(
+    ext items: List<Int>
+)
+
+// --- Core Logic ---
+
+// The function returns a list of items gets all inventory size.
+ext dayBy(xs: List<Perment>) -> List<Item> =
+```
+
+**`drivel-B-b9b10`** — seed 1 and seed 2:
+
+```
+// The number of library month state.
+// Uses the separate must be fixed 500 and returns emptyNtempted *maid* who are consistent.
+ext prod Schedule(
+    ext timestamp: Int,
+    ext name: Str,
+```
+```
+// PoolOf's ownerQiages.
+ext ownerQiagesALELONDOMALDOLDOW. (which monents.)
+    // Check if the person says "YYYYYMAL by B", mophat meStud1: "WA", lowerName: "D")
+```
+
+**`drivel-all-30k`** — seed 1 and seed 2:
+
+```
+// Check if a list of metrics fits largers for a specific page book.
+ext hasPage(broodLast: List<Domino> = {
+    if anyBroodLast {
+        isFelow_count(page) <= 2 => [] | {
+```
+```
+ext findParses(parPar: Par, par: Rent) -> Maybe<Paring> = {
+    par.par.location + par.warnings + par.warnings + par.warnings
+```
+
+**What all three have learned is shape, not meaning.** `contract` blocks with method
+signatures, `test "…" { expect … }`, `ext` declarations with type annotations,
+generics, the `// --- Section ---` divider convention — a Stitch programmer would
+recognise every construct. Identifiers are plausibly-shaped nonsense (`Handar`,
+`Peries`, `spops`), prefixes stutter (`calcCalcProration`), and the comment English
+is grammatical word salad. That last part is the 46%-comment-tokens finding visible
+in the output: half the capacity is imitating English this rung cannot model.
+
+Failures are one of three kinds — an expression collapsing mid-line, degenerate
+repetition (`par.warnings + par.warnings + par.warnings`), or simply **running out of
+the 96-token budget** mid-declaration, which scores as a parse failure but isn't one.
+Parse rate understates coherence accordingly.
+
+### The eyeball test gets the ranking wrong
+
+By eye the ordering is D > all-30k > B: arm B produces `ALELONDOMALDOLDOW` and word
+salad while the older, *worse* checkpoint looks tidier. By held-out NLL the ordering
+is D > B > all-30k, and B is 0.13 nats ahead of all-30k.
+
+So visual impression is not tracking model quality here — it is tracking which seeds
+happened to fall over. The parse rates agree that nothing is resolved: 15% / 25% /
+30% at n=20 is ±10pp, so D-over-B is ~1.1σ. D really is the best checkpoint, but
+that rests on thirteen paired runs of held-out loss, not on these samples. Against
+`drivel-all-30k` (17% perplexity gap) a visible improvement is plausible; against
+arm B (2.8%) it is not, and reading one into three samples is the same error as
+trusting a control that cannot discriminate.
+
 ## Caveats
 
 - **The held-out-exemplar confound is measured, not argued away** — G/H put it at
