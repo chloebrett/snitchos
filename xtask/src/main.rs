@@ -1,6 +1,6 @@
 use std::process::{Command, ExitCode};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 // `qemu` moved to the `xtask-qemu` crate (extracted so scenario edits don't
 // recompile it). Aliased here so every existing `crate::qemu::…` reference in
@@ -477,8 +477,8 @@ mod mutant_plan_tests {
 
 #[cfg(test)]
 mod cli_surface_tests {
-    use super::{Cli, Cmd};
-    use clap::{CommandFactory, Parser};
+    use super::{Cli, Cmd, opt_flag_name, qemu};
+    use clap::{CommandFactory, Parser, ValueEnum};
 
     /// clap's own consistency check for the lean surface.
     #[test]
@@ -586,6 +586,27 @@ mod cli_surface_tests {
     #[test]
     fn an_unknown_opt_level_is_refused_rather_than_defaulted() {
         assert!(Cli::try_parse_from(["xtask", "image", "--opt", "turbo"]).is_err());
+    }
+
+    /// **What the tool reports having built must be what you would type to build
+    /// it again.** `snitchos.img` looks identical whatever level produced it, and
+    /// the default just changed under everyone's muscle memory — so the report is
+    /// the only way to tell a debug image from an opt-3 one without an objdump.
+    /// That makes the *spelling* load-bearing: printing `Max` where the flag takes
+    /// `max` turns a copy-paste into an error, and printing `Mid` for a `Max` build
+    /// is how a "regression" becomes a stale artifact nobody can explain.
+    ///
+    /// Round-tripped through the real parser rather than compared to a literal,
+    /// so the name cannot drift from what `--opt` accepts.
+    #[test]
+    fn the_level_is_reported_the_way_the_flag_spells_it() {
+        for &want in qemu::OptLevel::value_variants() {
+            let printed = opt_flag_name(want);
+            let cli = Cli::try_parse_from(["xtask", "image", "--opt", &printed])
+                .unwrap_or_else(|e| panic!("reported {printed:?}, which --opt rejects: {e}"));
+            let Cmd::Image { opt, .. } = cli.cmd else { panic!("expected Image") };
+            assert_eq!(opt, want, "reported {printed:?}");
+        }
     }
 
     /// `stack` stays a native subcommand group in lean `xtask`, so it still
@@ -878,6 +899,18 @@ mod image_feature_tests {
     }
 }
 
+/// The build level's name exactly as `--opt` spells it.
+///
+/// Read out of clap's own value table rather than restated here, so it cannot
+/// drift from what the flag accepts: `format!("{opt:?}")` would report `Max` where
+/// the flag takes `max`, i.e. a copy-pasteable instruction that does not work.
+fn opt_flag_name(opt: qemu::OptLevel) -> String {
+    opt.to_possible_value()
+        .expect("every OptLevel is a selectable --opt value")
+        .get_name()
+        .to_owned()
+}
+
 /// Build the `vf2` kernel and objcopy it to a flat RISC-V `Image` (`snitchos.img`)
 /// for U-Boot `booti` on the VisionFive 2. The 64-byte Image header is embedded at
 /// the start of the kernel by `entry.S`, so this is a straight ELF→binary copy —
@@ -915,7 +948,13 @@ fn image(workload: Option<&str>, opt: qemu::OptLevel) -> ExitCode {
         .status()
     {
         Ok(s) if s.success() => {
-            eprintln!("wrote {out} — RISC-V Image for U-Boot `booti`.");
+            // Name the level: `snitchos.img` looks identical whatever built it, and
+            // "a board regression is a missed `cargo xtask image` until proven
+            // otherwise" only works if the tool says what it produced.
+            eprintln!(
+                "wrote {out} — RISC-V Image for U-Boot `booti` (--opt {}).",
+                opt_flag_name(opt)
+            );
             eprintln!("At the VisionFive 2's U-Boot prompt (TFTP the file first):");
             eprintln!("  tftpboot 0x40200000 snitchos.img");
             if let Some(name) = workload {

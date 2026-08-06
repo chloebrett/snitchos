@@ -129,7 +129,47 @@ default. An unknown level is a parse error, not a silent fallback.
 > produces, and `vf2` + release is untested either way (see "Risk"). Step 4 is what
 > discharges it, and it is why step 4 is a step.
 
-### Step 4: prove it on hardware, and record both numbers
+### Step 4: the image knows what it was built at, and says so at boot
+
+**Acceptance criteria**: a booted kernel reports its own build regime — kernel profile
+*and* embedded-userspace opt level — on the UART (human) and on the wire (assertable).
+An itest asserts the reported level matches the level the harness built at.
+
+**RED**: an itest scenario asserting the frame appears and names the level the suite
+built with, plus a host test for the string's construction. A negative control is
+cheap here and worth having: build at one level, assert the scenario fails if it
+claims another.
+**GREEN**: `kernel/build.rs` emits `cargo:rustc-env=` for the two facts it already
+knows — `PROFILE` and the `us_opt` it passes to the nested userspace build — reusing
+the mechanism already at `build.rs:442`. The kernel `env!()`s them and reports at
+boot, both channels per the project's standing rule: UART for the human, a frame for
+anything to be asserted on.
+**MUTATE**: the string construction is host-testable and worth mutating if it grows
+any conditionals; a `format!` of two env vars is not.
+**REFACTOR**: assess.
+**Done when**: `cargo xtask itest` green, and a board boot prints the level.
+
+**Two design points that are not incidental:**
+
+1. **There is no single "opt level" and the report must not pretend there is.** The
+   kernel profile and the userspace opt level are independent — that independence is
+   the entire point of the Low/Mid/Hi/Max ladder, and collapsing them into one number
+   would reintroduce exactly the ambiguity step 1 removed. Report both.
+2. **Derive it in `build.rs`, not in `xtask`.** `build.rs` knows what was *actually*
+   passed to the nested userspace build; `xtask` knows what it *intended*. If the
+   level ever fails to propagate, a `build.rs`-derived string tells the truth and an
+   `xtask`-derived one repeats the lie. The whole value of this step is being a
+   witness rather than an echo.
+
+**Why this lands before the hardware step.** Step 5 otherwise has to *trust* that the
+image it flashed is the one it built — which is the assumption
+[[feedback_stale_board_image]] exists because it failed, and which debt #19 records
+failing again ("any later `cargo xtask image` silently overwrites it"). With this
+step, step 5 reads the level off the board and the verification is real rather than
+inferred. It also makes the whole opt-level story observable, which is the property
+this OS is nominally about.
+
+### Step 5: prove it on hardware, and record both numbers
 
 Not a gate step — the gate cannot boot a board. Explicitly manual.
 
@@ -138,7 +178,8 @@ Not a gate step — the gate cannot boot a board. Explicitly manual.
    stitch-drivel`, flash, and time a Tab at the `stitch-drivel` prompt. Record it.
    Capturing this *after* the change is not possible.
 2. `cargo xtask image --opt max --workload stitch-drivel` boots to heartbeat on the
-   board.
+   board **and reports `release` / userspace opt-3 at boot** (step 4) — so "the right
+   image is on the board" is read off the board, not assumed.
 3. A Tab at the prompt returns the same completion as the debug image (the sampler is
    deterministic given the boot seed, so this is checkable by eye).
 4. Both timings and both image sizes recorded in
