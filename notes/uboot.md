@@ -30,6 +30,13 @@ setenv bootargs 'workload=stitch-drivel'
 booti 0x40200000 - ${fdtcontroladdr}
 ```
 
+**`fdt_high` is not optional above ~3 MB.** Without it, `booti … ${fdtcontroladdr}`
+fails outright with `Failed to reserve memory for fdt at 0xff7105e0` — U-Boot tries to
+reserve its own live DTB *in place*, up where it relocated itself, which is outside the
+memory region LMB manages; setting `fdt_high` makes it copy the blob down into ordinary
+RAM instead. It first bit at 7.78 MB (the `kvetch-drivel` image, ~4.5 MB of which is
+weights) and nothing about the message points at image size.
+
 Build the image first — `cargo xtask image --workload <name>` (validates the name against
 the workload registry and prints the matching `setenv` line; the build itself is
 workload-independent, since every image reads `/chosen/bootargs`). Output that doesn't

@@ -416,3 +416,45 @@ MMIO regions are hardcoded for QEMU `virt` in `kmain`; the DTB-driven
 `collect_mmio_regions` is parked behind `#[expect(dead_code)]` (the pre-MMU DTB
 crash under the higher-half link was never isolated).
 
+### #18 — No console mode for "text, but the kernel keeps quiet"
+
+The board's `hb {count}` liveness pulse interleaves with any workload that owns the
+console. Measured on hardware 2026-07-29: typing `// hello` at the `stitch-drivel`
+prompt rendered as `// he` + `hb 7` + `llo`.
+
+`heartbeat.rs` already predicts this and prescribes `console=frames` — which is
+**wrong advice on the board**, because the collector has no serial source (it takes a
+QEMU socket, `--replay`, or `--udp`), so frames mode over a UART is unreadable in a
+terminal. Text mode is the only usable mode for an interactive workload on hardware,
+and it is the one that shreds it.
+
+Decided but unimplemented: a third `ConsoleMode::Quiet` — human text still flows, the
+kernel emits no chatter of its own — leaving `Text` as the bring-up mode that keeps the
+pulse. Alternatives considered and rejected: an `hb=off` bootarg (another knob), and
+suppressing automatically when the selected workload owns the console (loses the pulse
+during bring-up of exactly those workloads). Roughly a variant plus a parser arm in
+`kernel-boot` and the two match sites in `kernel/src/device/console.rs`.
+
+The demo was unblocked with a temporary `if false &&` on the print, since reverted —
+do not reach for that again, it silences the pulse on every `vf2` build in every mode.
+
+### #19 — `cargo xtask image` has no `--opt`, so board images are always debug
+
+`image()` calls `qemu::build_kernel`, which is hardcoded to `OptLevel::Low` — a debug
+kernel with the `build.rs` default opt-1 userspace. Every syscall and trap around a
+workload runs unoptimised, which is felt directly by anything compute-bound on the
+board: a drivel Tab completion is a transformer forward pass wrapped in debug-build
+kernel overhead.
+
+An opt-3 image can be produced by hand (`SNITCHOS_USERSPACE_OPT=3 cargo build -p kernel
+--target riscv64gc-unknown-none-elf --release --features vf2,<workload features>` then
+`rust-objcopy -O binary … snitchos.img`) — done 2026-07-29, 7.78 MB → 6.13 MB — but it
+is **not reproducible through the tool, and any later `cargo xtask image` silently
+overwrites it with a debug build.**
+
+The fix is an `--opt` flag threaded to `build_kernel_profiled`, mirroring the ladder
+`itest` already has. It sits naturally beside `image_features`. Note this would make
+release `vf2` images routine, and that regime is where both the `tp`-truncation and the
+SBI `a1`-clobber bugs lived — the latter *hidden* precisely because board images were
+debug builds. Worth landing deliberately rather than as a convenience.
+
