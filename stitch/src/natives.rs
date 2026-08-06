@@ -948,6 +948,14 @@ fn native_reverse(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     Ok(Value::List(items.into()))
 }
 
+/// One `Map` entry as the `(key, value)` tuple the collection combinators hand
+/// to a user function. The single definition of "what an entry looks like from
+/// Stitch" — `fold`/`map`/`filter` all go through here, so they cannot disagree
+/// about field order.
+fn entry_tuple(key: &Value, value: &Value) -> Value {
+    Value::Tuple(vec![key.clone(), value.clone()].into())
+}
+
 fn expect_list<'a>(name: &str, value: &'a Value) -> Result<&'a [Value], RuntimeError> {
     match value {
         Value::List(items) => Ok(items),
@@ -959,13 +967,27 @@ fn expect_list<'a>(name: &str, value: &'a Value) -> Result<&'a [Value], RuntimeE
 }
 
 /// `map(coll, f)` — `f` applied to each element. Polymorphic over the receiver:
-/// a `List` maps eagerly to a new `List`; a `Seq` maps lazily to a new `Seq`.
+/// a `List` maps eagerly to a new `List`; a `Seq` maps lazily to a new `Seq`; a
+/// `Map` applies `f` to each `(key, value)` entry and collects a **`List`** —
+/// projecting an entry to an arbitrary value loses the key shape, so the result
+/// is no longer a `Map`. (`filter` is the deliberate counterpart: selecting
+/// whole entries *keeps* the shape. See `native_filter`.)
 fn native_map(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     let [collection, function] = args else {
         return Err(RuntimeError::new("map expects (collection, function)"));
     };
     if let Value::Seq(_) = collection {
         return Ok(map_seq(collection.clone(), function.clone(), env.clone()));
+    }
+    if let Value::Map(entries) = collection {
+        let mapped = entries
+            .iter()
+            .map(|(key, value)| {
+                let entry = entry_tuple(key, value);
+                apply_values(function, core::slice::from_ref(&entry), env)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Value::List(mapped.into()));
     }
     let mapped = expect_list("map", collection)?
         .iter()
@@ -986,13 +1008,26 @@ fn map_seq(seq: Value, f: Value, env: Env) -> Value {
 }
 
 /// `filter(coll, pred)` — the elements for which `pred` is true. Eager on a
-/// `List`, lazy on a `Seq`.
+/// `List`, lazy on a `Seq`, and shape-preserving on a `Map`: `pred` sees each
+/// `(key, value)` entry and the survivors come back as a **`Map`**, in their
+/// original order. The asymmetry with `map` (which projects out to a `List`) is
+/// deliberate — a predicate selects entries, it doesn't transform them.
 fn native_filter(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     let [collection, predicate] = args else {
         return Err(RuntimeError::new("filter expects (collection, predicate)"));
     };
     if let Value::Seq(_) = collection {
         return Ok(filter_seq(collection.clone(), predicate.clone(), env.clone()));
+    }
+    if let Value::Map(entries) = collection {
+        let mut kept: Vec<(Value, Value)> = Vec::new();
+        for (key, value) in entries.iter() {
+            let entry = entry_tuple(key, value);
+            if keeps(predicate, &entry, env)? {
+                kept.push((key.clone(), value.clone()));
+            }
+        }
+        return Ok(Value::Map(kept.into()));
     }
     let mut kept = Vec::new();
     for item in expect_list("filter", collection)? {
@@ -1084,7 +1119,7 @@ fn native_fold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     }
     if let Value::Map(entries) = collection {
         for (key, value) in entries.iter() {
-            let entry = Value::Tuple(vec![key.clone(), value.clone()].into());
+            let entry = entry_tuple(key, value);
             acc = apply_values(function, &[acc, entry], env)?;
         }
         return Ok(acc);
@@ -1627,6 +1662,63 @@ mod tests {
         );
         assert_eq!(
             run_program(r#"main() = find(["a": 1, "b": 2], e -> e == ("b", 2)) == Some(("b", 2))"#),
+            Value::Bool(true)
+        );
+    }
+
+    // `map` over a `Map` projects each entry to an arbitrary value, so the
+    // result is no longer key-shaped: it is a `List`, in insertion order.
+    #[test]
+    fn map_over_a_map_projects_its_entries_into_a_list() {
+        assert_eq!(
+            run_program(
+                r#"main() = map(["a": 1, "b": 2], e -> match e { (_, v) => v * 10 })
+                           == [10, 20]"#
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program(r#"main() = map([:], e -> e) == []"#),
+            Value::Bool(true)
+        );
+    }
+
+    // ...whereas `filter` selects whole entries, so it *preserves* the shape and
+    // hands back a `Map`. That asymmetry is deliberate (it is what makes
+    // "transform" and "select" read differently), so it is asserted three ways:
+    // equality against a map literal — which a `List` of pairs can never satisfy,
+    // since `Value`'s `==` only relates a Map to a Map — indexing the result by
+    // key, and the entry order surviving.
+    #[test]
+    fn filter_over_a_map_preserves_the_map_shape() {
+        assert_eq!(
+            run_program(
+                r#"main() = filter(["a": 1, "b": 2, "c": 3], e -> match e { (_, v) => v > 1 })
+                           == ["b": 2, "c": 3]"#
+            ),
+            Value::Bool(true)
+        );
+        // Genuinely a Map, not a List that merely compares equal: only a Map
+        // answers a `Str` key (a List index must be an Int).
+        assert_eq!(
+            run_program(
+                r#"main() = filter(["a": 1, "b": 2], e -> match e { (_, v) => v > 1 })["b"]
+                           == Some(2)"#
+            ),
+            Value::Bool(true)
+        );
+        // Map equality is *unordered* (value.rs), so the assertions above cannot
+        // see a reordering — this one can.
+        assert_eq!(
+            run_program(
+                r#"main() = filter(["a": 1, "b": 2, "c": 3], e -> match e { (_, v) => v > 1 })
+                           |> map(e -> match e { (k, _) => k })
+                           == ["b", "c"]"#
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program(r#"main() = filter(["a": 1], _ -> false) == [:]"#),
             Value::Bool(true)
         );
     }
