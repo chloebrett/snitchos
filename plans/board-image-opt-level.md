@@ -76,6 +76,24 @@ all four levels, beside `kernel_bin_selects_profile_directory`.
 **Done when**: unit test green; `cargo xtask image` still produces a working debug
 image byte-for-byte as before.
 
+> **Scope grew during execution, recorded for approval.** Two findings while doing it:
+>
+> 1. **`image()` was not the only site with the shape.** `xtask-itest/src/main.rs:1336`
+>    binds `let opt = if release { Mid } else { Low }`, builds with
+>    `build_kernel_profiled(…, opt)`, then reads with `kernel_bin(release)` — two
+>    independent expressions of one fact, agreeing today only because `release → Mid`.
+>    Latent rather than live, but the same class.
+> 2. **The boolean is the trap, so it is now unreachable.** `kernel_bin(bool)` is
+>    private; `kernel_bin_for(OptLevel)` is the public API. Without this the fix is a
+>    one-off that anyone can rewrite; with it the bug class cannot be expressed from
+>    outside the module.
+>
+> So the diff converts **four** call sites (`image`, `snemu boot`, `base_command_ex`,
+> `snemu_diff`) rather than one. Each is a single line, and the two that already
+> derived from `opt` were correct — they just now read as one idiom instead of two.
+> The test is exhaustive over `OptLevel::value_variants()` rather than four hand-written
+> assertions, so a rung added later is covered by existing.
+
 **Why this is its own step, and lands before `--opt`**: the defect is a *duplicated
 decision*. `image()` chooses a profile twice — once as `build_kernel` (Low) and once
 as `kernel_bin(false)` — with nothing tying the two together. Add `--opt` without

@@ -839,11 +839,18 @@ fn image(workload: Option<&str>) -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let status = qemu::build_kernel(&image_features(workload)).expect("failed to invoke cargo");
+    // One binding, used twice: the profile we build and the ELF we objcopy cannot
+    // disagree. They used to — `build_kernel` (debug) and a hardcoded
+    // `kernel_bin(false)` were independent statements of the same fact, which is
+    // harmless only while there is exactly one level to choose. `--opt` is what
+    // makes it dangerous, so this lands first.
+    let opt = qemu::OptLevel::Low;
+    let status =
+        qemu::build_kernel_profiled(&image_features(workload), opt).expect("failed to invoke cargo");
     if !status.success() {
         return ExitCode::from(1);
     }
-    let elf = qemu::kernel_bin(false);
+    let elf = qemu::kernel_bin_for(opt);
     let out = "snitchos.img";
     // `rust-objcopy` (cargo-binutils) wraps `llvm-objcopy`; on PATH after
     // `cargo install cargo-binutils` + `rustup component add llvm-tools`.

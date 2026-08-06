@@ -803,7 +803,7 @@ pub fn prepare_profiled_with(
     if !qemu::build_kernel_profiled(&features, opt).is_ok_and(|s| s.success()) {
         return Err("kernel build failed".to_string());
     }
-    let kernel = std::fs::read(qemu::kernel_bin(opt.is_release()))
+    let kernel = std::fs::read(qemu::kernel_bin_for(opt))
         .map_err(|e| format!("read kernel: {e}"))?;
     let dtb = std::fs::read(SNEMU_DTB).map_err(|e| format!("read {SNEMU_DTB}: {e}"))?;
     Ok((kernel, dtb))

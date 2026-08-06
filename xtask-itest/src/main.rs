@@ -1358,7 +1358,7 @@ fn snemu_boot(
     if let Some(name) = workload {
         cmd.args(["--workload", name]);
     }
-    cmd.arg(qemu::kernel_bin(release));
+    cmd.arg(qemu::kernel_bin_for(opt));
     if let Some(n) = max_steps {
         cmd.arg(n.to_string());
     }

@@ -67,7 +67,7 @@ pub fn base_command_ex(
         "-bios", "default",
         // The kernel ELF for this opt regime: `debug/kernel` for Low, `release/kernel`
         // for Mid/High. Matches whatever `build_kernel_profiled(_, opt)` just wrote.
-        "-kernel", kernel_bin(opt.is_release()),
+        "-kernel", kernel_bin_for(opt),
         // Force modern virtio-mmio (version 2). Without this, QEMU
         // exposes the legacy (version 1) layout for backward compat,
         // which has a different register set we don't implement.
@@ -177,11 +177,30 @@ pub fn workload_features(workload: Option<&str>) -> &'static [&'static str] {
     }
 }
 
+/// The kernel ELF path for a build regime — **the way callers should ask.**
+///
+/// Every caller that builds a kernel also has to read the ELF back, and cargo
+/// writes the two profiles to different directories. Deriving both from one
+/// [`OptLevel`] is what stops those two facts drifting apart: a caller holding a
+/// bool can pass the wrong one and get a *stale* binary rather than an error,
+/// which is silent by construction. `image()` was one hardcoded `kernel_bin(false)`
+/// away from that the moment it could build anything but debug.
+///
+/// This is why [`kernel_bin`] is private: the boolean is the trap, so it is not
+/// reachable from outside this module.
+#[must_use]
+pub fn kernel_bin_for(opt: OptLevel) -> &'static str {
+    kernel_bin(opt.is_release())
+}
+
 /// The kernel ELF path for a given profile. Cargo writes the debug build to
 /// `.../debug/kernel` and the optimized build to `.../release/kernel`; a caller
 /// that built with `--release` must read from the matching directory.
+///
+/// Private on purpose — call [`kernel_bin_for`], which cannot disagree with the
+/// level the kernel was built at.
 #[must_use]
-pub fn kernel_bin(release: bool) -> &'static str {
+fn kernel_bin(release: bool) -> &'static str {
     if release {
         "target/riscv64gc-unknown-none-elf/release/kernel"
     } else {
@@ -221,12 +240,40 @@ pub fn build_kernel_profiled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::ValueEnum;
 
     #[test]
     fn kernel_bin_selects_profile_directory() {
         assert!(kernel_bin(false).contains("/debug/"));
         assert!(kernel_bin(true).contains("/release/"));
         assert!(kernel_bin(true).ends_with("/kernel"));
+    }
+
+    /// **The ELF a caller reads must come from the profile it built.**
+    ///
+    /// Cargo writes the two profiles to different directories, so a caller that
+    /// builds release and reads the debug path gets whatever was there before —
+    /// it does not fail, it silently uses a stale binary. `image()` was one
+    /// hardcoded `kernel_bin(false)` away from exactly that as soon as it could
+    /// build anything but debug, and the symptom would have been "the optimized
+    /// board image is exactly as slow", with nothing pointing at the cause.
+    ///
+    /// Exhaustive over `OptLevel` rather than four hand-written assertions, so a
+    /// rung added later is covered by existing rather than by someone remembering
+    /// to add a line — the same anti-drift shape as the mutation plan's
+    /// `a_new_host_crate_is_mutated_by_default`.
+    #[test]
+    fn the_kernel_path_follows_the_profile_for_every_rung() {
+        for &opt in OptLevel::value_variants() {
+            let path = kernel_bin_for(opt);
+            assert_eq!(
+                path.contains("/release/"),
+                opt.is_release(),
+                "{opt:?} builds with is_release()={} but would read {path}",
+                opt.is_release(),
+            );
+            assert!(path.ends_with("/kernel"), "{opt:?} reads {path}");
+        }
     }
 
     #[test]
