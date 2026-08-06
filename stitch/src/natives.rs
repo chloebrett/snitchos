@@ -1065,7 +1065,10 @@ fn take_while_seq(seq: Value, pred: Value, env: Env) -> Value {
 }
 
 /// `fold(coll, init, f)` — reduce left-to-right, `f(acc, element)`. Forces a
-/// `Seq` to the end (diverges on an infinite one — use `foldWhile` to stop).
+/// `Seq` to the end (diverges on an infinite one — use `foldWhile` to stop). A
+/// `Map` reduces over its entries as `(key, value)` tuples in insertion order,
+/// which is what gives the fold-derived half of the prelude (`count`/`any`/
+/// `all`/`find`/`first`/`last`/`flatten`) its `Map` support for free.
 fn native_fold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     let [collection, init, function] = args else {
         return Err(RuntimeError::new("fold expects (collection, init, function)"));
@@ -1076,6 +1079,13 @@ fn native_fold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         while let Step::Cons(head, tail) = force_seq(&current)? {
             acc = apply_values(function, &[acc, head], env)?;
             current = tail;
+        }
+        return Ok(acc);
+    }
+    if let Value::Map(entries) = collection {
+        for (key, value) in entries.iter() {
+            let entry = Value::Tuple(vec![key.clone(), value.clone()].into());
+            acc = apply_values(function, &[acc, entry], env)?;
         }
         return Ok(acc);
     }
@@ -1574,6 +1584,50 @@ mod tests {
         assert_eq!(
             run_program("main() = [1, 2, 3, 4] |> fold(1, *)"),
             Value::Int(24)
+        );
+    }
+
+    // A `Map` folds over its entries as `(key, value)` tuples, in insertion
+    // order. Asserting the accumulated entry list (rather than just a count)
+    // pins both halves of that contract at once: the element *shape* and the
+    // *order*. A count alone agrees with an implementation that reverses.
+    #[test]
+    fn fold_reduces_a_maps_entries_in_insertion_order() {
+        assert_eq!(
+            run_program(
+                r#"main() = fold(["a": 1, "b": 2], [], (acc, e) -> concat(acc, [e]))
+                           == [("a", 1), ("b", 2)]"#
+            ),
+            Value::Bool(true)
+        );
+        // The empty map contributes nothing — the seed comes back untouched.
+        assert_eq!(
+            run_program("main() = fold([:], 7, (acc, _) -> acc + 1)"),
+            Value::Int(7)
+        );
+    }
+
+    // The prelude's list vocabulary is *entirely* fold-derived (`count`/`any`/
+    // `all`/`find` are folds over `fold`), so teaching `fold` about `Map` has to
+    // light all of them up with no `Map.`-prefixed equivalents. That consequence
+    // is the point of the change, so it is asserted, not assumed.
+    #[test]
+    fn the_fold_derived_prelude_reads_a_map() {
+        assert_eq!(
+            run_program(r#"main() = count(["a": 1, "b": 2])"#),
+            Value::Int(2)
+        );
+        assert_eq!(
+            run_program(r#"main() = any(["a": 1, "b": 2], e -> e == ("b", 2))"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program(r#"main() = all(["a": 1, "b": 2], e -> e == ("b", 2))"#),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            run_program(r#"main() = find(["a": 1, "b": 2], e -> e == ("b", 2)) == Some(("b", 2))"#),
+            Value::Bool(true)
         );
     }
 
