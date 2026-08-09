@@ -8,6 +8,11 @@ publish = false
 # `OptLevel` derives `clap::ValueEnum` so it can be a `--opt` flag value
 # directly in the xtask CLI.
 clap = { version = "4", features = ["derive"] }
+# `build_info::userspace_opt_level` — so `expected_build_regime` *predicts* what a
+# kernel will report rather than restating the rule. `kernel/build.rs` resolves
+# the level with the same function, which is what makes the itest's comparison a
+# check on the build instead of on a second copy of the policy.
+kernel-boot = { path = "../kernel-boot" }
 
 [lints]
 workspace = true

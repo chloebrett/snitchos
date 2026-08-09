@@ -2589,6 +2589,7 @@ name = "xtask-qemu"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "kernel-boot",
 ]
 
 [[package]]

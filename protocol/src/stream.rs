@@ -52,6 +52,7 @@ pub enum OwnedFrame {
     NotifySignal { notification: u32, mask: u64, from_task: u32, t: u64, hart_id: u8 },
     NotifyWait { notification: u32, bits: u64, to_task: u32, t: u64, hart_id: u8 },
     AudioXRun { count: u32, t: u64, hart_id: u8 },
+    BuildInfo { kernel_profile: String, userspace_opt: String },
 }
 
 impl OwnedFrame {
@@ -104,6 +105,10 @@ impl OwnedFrame {
             Frame::NotifyWait { notification, bits, to_task, t, hart_id } => {
                 OwnedFrame::NotifyWait { notification, bits, to_task, t, hart_id }
             }
+            Frame::BuildInfo { kernel_profile, userspace_opt } => OwnedFrame::BuildInfo {
+                kernel_profile: kernel_profile.to_string(),
+                userspace_opt: userspace_opt.to_string(),
+            },
             Frame::AudioXRun { count, t, hart_id } => {
                 OwnedFrame::AudioXRun { count, t, hart_id }
             }
@@ -336,6 +341,31 @@ mod tests {
         decode_stream(&mut Cursor::new(bytes), OnDecodeError::Fail, |f| got = Some(OwnedFrame::from_borrowed(f)))
             .expect("clean stream decodes");
         assert_eq!(got, Some(OwnedFrame::AudioXRun { count: 3, t: 9_000, hart_id: 0 }));
+    }
+
+    /// The build regime survives the wire, strings and all.
+    ///
+    /// It carries `&str` rather than `StringId`s on purpose: the values are
+    /// `env!` literals emitted once at boot, so interning them would buy nothing
+    /// and would put this frame *behind* the intern table — which is exactly the
+    /// dependency a boot-provenance frame should not have. It also keeps
+    /// `pre-init-order`'s "every `StringId` resolves through an earlier
+    /// `StringRegister`" invariant untouched.
+    #[test]
+    fn build_info_round_trips_through_the_stream_decoder() {
+        let frame = Frame::BuildInfo { kernel_profile: "release", userspace_opt: "3" };
+        let mut buf = [0u8; 64];
+        let bytes = crate::wire_encode(&frame, &mut buf).expect("encode fits").to_vec();
+        let mut got = None;
+        decode_stream(&mut Cursor::new(bytes), OnDecodeError::Fail, |f| got = Some(OwnedFrame::from_borrowed(f)))
+            .expect("clean stream decodes");
+        assert_eq!(
+            got,
+            Some(OwnedFrame::BuildInfo {
+                kernel_profile: "release".into(),
+                userspace_opt: "3".into()
+            })
+        );
     }
 
     #[test]

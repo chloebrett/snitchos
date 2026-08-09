@@ -1731,6 +1731,38 @@ mod tests {
     }
 
     #[test]
+    fn map_has_answers_key_membership() {
+        assert_eq!(
+            run_map(r#"Map.has(["a": 1, "b": 2], "a")"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.has(["a": 1, "b": 2], "zz")"#),
+            Value::Bool(false)
+        );
+        assert_eq!(run_map(r#"Map.has([:], "a")"#), Value::Bool(false));
+    }
+
+    // `Map.has` looks redundant beside the prelude's `contains` — it is not, and
+    // this is the test that says why. Now that `fold` accepts a `Map`, `contains`
+    // folds over **entries**, so it asks "is this whole `(key, value)` pair
+    // present?". Key membership is a different question and needs its own native.
+    #[test]
+    fn map_has_asks_about_keys_where_contains_asks_about_entries() {
+        assert_eq!(run_map(r#"contains(["a": 1], ("a", 1))"#), Value::Bool(true));
+        assert_eq!(run_map(r#"contains(["a": 1], "a")"#), Value::Bool(false));
+        assert_eq!(run_map(r#"Map.has(["a": 1], "a")"#), Value::Bool(true));
+    }
+
+    #[test]
+    fn map_has_refuses_a_non_map_receiver() {
+        assert_eq!(
+            run_map_err(r#"Map.has([1, 2, 3], "a")"#),
+            "has expects a Map, got List"
+        );
+    }
+
+    #[test]
     fn map_get_refuses_a_non_map_receiver() {
         assert_eq!(
             run_map_err(r#"Map.get([1, 2, 3], "a")"#),

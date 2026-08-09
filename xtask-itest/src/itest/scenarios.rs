@@ -8,7 +8,7 @@ use protocol::stream::OwnedFrame;
 
 
 use super::harness::{StringTable, View};
-use super::matchers::{is_cap_granted_span, is_cap_granted_telemetry, is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
+use super::matchers::{is_build_info, is_cap_granted_span, is_cap_granted_telemetry, is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
 
 const SEC: Duration = Duration::from_secs(1);
 
@@ -697,6 +697,36 @@ pub fn kernel_runs_at_higher_half(h: &mut View) -> Result<(), String> {
 /// Boot sequence reaches the heartbeat loop: Hello → kernel.boot
 /// `SpanStart` → Dropped(0) (proves pre-init flush ran cleanly) →
 /// first kernel.heartbeat `SpanStart` (proves the timer IRQ is firing).
+/// **The image says what it was built as, and it is telling the truth.**
+///
+/// `snitchos.img` looks identical whatever produced it, so until now "is this
+/// the optimized build?" was answerable only by trusting the shell history of
+/// whoever flashed it — and `cargo xtask image` silently overwriting a
+/// hand-built optimized image is a thing that actually happened
+/// (docs/debt-register.md #19).
+///
+/// The check has teeth because the two sides are derived independently: the
+/// expectation comes from the `OptLevel` the *tool* built with, the frame from
+/// what `kernel/build.rs` actually passed to the nested userspace build. Both
+/// route through `kernel_boot::build_info::userspace_opt_level`, so what is
+/// asserted is that the build obeyed the rule — not that two copies of the rule
+/// agree with each other.
+///
+/// It runs at whatever level the suite was invoked with, so `--opt max` checks
+/// opt-3 and the default checks opt-1. A hardcoded expectation would have held
+/// at the default and quietly meant nothing everywhere else.
+pub fn build_regime_is_reported(h: &mut View) -> Result<(), String> {
+    let (profile, userspace_opt) = h.expected_build_regime();
+    h.wait_for(SEC * 3, is_build_info(profile, userspace_opt)).ok_or_else(|| {
+        format!(
+            "no BuildInfo frame reporting kernel {profile}, userspace opt-{userspace_opt} within \
+             3s — the kernel either did not emit one or reported a regime it was not built at"
+        )
+    })?;
+
+    Ok(())
+}
+
 pub fn boot_reaches_heartbeat(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 3, is_hello())
         .ok_or("no Hello frame within 3s")?;

@@ -192,6 +192,7 @@ catalog! {
     // reproduces the former default exactly). `default-boot-starts-init` below
     // covers the new default path.
     wfi "boot-reaches-heartbeat"          scenarios::boot_reaches_heartbeat         [boot]          {"init"};
+    wfi "build-regime-is-reported"        scenarios::build_regime_is_reported       [boot]          {"init"};
     wfi "heartbeat-cadence"               scenarios::heartbeat_cadence              [boot]          {"init"};
     wfi "pre-init-order"                  scenarios::pre_init_order                 [boot]          {"init"};
     wfi "kernel-runs-at-higher-half"      scenarios::kernel_runs_at_higher_half     [boot]          {"init"};
@@ -348,6 +349,13 @@ catalog! {
 /// Set the process-wide failure-capture transcript depth. Call once at
 /// startup, before `run`. Delegates to the harness, which reads it at
 /// every `Harness::spawn`.
+/// Record the regime the kernel under test was built at, so a scenario can
+/// check the guest's `BuildInfo` frame against it. Call once at startup, beside
+/// [`set_capture_level`].
+pub fn set_build_opt(opt: qemu::OptLevel) {
+    harness::set_build_opt(opt);
+}
+
 pub fn set_capture_level(level: itest_harness::CaptureLevel) {
     harness::set_capture_level(level);
 }

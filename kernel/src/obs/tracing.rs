@@ -90,12 +90,55 @@ fn transmit_bytes(bytes: &[u8]) {
     }
 }
 
-pub fn send_hello(timebase_hz: u32) {
+/// Open the telemetry stream: introduce the image, then replay what boot
+/// buffered before there was anywhere to put it.
+///
+/// **One entry point because there is more than one transport.** Both the
+/// virtio-console and the UDP path reach this moment, and each previously
+/// open-coded the same `send_hello` + `flush_pre_init` pair — a sequence that
+/// only works if every site remembers every step. Adding the build-regime frame
+/// would have made it three. A transport that comes up now gets the whole
+/// preamble by calling one function, which is why [`send_hello`] and
+/// [`send_build_info`] are private.
+///
+/// Order is load-bearing: `Hello` first (it carries the `timebase_hz` the host
+/// needs to interpret every timestamp that follows), then the build regime, then
+/// the buffered frames — so provenance precedes the data it describes.
+pub fn open_stream(timebase_hz: u32) {
+    send_hello(timebase_hz);
+    send_build_info();
+    flush_pre_init();
+}
+
+fn send_hello(timebase_hz: u32) {
     let frame = Frame::Hello {
         timebase_hz: u64::from(timebase_hz),
         protocol_version: protocol::PROTOCOL_VERSION,
     };
     let mut buf = [0u8; 40];
+    if let Ok(encoded) = protocol::wire_encode(&frame, &mut buf) {
+        transmit_bytes(encoded);
+    }
+}
+
+/// Put this image's build regime on the wire, right behind `Hello`.
+///
+/// Beside `Hello` because it is the same kind of fact — what the host is talking
+/// to, rather than something that happened — and because the question it answers
+/// ("was this the optimized build?") is one you want settled before reading any
+/// timing in the stream that follows.
+///
+/// Allocation-free and intern-free by construction: both values are `env!`
+/// literals baked in by `kernel/build.rs`, so this is two `&'static str`s and a
+/// stack buffer. That matters at this point in boot — the intern table can
+/// allocate, and telemetry that allocates is the re-entry hazard CLAUDE.md warns
+/// about for the alloc and IRQ paths.
+fn send_build_info() {
+    let frame = Frame::BuildInfo {
+        kernel_profile: env!("SNITCHOS_KERNEL_PROFILE"),
+        userspace_opt: env!("SNITCHOS_USERSPACE_OPT_LEVEL"),
+    };
+    let mut buf = [0u8; 64];
     if let Ok(encoded) = protocol::wire_encode(&frame, &mut buf) {
         transmit_bytes(encoded);
     }

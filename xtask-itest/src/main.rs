@@ -1202,13 +1202,19 @@ fn main() -> ExitCode {
                     no_idle_skip,
                     no_reg_cache,
                 );
+                // One binding for the level: the audit builds the kernel with it
+                // and `build-regime-is-reported` checks the guest's own claim
+                // against it. Resolving the default twice is how the check would
+                // end up comparing against a level nobody built.
+                let opt = opt.unwrap_or(qemu::OptLevel::Mid);
+                itest::set_build_opt(opt);
                 itest::snemu_audit::run(
                     steps,
                     limit,
                     scenario.as_deref(),
                     jobs,
                     order,
-                    opt.unwrap_or(qemu::OptLevel::Mid),
+                    opt,
                     share_snapshots,
                     speed,
                     verbose,
@@ -1225,7 +1231,9 @@ fn main() -> ExitCode {
                     ProfileFilter::Wfi => itest_harness::CpuProfile::Wfi,
                     ProfileFilter::Cpu => itest_harness::CpuProfile::Cpu,
                 });
+                let opt = opt.unwrap_or(qemu::OptLevel::Low);
                 itest::set_capture_level(capture.into());
+                itest::set_build_opt(opt);
                 itest::run(itest::RunConfig {
                     name: scenario,
                     repeat,
@@ -1239,7 +1247,7 @@ fn main() -> ExitCode {
                     skip,
                     tags: tag,
                     shared,
-                    opt: opt.unwrap_or(qemu::OptLevel::Low),
+                    opt,
                 })
             }
             }

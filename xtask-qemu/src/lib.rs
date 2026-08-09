@@ -142,6 +142,19 @@ impl OptLevel {
     /// `Low` is `None` because `build.rs` only reads the variable inside its
     /// `profile == "release"` branch — a debug kernel builds a debug userspace,
     /// and an override here would be a value nothing consults.
+    /// The `(kernel_profile, userspace_opt)` a kernel built at this level should
+    /// report in its `BuildInfo` frame.
+    ///
+    /// Routed through `kernel_boot::build_info::userspace_opt_level` — the same
+    /// function `kernel/build.rs` uses to decide what to pass — so this predicts
+    /// rather than restates. Restating it here is how an expectation drifts into
+    /// agreeing with itself instead of with the build.
+    #[must_use]
+    pub fn expected_build_regime(self) -> (&'static str, &'static str) {
+        let profile = if self.is_release() { "release" } else { "debug" };
+        (profile, kernel_boot::build_info::userspace_opt_level(profile, self.userspace_opt_override()))
+    }
+
     fn userspace_opt_override(self) -> Option<&'static str> {
         match self {
             OptLevel::Low => None,
@@ -274,6 +287,23 @@ mod tests {
             );
             assert!(path.ends_with("/kernel"), "{opt:?} reads {path}");
         }
+    }
+
+    #[test]
+    /// **What a kernel built at this level should say about itself.**
+    ///
+    /// The itest compares this against the `BuildInfo` frame the guest emits, so
+    /// the two sides are derived independently: this one from what the *tool*
+    /// asked for, the frame from what `kernel/build.rs` actually passed to the
+    /// nested userspace build. Agreement across all four rungs is the property —
+    /// a hardcoded expectation would hold at the default level and silently stop
+    /// meaning anything under `--opt max`.
+    #[test]
+    fn every_rung_predicts_the_regime_a_kernel_built_at_it_will_report() {
+        assert_eq!(OptLevel::Low.expected_build_regime(), ("debug", "0"));
+        assert_eq!(OptLevel::Mid.expected_build_regime(), ("release", "1"));
+        assert_eq!(OptLevel::Hi.expected_build_regime(), ("release", "2"));
+        assert_eq!(OptLevel::Max.expected_build_regime(), ("release", "3"));
     }
 
     #[test]

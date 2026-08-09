@@ -253,6 +253,29 @@ pub enum Frame<'a> {
   /// `snitchos.audio.xruns_total` metric. New variants go at the END — postcard
   /// encodes discriminants positionally.
   AudioXRun { count: u32, t: u64, hart_id: u8 },
+  /// **What this image was built as** — the kernel's cargo profile and the
+  /// opt-level of the userspace programs embedded in it. Emitted once at boot,
+  /// beside [`Hello`](Self::Hello).
+  ///
+  /// Two fields rather than one because they move independently: a release
+  /// kernel can carry a userspace at opt-1, 2 or 3 (the Low/Mid/Hi/Max ladder),
+  /// and for anything compute-bound in userspace — a drivel completion, say —
+  /// it is the *second* number that decides the answer. Collapsing them is how
+  /// "what is on this board?" stopped having one.
+  ///
+  /// This exists because the question was previously unanswerable from the
+  /// running system: `cargo xtask image` built debug images, so the board ran an
+  /// **opt-0** userspace and no artifact on disk distinguished it from an
+  /// optimized one (docs/debt-register.md #19). The values come from
+  /// `kernel/build.rs`, which reports the level it actually passed to the nested
+  /// userspace build rather than the one it was asked for — a witness, not an
+  /// echo.
+  ///
+  /// Plain `&str` rather than [`StringId`]s: these are `env!` literals emitted
+  /// once, so interning buys nothing and would make boot provenance depend on
+  /// the intern table. New variants go at the END — postcard encodes
+  /// discriminants positionally.
+  BuildInfo { kernel_profile: &'a str, userspace_opt: &'a str },
 }
 
 /// Encode `frame` as one self-delimited wire unit: postcard, then COBS, then a

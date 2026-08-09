@@ -11,6 +11,24 @@ pub fn is_hello() -> impl Fn(&OwnedFrame, &StringTable) -> bool {
     |f, _| matches!(f, OwnedFrame::Hello { .. })
 }
 
+/// The guest's own statement of what it was built as, matching `profile` and
+/// `userspace_opt` exactly.
+///
+/// Matching on the *values* rather than just the variant is the whole point: a
+/// scenario that only checked a `BuildInfo` arrived would pass just as happily
+/// while the kernel reported a regime nobody built.
+pub fn is_build_info(
+    profile: &'static str,
+    userspace_opt: &'static str,
+) -> impl Fn(&OwnedFrame, &StringTable) -> bool {
+    move |f, _| match f {
+        OwnedFrame::BuildInfo { kernel_profile, userspace_opt: opt } => {
+            kernel_profile == profile && opt == userspace_opt
+        }
+        _ => false,
+    }
+}
+
 pub fn is_span_start_named(name: &'static str) -> impl Fn(&OwnedFrame, &StringTable) -> bool {
     move |f, strings| match f {
         OwnedFrame::SpanStart { name_id, .. } => {

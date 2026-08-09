@@ -518,6 +518,20 @@ impl Boot {
 }
 
 impl View {
+    /// What the guest's `BuildInfo` frame should say, given the regime this
+    /// boot's kernel was built at.
+    ///
+    /// The comparison has teeth only because the two sides come from different
+    /// places: this from the tool's own `OptLevel`, the frame from what
+    /// `kernel/build.rs` actually passed to the nested userspace build. Both
+    /// route through `kernel_boot::build_info::userspace_opt_level`, so what is
+    /// being checked is that the build *obeyed* the rule — not that two copies
+    /// of the rule agree.
+    #[must_use]
+    pub fn expected_build_regime(&self) -> (&'static str, &'static str) {
+        build_opt().expected_build_regime()
+    }
+
     /// Build a `View` over an already-collected frame stream, with no live
     /// guest behind it — the snemu fidelity audit's entry point. snemu runs to
     /// a step budget, its telemetry is decoded to `frames`, and a scenario's
@@ -1002,6 +1016,8 @@ impl View {
                 format!("NotifyWait {{ notification={notification} bits={bits:#b} to={to_task} t={t} hart={hart_id} }}"),
             OwnedFrame::AudioXRun { count, t, hart_id } =>
                 format!("AudioXRun {{ count={count} t={t} hart={hart_id} }}"),
+            OwnedFrame::BuildInfo { kernel_profile, userspace_opt } =>
+                format!("BuildInfo {{ kernel={kernel_profile} userspace=opt-{userspace_opt} }}"),
         }
     }
 }
@@ -1082,6 +1098,40 @@ pub fn set_capture_level(level: CaptureLevel) {
     CAPTURE_LEVEL.store(level_to_u8(level), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Process-wide build regime, set once from the CLI before scenarios run.
+///
+/// A global rather than a field on `Boot`/`View` for the same reason
+/// [`CAPTURE_LEVEL`] is one: it is fixed for the whole run and every path that
+/// makes a `View` would otherwise have to thread it — the QEMU boot, the snemu
+/// live machine, the replay collapse and four unit tests. Threading a
+/// run-constant through five constructors is how one of them ends up defaulting
+/// and quietly disagreeing with the kernel it is checking.
+///
+/// Default `Mid`, matching `OptLevel::default()`, so the value is sane before
+/// [`set_build_opt`] is called.
+static BUILD_OPT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+/// Set the process-wide build regime. Call once at startup, beside
+/// [`set_capture_level`].
+pub fn set_build_opt(opt: qemu::OptLevel) {
+    let code = match opt {
+        qemu::OptLevel::Low => 0,
+        qemu::OptLevel::Mid => 1,
+        qemu::OptLevel::Hi => 2,
+        qemu::OptLevel::Max => 3,
+    };
+    BUILD_OPT.store(code, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn build_opt() -> qemu::OptLevel {
+    match BUILD_OPT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => qemu::OptLevel::Low,
+        2 => qemu::OptLevel::Hi,
+        3 => qemu::OptLevel::Max,
+        _ => qemu::OptLevel::Mid,
+    }
+}
+
 fn capture_level() -> CaptureLevel {
     match CAPTURE_LEVEL.load(std::sync::atomic::Ordering::Relaxed) {
         0 => CaptureLevel::Summary,
@@ -1113,6 +1163,7 @@ fn variant_name(frame: &OwnedFrame) -> &'static str {
         OwnedFrame::NotifySignal { .. } => "NotifySignal",
         OwnedFrame::NotifyWait { .. } => "NotifyWait",
         OwnedFrame::AudioXRun { .. } => "AudioXRun",
+        OwnedFrame::BuildInfo { .. } => "BuildInfo",
     }
 }
 

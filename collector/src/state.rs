@@ -425,6 +425,19 @@ impl State {
                 self.advance_anchor(*t);
                 None
             }
+            Frame::BuildInfo { .. } => {
+                // Boot provenance: which kernel profile and which userspace
+                // opt-level produced this stream. Carries no `t` — like `Hello`,
+                // it describes the image rather than a moment in it, so there is
+                // no anchor to advance.
+                //
+                // The obvious home is an OTLP **resource attribute**, so every
+                // span in a trace is labelled with the build that produced it and
+                // two runs at different opt-levels stop being silently
+                // comparable. That is a real feature and a follow-on; the itest
+                // reads the frame directly today.
+                None
+            }
         }
     }
 

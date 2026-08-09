@@ -281,15 +281,13 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
                 None => false,
             };
             if net_up {
-                tracing::send_hello(timebase_hz as u32);
-                tracing::flush_pre_init();
+                tracing::open_stream(timebase_hz as u32);
                 println!("virtio-net: telemetry ready");
             } else {
                 // SAFETY: as above.
                 match unsafe { virtio_console::init(&dtb) } {
                     Ok(()) => {
-                        tracing::send_hello(timebase_hz as u32);
-                        tracing::flush_pre_init();
+                        tracing::open_stream(timebase_hz as u32);
                         println!("virtio-console: ready");
                     }
                     Err(e) => println!("virtio-console: init failed: {:?}", e),
