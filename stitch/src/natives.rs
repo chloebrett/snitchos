@@ -9,7 +9,7 @@ use core::cmp::Ordering;
 use crate::prelude::*;
 
 use crate::env::Env;
-use crate::interp::{apply_values, none, perform_effect, some};
+use crate::interp::{apply_values, map_lookup, none, perform_effect, some};
 use crate::ops::value_order;
 use crate::value::{DataValue, LazySeq, NativeFn, RuntimeError, Step, Value};
 
@@ -63,6 +63,8 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "listSet",      arity: 3, func: native_list_set,     module: Some("List"), export_as: Some("set") },
     NativeFn { name: "listInsert",   arity: 3, func: native_list_insert,  module: Some("List"), export_as: Some("insert") },
     NativeFn { name: "listRemoveAt", arity: 2, func: native_list_remove_at, module: Some("List"), export_as: Some("removeAt") },
+    // --- Map module: a dictionary you can build, not just write down ---
+    NativeFn { name: "mapGet",       arity: 2, func: native_map_get,       module: Some("Map"),  export_as: Some("get") },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -948,6 +950,18 @@ fn native_reverse(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     Ok(Value::List(items.into()))
 }
 
+/// The entries of a `Map`, or a fault naming what arrived instead. The `Map`
+/// counterpart of [`expect_list`], same message shape.
+fn expect_map<'a>(name: &str, value: &'a Value) -> Result<&'a [(Value, Value)], RuntimeError> {
+    match value {
+        Value::Map(entries) => Ok(entries.as_slice()),
+        other => Err(RuntimeError::new(format!(
+            "{name} expects a Map, got {}",
+            other.kind()
+        ))),
+    }
+}
+
 /// One `Map` entry as the `(key, value)` tuple the collection combinators hand
 /// to a user function. The single definition of "what an entry looks like from
 /// Stitch" — `fold`/`map`/`filter` all go through here, so they cannot disagree
@@ -1130,6 +1144,16 @@ fn native_fold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     Ok(acc)
 }
 
+/// `Map.get(m, k)` — the value `k` maps to, as a `Maybe`. Exactly the lookup the
+/// `m[k]` index form performs (both call `interp::map_lookup`), spelled as a call
+/// so it composes in a pipeline: `m |> Map.get("a") |> unwrapOr(0)`.
+fn native_map_get(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [map, key] = args else {
+        return Err(RuntimeError::new("get expects (map, key)"));
+    };
+    Ok(map_lookup(expect_map("get", map)?, key))
+}
+
 /// `join(list, sep)` — the displayed elements concatenated with `sep` between.
 fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     let [list, separator] = args else {
@@ -1151,7 +1175,8 @@ fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use crate::testing::{
-        run_modules, run_program, run_program_err, run_program_events, run_program_on,
+        run_modules, run_modules_err, run_program, run_program_err, run_program_events,
+        run_program_on,
     };
     use crate::value::{TelemetryEvent, Value};
 
@@ -1530,6 +1555,18 @@ mod tests {
         run_modules(&[("main", source.as_str())], "main")
     }
 
+    /// `run_list`'s counterpart for the `Map` module — a builtin module is only
+    /// in scope after `use`, and `use` only resolves through the module path.
+    fn run_map(body: &str) -> Value {
+        let source = format!("use Map  main() = {body}");
+        run_modules(&[("main", source.as_str())], "main")
+    }
+
+    fn run_map_err(body: &str) -> String {
+        let source = format!("use Map  main() = {body}");
+        run_modules_err(&[("main", source.as_str())], "main")
+    }
+
     #[test]
     fn list_remove_at_drops_the_index_and_leaves_the_original() {
         let list = |xs: &[i64]| Value::List(xs.iter().copied().map(Value::Int).collect());
@@ -1663,6 +1700,41 @@ mod tests {
         assert_eq!(
             run_program(r#"main() = find(["a": 1, "b": 2], e -> e == ("b", 2)) == Some(("b", 2))"#),
             Value::Bool(true)
+        );
+    }
+
+    // `Map.get` is the pipeline-friendly spelling of `m[k]`, and the two must be
+    // the same lookup — a divergence here would be silent and permanent. So the
+    // agreement itself is the assertion, on a present *and* an absent key (a
+    // present-only test passes for an implementation that never returns `None`).
+    #[test]
+    fn map_get_is_the_same_lookup_as_indexing() {
+        assert_eq!(
+            run_map(
+                r#"{
+                       let m = ["a": 1, "b": 2]
+                       Map.get(m, "a") == m["a"] and Map.get(m, "zz") == m["zz"]
+                   }"#
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.get(["a": 1], "a") == Some(1)"#),
+            Value::Bool(true)
+        );
+        // Absence is `None`, never a fault — the language has no null.
+        assert_eq!(
+            run_map(r#"Map.get(["a": 1], "zz") == None"#),
+            Value::Bool(true)
+        );
+        assert_eq!(run_map(r#"Map.get([:], "a") == None"#), Value::Bool(true));
+    }
+
+    #[test]
+    fn map_get_refuses_a_non_map_receiver() {
+        assert_eq!(
+            run_map_err(r#"Map.get([1, 2, 3], "a")"#),
+            "get expects a Map, got List"
         );
     }
 

@@ -72,6 +72,23 @@ pub fn run_modules(sources: &[(&str, &str)], entry: &str) -> Value {
     eval_modules(&modules, entry).expect("test modules should evaluate")
 }
 
+/// [`run_modules`]'s error path: run the entry module's `main` expecting a
+/// runtime error, and return its message. Needed because a program that reaches
+/// a builtin module (`use Map`, `use List`, …) must go through `eval_modules`,
+/// so `run_program_err` cannot reach those refusals.
+pub fn run_modules_err(sources: &[(&str, &str)], entry: &str) -> String {
+    let modules = sources
+        .iter()
+        .map(|(name, src)| Module {
+            name: (*name).to_string(),
+            items: parse_program(src).expect("test module should parse"),
+        })
+        .collect::<Vec<_>>();
+    eval_modules(&modules, entry)
+        .expect_err("test modules should fail at runtime")
+        .message()
+}
+
 /// Parse and run a program against an installed [`Platform`] backend, returning
 /// `main`'s result (`Ok`) or its runtime error (`Err`) — for asserting on a
 /// program's console / cap effects (and on refused, undeclared effects).

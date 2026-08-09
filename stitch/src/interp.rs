@@ -1200,14 +1200,24 @@ pub(crate) fn none() -> Value {
     }))
 }
 
+/// The value `key` maps to in `entries`, as a `Maybe` — `None` when absent.
+///
+/// The single definition of "look a key up in a `Map`", shared by the `m[k]`
+/// index form (below) and the `Map.get` native. Two spellings of one operation,
+/// so they cannot drift apart: a divergence between them would be silent, and
+/// permanent once programs depended on it.
+pub(crate) fn map_lookup(entries: &[(Value, Value)], key: &Value) -> Value {
+    entries
+        .iter()
+        .find(|(candidate, _)| candidate == key)
+        .map_or_else(none, |(_, value)| some(value.clone()))
+}
+
 /// Index a collection: `map[key]` looks up by key, `list[i]` by position. Both
 /// return a `Maybe` — `None` for a missing key or out-of-range index (no null).
 fn eval_index(object: &Value, index: &Value) -> Result<Value, RuntimeError> {
     match object {
-        Value::Map(entries) => Ok(entries
-            .iter()
-            .find(|(key, _)| key == index)
-            .map_or_else(none, |(_, value)| some(value.clone()))),
+        Value::Map(entries) => Ok(map_lookup(entries, index)),
         Value::List(items) => {
             let Value::Int(position) = index else {
                 return Err(RuntimeError::new(format!(
