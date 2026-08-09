@@ -1,0 +1,33 @@
+[package]
+name = "snemu-wasm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The emulator core. This crate is a *second embedder* of it, alongside
+# `itest-harness` — it holds a `Machine` and drives `step()`. Nothing here
+# reaches into snemu's internals; if it needs to, that's a signal the API is
+# missing something rather than a licence to widen this crate.
+snemu = { path = "../snemu" }
+
+# Telemetry decode. The page renders `Frame`s, not raw virtio bytes, so the
+# `std` stream decoder (`protocol::stream`) is the point of the dependency.
+protocol = { path = "../protocol", features = ["std"] }
+
+# The JS boundary. Unconditional rather than scoped to wasm32: the
+# `#[wasm_bindgen]` shell must still *compile* for the host, because the host is
+# where its logic is tested. Nothing in the browser-only path may live outside
+# that shell.
+wasm-bindgen = "0.2"
+
+[lints]
+workspace = true
+
+[lib]
+# `cdylib` is what wasm-pack links into a `.wasm` module; `rlib` is what lets
+# this crate's own tests (and any host consumer) link it natively. The `rlib`
+# half is load-bearing for TDD here — without it the pure core could only ever
+# be exercised through a browser.
+crate-type = ["cdylib", "rlib"]
+doctest = false

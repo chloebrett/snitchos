@@ -310,7 +310,9 @@ fn deps_layer(crate_name: &str) -> Option<String> {
         "hello" | "fs" | "snitchos-user" | "snitchos-std" | "snitchos-user-macros" | "stitch" => {
             "userspace"
         }
-        "xtask" | "collector" | "snemu" | "itest-harness" | "diagram" | "snip" => "tooling",
+        "xtask" | "collector" | "snemu" | "snemu-wasm" | "itest-harness" | "diagram" | "snip" => {
+            "tooling"
+        }
         "magnitude" => "agnostic",
         _ => return None,
     };

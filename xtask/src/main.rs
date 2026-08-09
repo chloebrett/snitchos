@@ -468,6 +468,12 @@ mod mutant_plan_tests {
             "kvetch-serve",
             "kvetch-vocab",
             "protocol",
+            // The browser shim (plans/snemu-wasm.md, step 1). Enrolled the moment
+            // it joined the workspace rather than at the end of the milestone: its
+            // whole reason to exist is that the pure logic is host-tested, so a
+            // crate here that mutation testing never reaches would be the one
+            // place that claim goes unchecked.
+            "snemu-wasm",
             "stitch",
             "synth",
             "xtask-cram",

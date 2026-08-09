@@ -11,6 +11,7 @@ graph LR
         diagram["diagram"]
         itest_harness["itest-harness"]
         snemu["snemu"]
+        snemu_wasm["snemu-wasm"]
         snip["snip"]
         xtask["xtask"]
     end
@@ -133,6 +134,8 @@ graph LR
     protocol --> snitchos_abi
     ramfs --> fs_core
     snemu --> protocol
+    snemu_wasm --> protocol
+    snemu_wasm --> snemu
     snitchos_abi --> hitch_pod
     snitchos_std --> snitchos_user
     snitchos_user --> hitch

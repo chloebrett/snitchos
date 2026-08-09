@@ -157,6 +157,24 @@ exists.
 **REFACTOR**: N/A.
 **Done when**: `cargo xtask test` shows a `snemu-wasm` suite; human approves commit.
 
+**What it actually cost (done 2026-08-09).** The metadata-derived pickup works exactly
+as advertised — no test-list edit — but "joining the workspace is free" was too strong.
+Three derived artifacts do not update themselves, and each is gate-enforced:
+
+- `docs/generated/deps.md` drifts the moment a member is added (it is generated from
+  `cargo metadata --no-deps`). `cargo xtask diagram deps` regenerates it.
+- `deps_layer` (`xtask-itest/src/diagram_cmd.rs`) is an editorial crate→layer map whose
+  own doc says "new crates land here (else they render ungrouped)". `snemu-wasm` is
+  `tooling`, beside `snemu`.
+- `MUTANT_CRATES`' characterisation test
+  (`the_derived_plan_matches_the_previously_hardcoded_set`) is a deliberate tripwire and
+  fires on any new mutated crate. Enrolled now rather than at the pre-PR gate, because a
+  crate whose entire premise is "the logic is host-tested" is the last one that should
+  go unmutated.
+
+The tripwire firing is also what *proved* the pickup: it failed with the derived list
+containing `snemu-wasm` and the hardcoded list not. Better evidence than a green run.
+
 ### Step 1b: Prove the core *runs* under wasm32, not just builds
 
 **Acceptance criteria**: snemu's existing test suite (or a boot-to-heartbeat subset of
@@ -311,9 +329,9 @@ commit.
 
 ## Pre-PR quality gate
 
-1. Mutation testing — run the `mutation-testing` skill on `snemu-wasm`; add it to
-   `MUTANT_CRATES` (`xtask/src/main.rs:1466`), which **is** hardcoded, unlike the test
-   list.
+1. Mutation testing — run the `mutation-testing` skill on `snemu-wasm`. (The
+   `MUTANT_CRATES` characterisation list was already updated in step 1; it is
+   hardcoded, unlike the test list.)
 2. Refactoring assessment — run the `refactoring` skill.
 3. `cargo xtask clippy` and `cargo xtask test` pass.
 4. `cargo xtask links` passes — this plan and the design doc both link relatively, and

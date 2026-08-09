@@ -66,6 +66,8 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     // --- Map module: a dictionary you can build, not just write down ---
     NativeFn { name: "mapGet",       arity: 2, func: native_map_get,       module: Some("Map"),  export_as: Some("get") },
     NativeFn { name: "mapHas",       arity: 2, func: native_map_has,       module: Some("Map"),  export_as: Some("has") },
+    NativeFn { name: "mapInsert",    arity: 3, func: native_map_insert,    module: Some("Map"),  export_as: Some("insert") },
+    NativeFn { name: "mapRemove",    arity: 2, func: native_map_remove,    module: Some("Map"),  export_as: Some("remove") },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -1170,6 +1172,41 @@ fn native_map_has(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(present))
 }
 
+/// `Map.insert(m, k, v)` — `m` with `k` mapped to `v`. Persistent: `m` itself is
+/// untouched.
+///
+/// An **existing** key keeps its original position and takes the new value; a
+/// new key is appended. That is not an arbitrary choice — it is exactly what the
+/// map *literal* does when it sees a duplicate key (`interp::eval`'s
+/// `CoreExprKind::Map` arm: last value wins, first position kept). Matching it is
+/// what makes a built map and a written literal interchangeable.
+fn native_map_insert(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [map, key, value] = args else {
+        return Err(RuntimeError::new("insert expects (map, key, value)"));
+    };
+    let mut entries = expect_map("insert", map)?.to_vec();
+    match entries.iter_mut().find(|(candidate, _)| candidate == key) {
+        Some(slot) => slot.1 = value.clone(),
+        None => entries.push((key.clone(), value.clone())),
+    }
+    Ok(Value::Map(entries.into()))
+}
+
+/// `Map.remove(m, k)` — `m` without `k`, the surviving entries in their original
+/// order. Removing an absent key is a no-op returning an equal map, not a fault:
+/// absence is ordinary, the same stance `Map.get` takes by answering `None`.
+fn native_map_remove(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [map, key] = args else {
+        return Err(RuntimeError::new("remove expects (map, key)"));
+    };
+    let entries = expect_map("remove", map)?
+        .iter()
+        .filter(|(candidate, _)| candidate != key)
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(Value::Map(entries.into()))
+}
+
 /// `join(list, sep)` — the displayed elements concatenated with `sep` between.
 fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     let [list, separator] = args else {
@@ -1744,6 +1781,110 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(run_map(r#"Map.get([:], "a") == None"#), Value::Bool(true));
+    }
+
+    // Insertion order is a **contract**, not an implementation detail: it is what
+    // lets a built map and a written literal be interchangeable. Map equality is
+    // unordered (`value.rs`), so every order claim below goes through the keys as
+    // a `List` — the only spelling that can see a reordering.
+    #[test]
+    fn map_insert_appends_a_new_key_and_replaces_an_existing_one_in_place() {
+        assert_eq!(
+            run_map(
+                r#"Map.insert(["a": 1], "b", 2)
+                   |> map(e -> match e { (k, _) => k })
+                   == ["a", "b"]"#
+            ),
+            Value::Bool(true)
+        );
+        // Replacing keeps the key where it was — appending it instead would be
+        // invisible to equality and visible to anyone who iterates.
+        assert_eq!(
+            run_map(
+                r#"Map.insert(["a": 1, "b": 2], "a", 99)
+                   |> map(e -> match e { (k, _) => k })
+                   == ["a", "b"]"#
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.insert(["a": 1, "b": 2], "a", 99) == ["a": 99, "b": 2]"#),
+            Value::Bool(true)
+        );
+        // ...and does not grow the map.
+        assert_eq!(
+            run_map(r#"count(Map.insert(["a": 1, "b": 2], "a", 99))"#),
+            Value::Int(2)
+        );
+    }
+
+    // The load-bearing test of the whole `Map` module: a map you *build* is
+    // indistinguishable from one you *write down*. If this ever fails, literals
+    // and constructed maps have forked and every other guarantee is local.
+    #[test]
+    fn a_built_map_is_indistinguishable_from_the_literal() {
+        assert_eq!(
+            run_map(r#"Map.insert(Map.insert([:], "a", 1), "b", 2) == ["a": 1, "b": 2]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(
+                r#"Map.insert(Map.insert([:], "a", 1), "b", 2)
+                   |> map(e -> match e { (k, _) => k })
+                   == ["a", "b"]"#
+            ),
+            Value::Bool(true)
+        );
+    }
+
+    // Persistent, like `List.set`/`List.insert` — the receiver is never touched.
+    #[test]
+    fn map_insert_and_remove_leave_the_original_untouched() {
+        assert_eq!(
+            run_map(
+                r#"{
+                       let m = ["a": 1]
+                       let grown = Map.insert(m, "b", 2)
+                       let shrunk = Map.remove(m, "a")
+                       count(m) == 1 and count(grown) == 2 and count(shrunk) == 0
+                   }"#
+            ),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn map_remove_drops_a_key_and_preserves_the_order_of_the_rest() {
+        assert_eq!(
+            run_map(r#"Map.remove(["a": 1, "b": 2, "c": 3], "b") == ["a": 1, "c": 3]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(
+                r#"Map.remove(["a": 1, "b": 2, "c": 3], "b")
+                   |> map(e -> match e { (k, _) => k })
+                   == ["a", "c"]"#
+            ),
+            Value::Bool(true)
+        );
+        // Removing an absent key is a no-op, not a fault — absence is ordinary.
+        assert_eq!(
+            run_map(r#"Map.remove(["a": 1], "zz") == ["a": 1]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(run_map(r#"Map.remove([:], "a") == [:]"#), Value::Bool(true));
+    }
+
+    #[test]
+    fn map_insert_and_remove_refuse_a_non_map_receiver() {
+        assert_eq!(
+            run_map_err(r#"Map.insert([1, 2, 3], "a", 1)"#),
+            "insert expects a Map, got List"
+        );
+        assert_eq!(
+            run_map_err(r#"Map.remove([1, 2, 3], "a")"#),
+            "remove expects a Map, got List"
+        );
     }
 
     #[test]
