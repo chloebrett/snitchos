@@ -414,7 +414,7 @@ trusting a control that cannot discriminate.
   then came back in this note a week later. Post 79's transcription hop, caught in the
   act: a stale caveat is cheap to copy forward and nothing type-checks a note.
 
-## What this leaves open — is drivel full, or is the corpus?
+## Task 3 — drivel was full, and "corpus first, not rung" is now wrong
 
 Task 1 says marginal corpus has stopped paying **for drivel**. Two readings, and
 they give opposite advice:
@@ -447,20 +447,151 @@ And the standing "corpus first, not rung" advice comes from
 0.030 nats — **measured at 2.93M tokens, a corpus that has since grown 2.3×.** That
 answer is stale.
 
-Proposed: quip on the B corpus and the D corpus, two seeds each, 30k steps, same
-frozen vocab and held-out. Four runs, ~40 min each solo. It yields both numbers at
-once — `quip@D − drivel@D` (is scaling the rung worth it *now*?) and
-`(quip@D − quip@B)` against drivel's −0.025 (is the corpus or the model the binding
-constraint?).
+So: `quip` (3 049 920 params, d 192 × 6 layers × 6 heads) on the **same two corpora**,
+two seeds each, 30k steps, same frozen vocab and held-out, same default 3e-3 LR.
+Token counts are identical to the drivel arms — 4 318 391 and 6 724 381 — so this is
+a difference-in-differences over the same token streams.
+
+| rung | corpus | tokens | epochs | seed 0 | seed 1 | mean |
+|---|---|---|---|---|---|---|
+| drivel | B | 4 318 391 | 14.23 | 2.5584 | 2.5627 | 2.5606 |
+| drivel | D | 6 724 381 | 9.14 | 2.5309 | 2.5398 | 2.5354 |
+| **quip** | B | 4 318 391 | 14.23 | 2.4069 | 2.3906 | **2.3988** |
+| **quip** | D | 6 724 381 | 9.14 | 2.3819 | 2.3244 | **2.3532** |
+
+| step | drivel B | drivel D | quip B | quip D |
+|---|---|---|---|---|
+| 3 001 | 3.1702 | 3.2217 | 3.1321 | 2.9890 |
+| 9 001 | 2.7885 | 2.7855 | 2.6362 | 2.6418 |
+| 15 001 | 2.6781 | 2.6482 | 2.5119 | 2.5005 |
+| 21 001 | 2.5972 | 2.5782 | 2.4392 | 2.4288 |
+| 30 000 | 2.5584 | 2.5309 | 2.4069 | **2.3819** |
+
+### The rung is worth 6× what the corpus is, per unit of effort
+
+**quip − drivel is −0.162 nats on the B corpus and −0.182 on D**, at both seeds, against
+seed spreads of 0.004–0.058. That is 3–10σ, and it is **5–6× the 0.030 nats batch9
+measured at 2.93M tokens.**
+
+| lever | cost | buys |
+|---|---|---|
+| +55.7% corpus (batch10-full + batch11) | **14.9 h of generation** | 0.025 nats |
+| 3× parameters (drivel → quip) | **1.8× training wall-clock** | **0.162 nats** |
+
+Roughly six times the return, and it spends none of the resource that is actually
+scarce. **[batch9](batch9-findings.md#quip-3-the-parameters-buys-003-nats)'s "scaling
+the rung is not what this ladder needs next; corpus is" was correct when measured and
+is now wrong.** Two things changed: the corpus grew 2.3×, and that note's comparison
+gave quip 20 000 steps against drivel's 30 000 — so its 0.030 was itself understated.
+
+It is also a **lower bound**. drivel at 30k is near-converged (0.004 over its last 3k
+steps); quip is still falling steeply (0.043 over its last 6k). More steps widen it.
+
+### The difference-in-differences did *not* resolve
+
+The question this was built to answer — does quip convert *marginal* corpus better
+than drivel? — is not settled:
+
+| | seed 0 | seed 1 | mean |
+|---|---|---|---|
+| drivel D − B | −0.0275 | −0.0229 | −0.0252 |
+| quip D − B | −0.0250 | −0.0662 | −0.0456 |
+| **DiD** | | | **−0.0204** |
+
+quip's seed spread on that delta is 0.0412, giving a paired se of ≈0.021 — so the DiD
+is ~1σ. The direction favours capacity-bound; the magnitude is not claimable.
+
+**quip is markedly noisier than drivel** — seed spreads of 0.0163 (B) and 0.0575 (D)
+against drivel's 0.0043–0.0156. The curves are smooth and monotone and the seeds
+diverge progressively (0.037 apart at step 9001, 0.058 at 30 000), so this is genuine
+seed variation, not a glitch. Most likely an endpoint sitting on a steep un-converged
+curve. That noise is what swallowed the DiD, and a longer schedule would probably
+shrink it.
+
+So the honest synthesis is that the original either/or was a false dichotomy:
+**drivel was capacity-bound on the corpus it already had** — hence quip's large
+absolute win at *both* corpus sizes — while whether the *marginal* batch11 tokens are
+redundant remains open. Nothing here argues against diversifying the recipe sheet;
+it just is not the cheapest next move.
+
+### Caveats specific to Task 3
+
+- **The LR is untuned for quip.** 3e-3 is drivel's default and `cram/src/run.rs` does
+  not scale it by rung, so batch9's quip used it too — which keeps this comparable to
+  that datapoint but means quip may be mistuned. Both quip arms share it, so the DiD
+  is internally valid; quip's *absolute* standing could move either way under a sweep.
+  Given quip wins by 0.16 with a possibly-wrong LR, the direction is safe.
+- **Equal steps is equal tokens seen, not equal compute.** quip burns ~1.8× the
+  wall-clock per run (measured: ~7 000 tok/s against drivel's ~12–14k at the same
+  4-way contention — better than the 3× its parameter count implies, because the
+  wider matmuls use the AMX units more efficiently).
+- **Neither quip arm has converged**, and quip@D is the least converged of all eight
+  runs in this comparison.
+
+### quip's output is not visibly better, and parse rate cannot see the gap
+
+100 unconstrained 96-token samples each, same tiny eval root, best drivel against best
+quip:
+
+| checkpoint | held-out | as sampled | complete items |
+|---|---|---|---|
+| `drivel-D-b9b10b11` | 2.5309 | **34%** | 35% |
+| `quip-D-b9b10b11-s1` | 2.3244 | 27% | **38%** |
+
+The two parse measures **disagree on the winner**, and both gaps are ~1σ or less at
+n=100 (se ≈ 4.5pp). So 0.207 nats — 23% lower perplexity, six times what the whole of
+batch11 bought — produces **no resolvable difference in parse rate**, and no obvious
+difference by eye either. quip's samples read marginally more fluently
+(`computeAnglishment`, `trigaction` against drivel's `Peries`, `Handar`) and its code
+blocks are structurally cleaner, but the character is identical: correct shape,
+nonsense semantics. Nothing crossed a threshold.
+
+quip's seed-0 sample, scored as *not* parsing:
+
+```
+test "boundMatch returns empty list for empty" {
+    expect findMatchMatch(rem) == Some(0)
+}
+
+test "boundMatch returns negative for invalid range" {
+    let result = concat(0, 10, [15])
+    expect count(result) == 0
+}
+
+test "collectPath finds a valid paths" {
+    let pattern = [
+        Path(id: 13),
+```
+
+Three well-formed test blocks, failing only because the 96-token window cut it off
+mid-list. Its seed-2 *success* is comments only, which parses trivially — the metric
+is softer than it looks in both directions.
+
+**The as-sampled/complete-items split is itself a finding.** quip has *more* complete
+items but *fewer* as-sampled parses, which is the signature of writing longer
+constructs that overrun the 96-token budget. If so the sampling window is now too
+short to evaluate quip fairly and this comparison is mildly biased against it. Raising
+`--samples` will not fix that; raising the sample *length* would.
+
+This is the third time in this study that eyeballing samples failed to track the gate
+metric — see also the drivel three-way above, where the ranking came out backwards.
 
 ## Artifacts
 
-Checkpoints and curves in `checkpoints/` (gitignored), thirteen runs:
-`drivel-B-repro`, `drivel-B-repro-s1`, `drivel-E-b9b10full`,
+Checkpoints and curves in `checkpoints/` (gitignored), seventeen runs.
+
+drivel: `drivel-B-repro`, `drivel-B-repro-s1`, `drivel-E-b9b10full`,
 `drivel-E-b9b10full-s1`, `drivel-F1-stride`, `drivel-F1-stride-s1`,
 `drivel-F2-ratio`, `drivel-D-b9b10b11`, `drivel-D-b9b10b11-s1`,
 `drivel-G-ex-noexheld`, `drivel-G-ex-noexheld-s1`, `drivel-H-swap-noexheld`,
 `drivel-H-swap-noexheld-s1`.
+
+quip: `quip-B-b9b10`, `quip-B-b9b10-s1`, `quip-D-b9b10b11`, `quip-D-b9b10b11-s1`.
+
+**`quip-D-b9b10b11-s1` (2.3244) is the best checkpoint this project has produced**,
+0.207 nats ahead of the best drivel. Like every checkpoint here it is *not* promoted —
+and note that promoting a quip rung would change the embedded model's size, not just
+its weights.
 
 Derived corpora in `corpora/` (gitignored, all reproducible):
 

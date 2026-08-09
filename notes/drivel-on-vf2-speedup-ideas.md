@@ -14,11 +14,43 @@ Related: [../plans/legacy/kvetch-drivel-on-target.md](../plans/legacy/kvetch-dri
 ## 0. Measure first — and the cheap place to do it is the host
 
 **There is no on-board tok/s number anywhere in the tree.** Every measurement we
-have is snemu wall-clock (46.5s → 11.8s for six tokens, of which ~8s is boot), and
-the only per-function profile is the *one-token* one, where the kernel dominates by
-construction (19.7% userspace vs ~22% telemetry serialization, 14% `prepare_switch`,
-13% `memset`). That profile does not describe a six-token Tab, and it certainly does
-not describe the board.
+have is snemu wall-clock, and the only per-function profile is the *one-token* one,
+where the kernel dominates by construction (19.7% userspace vs ~22% telemetry
+serialization, 14% `prepare_switch`, 13% `memset`). That profile does not describe a
+six-token Tab, and it certainly does not describe the board.
+
+> **⚠ The widely-quoted "11.8s for a six-token completion" is stale.** Measured
+> 2026-08-06: `cargo xtask itest --opt mid stitch-drivel-completes` is **100.9s**.
+> The 11.8s in post 74 and `plans/legacy/kvetch-drivel-on-target.md` was true when
+> written and the client's token budget has moved since (1 → 4 → 6). Anyone
+> reasoning from it — I did, for most of a session, and invented a 15× "structural
+> gap" that does not exist — is reasoning about a different measurement. Same lesson
+> as post 79: a note that outlives its source is worse than no note.
+
+### Measured 2026-08-06: what the userspace opt level buys
+
+| arm | userspace opt | wall clock |
+|---|---|---|
+| `itest --opt mid stitch-drivel-completes` | opt-1 | 100.9s |
+| `itest --opt max stitch-drivel-completes` | opt-3 | **66.5s** |
+
+**1.52×**, everything else held constant. Read it carefully, because it is *not* the
+board's number:
+
+- **Both arms run an opt-3 kernel.** `Mid` and `Max` differ only in userspace, so
+  this isolates the userspace half and says nothing about debug → opt-3 kernel.
+- **The board is at opt-0, not opt-1.** This measures a sub-interval of one of the
+  two jumps `--opt max` would make there, and misses the one (opt-0 → opt-1) that is
+  usually the largest for bounds-checked scalar loop code.
+
+So 1.52× is a loose lower bound on part of the board win. It does establish the
+direction and that opt-3 userspace runs drivel correctly — an interactive session at
+`--opt max` completes `greet(name) {` → `\n    let water = createPer` with no fault.
+
+**Better measurement available, not yet taken:** guest *instret* is deterministic
+under snemu and drops as the userspace optimises, so `itest --record-instret` gives
+this same comparison with no wall-clock noise and no dependence on host load. Prefer
+it to the seconds above before quoting anything.
 
 The stock-take names "the long-completion profile" as the #1 unpulled lead and says
 it wants an idle machine. **It doesn't — not for the question that matters.** The
