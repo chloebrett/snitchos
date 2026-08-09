@@ -112,6 +112,19 @@ fn main() {
     build_and_embed_user(&dir);
 }
 
+/// Record the build regime into the binary, so a running kernel can say what it
+/// is rather than leaving it to be inferred from the artifact that produced it.
+///
+/// Two separate facts, deliberately not merged (see `kernel_boot::build_info`).
+/// Emitted from the build script rather than from `xtask` because the script
+/// knows what was *actually* passed to the nested userspace build, where `xtask`
+/// only knows what it intended — and the failure this exists to catch is exactly
+/// the two disagreeing.
+fn record_build_regime(profile: &str, userspace_opt: &str) {
+    println!("cargo:rustc-env=SNITCHOS_KERNEL_PROFILE={profile}");
+    println!("cargo:rustc-env=SNITCHOS_USERSPACE_OPT_LEVEL={userspace_opt}");
+}
+
 /// Build the userspace programs (the `hello` + `fs` crates' binaries) for their
 /// bare U-mode target and embed the freshly-built ELFs via `rustc-env` (consumed
 /// by `include_bytes!(env!(...))` in `src/trap/user.rs`), one per [`USER_PROGRAMS`] row.
@@ -136,6 +149,14 @@ fn build_and_embed_user(kernel_dir: &str) {
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let bin_dir = format!("{user_target_dir}/{USER_TARGET}/{profile}");
+
+    // Resolve once, here, and use the same value for both the build and the
+    // report. A debug kernel never forwards an opt-level at all, so this is "0"
+    // there however the environment is set — the case the resolver is tested on.
+    let opt_override = std::env::var("SNITCHOS_USERSPACE_OPT").ok();
+    let userspace_opt =
+        kernel_boot::build_info::userspace_opt_level(&profile, opt_override.as_deref());
+    record_build_regime(&profile, userspace_opt);
 
     // Run a userspace cargo build for `packages`, sharing the target/flags. We
     // build in two phases — `hello` first (it provides `spawnee`), then `fs` — so
@@ -187,8 +208,7 @@ fn build_and_embed_user(kernel_dir: &str) {
             // set it to `2`/`3` (vs `--opt mid`, which leaves it unset and gets
             // opt-1). `rerun-if-env-changed` (in `main`) rebuilds when flicking
             // between levels.
-            let us_opt = std::env::var("SNITCHOS_USERSPACE_OPT").unwrap_or_else(|_| "1".into());
-            cmd.args(["--config", &format!("profile.release.opt-level={us_opt}")]);
+            cmd.args(["--config", &format!("profile.release.opt-level={userspace_opt}")]);
         }
         // Don't leak the outer kernel build's flags into the user build — let it
         // resolve config exactly like a standalone `cargo build -p hello`.

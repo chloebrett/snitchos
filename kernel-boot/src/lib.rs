@@ -21,6 +21,7 @@ extern crate alloc;
 
 pub mod banner;
 pub mod bootargs;
+pub mod build_info;
 pub mod harts;
 pub mod timer;
 pub mod trap;

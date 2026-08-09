@@ -29,9 +29,36 @@ pub fn print() {
     for line in ART_BELOW {
         println!("{line}");
     }
+    println!("{REGIME_LINE}");
     rule();
     println!();
 }
+
+/// What this image was built as, for whoever is looking at a serial console.
+///
+/// On the VisionFive 2 this is the *only* channel that answers the question:
+/// the matching telemetry frame needs a collector, and the collector has no
+/// serial source on hardware (docs/debt-register.md #18). So the board reads its
+/// build regime here, and the itest asserts on the frame.
+///
+/// Both halves are named because they move independently — a release kernel can
+/// carry a userspace at opt-1, 2 or 3, and it is the *userspace* number that
+/// decides how fast a drivel completion is.
+///
+/// `concat!` rather than `format!`: both values are compile-time literals, so
+/// this is a `&'static str` in rodata and the boot path allocates nothing to
+/// print it.
+///
+/// ASCII only, deliberately. The board's serial console is the channel that
+/// most needs this line and the least able to render anything exotic — it
+/// already interleaves the heartbeat pulse mid-word (debt #18), and terminal
+/// handling of non-ASCII width is not something to bet a diagnostic on.
+const REGIME_LINE: &str = concat!(
+    "        build: kernel ",
+    env!("SNITCHOS_KERNEL_PROFILE"),
+    ", userspace opt-",
+    env!("SNITCHOS_USERSPACE_OPT_LEVEL"),
+);
 
 /// A full-width horizontal rule, drawn a character at a time.
 ///

@@ -31,6 +31,12 @@ vf2 = ["kernel-mem/vf2"]
 # Host-only (build script): parse `cargo metadata` to derive the embedded-bin
 # dependency closure for `rerun-if-changed`. Does not enter the kernel binary.
 serde_json = "1"
+# `build_info::userspace_opt_level` — the one place that answers "what opt-level
+# did the embedded userspace actually get?". A build dependency so the script
+# *decides* with the same function the kernel *reports* with; restating the rule
+# here is how a report drifts from the build it describes. Dependency-free and
+# host-buildable, so this costs nothing.
+kernel-boot = { path = "../kernel-boot" }
 
 [dependencies]
 fdt = "0.1.5"

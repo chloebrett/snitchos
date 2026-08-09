@@ -149,6 +149,30 @@ any conditionals; a `format!` of two env vars is not.
 **REFACTOR**: assess.
 **Done when**: `cargo xtask itest` green, and a board boot prints the level.
 
+> **Split into 4a / 4b during execution.** 4a is the fact and the human channel;
+> 4b is the wire and the assertion. 4a stands alone (it is what step 5 reads off
+> the board), so it commits separately.
+>
+> **4a — DONE.** `kernel_boot::build_info::userspace_opt_level` (4 tests, 3/3
+> mutants caught), `kernel/build.rs` calling it to *decide and report* with one
+> value, and a `REGIME_LINE` under the banner. Verified on all three arms:
+>
+> | build | reports |
+> |---|---|
+> | `cargo xtask snemu boot` | `kernel debug, userspace opt-0` |
+> | `cargo xtask snemu boot --release` | `kernel release, userspace opt-1` |
+> | `SNITCHOS_USERSPACE_OPT=3 cargo build --release` | `userspace opt-3` |
+>
+> The first row is the finding this step exists for: **that is what the board has
+> been running**, and nothing said so.
+>
+> Two calls worth recording. `concat!` of two `env!` literals rather than
+> `format!`, so the line is `&'static str` in rodata and boot allocates nothing.
+> And ASCII only — the board's console is both the channel that most needs this
+> line and the least able to render anything exotic (debt #18).
+>
+> **4b — the frame + the itest assertion.** Still to do.
+
 **Two design points that are not incidental:**
 
 1. **There is no single "opt level" and the report must not pretend there is.** The
