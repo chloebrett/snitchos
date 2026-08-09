@@ -570,6 +570,10 @@ impl Model {
         let row = token as usize * d_model;
         let mut stream: Vec<f32> = embedding[row..row + d_model].to_vec();
 
+        // Once per token, not once per (layer, row, head): the angle depends on the
+        // position and the dimension pair, and nothing else in this loop.
+        let rotation = Rotation::at(position, head_dim);
+
         for layer in 0..layers {
             let offsets = self.config.layer_offsets(self.vocab, layer);
             let block = |start: usize, len: usize| &self.weights[start..start + len];
@@ -590,8 +594,8 @@ impl Model {
             let mut queries = project(&normed, block(offsets.wq, square), d_model, d_model);
             let mut keys = project(&normed, block(offsets.wk, square), d_model, d_model);
             let values = project(&normed, block(offsets.wv, square), d_model, d_model);
-            rope_one(&mut queries, head_dim, position);
-            rope_one(&mut keys, head_dim, position);
+            rope_one(&mut queries, head_dim, &rotation);
+            rope_one(&mut keys, head_dim, &rotation);
 
             session.keys[layer].extend_from_slice(&keys);
             session.values[layer].extend_from_slice(&values);
@@ -890,21 +894,48 @@ pub fn rope(rows: &[f32], head_dim: usize, d_model: usize, table: &RotationTable
 /// [`rope`] for a single row at a known position — the generating counterpart of
 /// the table-driven batch rotation.
 ///
-/// No table: a table amortises `powf` across positions, and there is one position
-/// here. The angle is [`rope_angle`], which is the expression `RotationTable::new`
-/// evaluates, in the same order — so a generated token's rotation is bit-identical
-/// to the same token's rotation in a full forward pass, which is what lets the two
-/// paths agree exactly.
-fn rope_one(row: &mut [f32], head_dim: usize, position: usize) {
+/// The rotation is passed in rather than computed here, so one position's worth
+/// serves every call at that position; see [`Rotation`] for what that is worth.
+fn rope_one(row: &mut [f32], head_dim: usize, rotation: &Rotation) {
     for head in row.chunks_mut(head_dim) {
-        for pair in 0..head_dim / 2 {
-            let angle = rope_angle(position, pair, head_dim);
-            let (sin, cos) = (libm::sinf(angle), libm::cosf(angle));
+        for (pair, &(sin, cos)) in rotation.0.iter().enumerate() {
             let (left, right) = (head[2 * pair], head[2 * pair + 1]);
 
             head[2 * pair] = left * cos - right * sin;
             head[2 * pair + 1] = left * sin + right * cos;
         }
+    }
+}
+
+/// The `(sin, cos)` pairs for one position — `head_dim / 2` of them, and that is the
+/// whole set the position needs.
+///
+/// The angle is a function of `(position, pair)` **only**: not of the head, not of
+/// whether the row is a query or a key, not of the layer. All three of those sat
+/// *outside* the computation and yet repeated it, so drivel recomputed 16 distinct
+/// angles 512 times per token — 4 heads × 2 rows × 4 layers, each a `powf`, a `sinf`
+/// and a `cosf`.
+///
+/// This is [`RotationTable`] for a single position, and it is the same lesson: post 73
+/// measured the table as the single largest win of the training-throughput sweep,
+/// above every matmul. The generating path never got it.
+///
+/// Bit-identity is by construction — [`rope_angle`], then `sinf`, then `cosf`: the
+/// same expressions in the same order as when they were inline, evaluated once each
+/// instead of 32 times. `the_generating_rotation_matches_the_table_rotation_at_the_
+/// same_position` is what holds that.
+struct Rotation(Vec<(f32, f32)>);
+
+impl Rotation {
+    fn at(position: usize, head_dim: usize) -> Self {
+        Self(
+            (0..head_dim / 2)
+                .map(|pair| {
+                    let angle = rope_angle(position, pair, head_dim);
+                    (libm::sinf(angle), libm::cosf(angle))
+                })
+                .collect(),
+        )
     }
 }
 
@@ -1219,6 +1250,45 @@ mod tests {
             let last = &full[full.len() - model.vocab()..];
             assert_eq!(cached.as_slice(), last, "diverged at length {length}");
         }
+    }
+
+    /// **The two rotation paths must agree bit for bit at a shared position.** The
+    /// batch path reads a [`RotationTable`]; the generating path computes its angle
+    /// from [`rope_angle`]. Two implementations, one contract — and a checkpoint's
+    /// completion is asserted byte-for-byte against a host recomputation, so a one-ULP
+    /// disagreement can cross a sampling boundary and serve a different token.
+    ///
+    /// **This is deliberately stricter than behaviour, which is why it is worth
+    /// having.** Measured 2026-08-09 by perturbing `rope_one`:
+    ///
+    /// | perturbation | this test | `generating_with_a_cache_…` |
+    /// |---|---|---|
+    /// | `position + 1` (uniform offset) | fails | **passes** |
+    /// | `position + head` (per-head offset) | fails | **passes** |
+    /// | `angle * 1.5` (frequency change) | fails | fails |
+    ///
+    /// The two offsets are `RoPE`'s defining symmetry — attention depends only on the
+    /// *relative* rotation, so shifting every query and key at a position together
+    /// changes nothing observable, and the behavioural oracle is right to stay quiet.
+    /// What that leaves uncovered is **drift between the two rotation paths**, which is
+    /// exactly what a hoist or a table rewrite risks. Hence a test at this level.
+    #[test]
+    fn the_generating_rotation_matches_the_table_rotation_at_the_same_position() {
+        let (head_dim, d_model, position) = (4, 12, 7);
+        let row: Vec<f32> = (0..d_model).map(|i| 0.5 + i as f32 * 0.25).collect();
+
+        let mut generated = row.clone();
+        rope_one(&mut generated, head_dim, &Rotation::at(position, head_dim));
+
+        // `rope` reads each row's position from its index, so the row under test has
+        // to *be* at `position` — the same reason the cached path passes `position`
+        // explicitly rather than reading it off a length.
+        let mut rows = vec![0.0f32; position * d_model];
+        rows.extend_from_slice(&row);
+        let table = RotationTable::new(position + 1, head_dim);
+        let batched = rope(&rows, head_dim, d_model, &table);
+
+        assert_eq!(generated.as_slice(), &batched[position * d_model..]);
     }
 
     /// A session that has cached one run and is asked about a *different* one must

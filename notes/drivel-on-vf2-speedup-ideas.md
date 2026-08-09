@@ -405,7 +405,33 @@ One exception to watch: drop `blocked_band`'s `if left == 0.0 { continue }` skip
 (`cram/src/lib.rs:66-68`) — it is a no-op for finite values but not for `inf`/`NaN`
 and not for signed zero, and "not provably identical" is not worth the branch here.
 
-### 3b. `rope_one` computes 512 transcendental triples per token where 16 would do
+### 3b. `rope_one` computes 512 transcendental triples per token where 16 would do — **done, and worth ~1.4%**
+
+> **⚠ Measured 2026-08-09, and this section oversold it.** The hoist landed
+> (`Rotation::at`, computed once per `Model::step`), and an A/B over 3 runs × 4
+> prefixes moved decode from **988 → 974 µs/token: ~1.4%, inside the noise band.**
+> A single run had shown ~10%; that was an artifact, and quoting it before the A/B was
+> the same mistake this file's §0 warning is about.
+>
+> **Why the training analogy misled.** Post 73's `RotationTable` win came from
+> amortising `powf` across *positions × batch rows* — thousands of them. At generation
+> there is one position, so the redundancy is only 32× over a small absolute cost:
+> ~1536 transcendental calls against a ~950 µs token. 32× of ~2% is still ~2%.
+> "The same lever the project has already learned once" was true about the code and
+> false about the arithmetic.
+>
+> Kept anyway — it is strictly less work, bit-identical, and small — but it is **not**
+> the lever, and the §3 ordering below is now as unmeasured as §2's was. **Do not start
+> §3a on the strength of this section's reasoning; get per-op counters inside
+> `Model::step` first.**
+>
+> One durable fact fell out of pinning it: a *uniform* or *per-head* offset to the RoPE
+> angle is invisible to `generating_with_a_cache_is_bit_identical_to_re_running_the_prefix`,
+> because attention depends only on the **relative** rotation and shifting every query
+> and key at a position together changes nothing observable. A *frequency* change is
+> caught immediately. The behavioural oracle is right to stay quiet; what it leaves
+> uncovered is drift between the two rotation paths, which is why
+> `the_generating_rotation_matches_the_table_rotation_at_the_same_position` now exists.
 
 ```rust
 // kvetch-model/src/lib.rs:898-909
@@ -579,21 +605,26 @@ it, because the difference between the two *is* the finding.
    is not a guess about where time goes, and it makes every subsequent measurement
    mean something. Boot the board straight after — this is the regime that hid the
    `tp` truncation and the SBI `a1` clobber.
-3. **The forward pass, all of it** (§3a–3d) — now 72–97% of a Tab rather than a
-   co-suspect. Take them in diff-size order, since all four are bit-identical and hit
-   prefill and decode alike: §3b `rope_one` (smallest diff in this document, and the
-   same lever that was the single largest win of the training sweep), then §3a
-   row-order GEMM lifted from `cram::blocked_band`, then §3c head-major KV, then §3d
-   the scratch arena.
-4. **In-place `collapse_pair`** (§2e). Promoted past §2a: 15% of a warm long Tab, and
+3. ~~**§3b `rope_one`**~~ — **done, ~1.4%.** See the banner on §3b: the training
+   analogy that made it look like a factor does not survive at one position. It is
+   kept, and it is not the lever.
+4. **Per-op counters inside `Model::step`** — the thing §3b's result makes
+   unavoidable. `bench-serve` splits at the *request* level, so it can say the forward
+   pass is 90% and not which of the projections, attention, norms or the logit
+   multiply that 90% is. §3a's diff is large enough that guessing costs more than
+   measuring, and §3b is the standing proof that this file's §3 rankings are guesses.
+5. **The rest of the forward pass** (§3a row-order GEMM lifted from
+   `cram::blocked_band`, §3c head-major KV, §3d scratch arena) — ordered by what step 4
+   says, not by what §3 asserts.
+6. **In-place `collapse_pair`** (§2e). Promoted past §2a: 15% of a warm long Tab, and
    it deletes ~90,000 allocations without touching merge order.
-5. **Forced tokens** (§4a). Promoted from "the designed future": it spends oracle work
+7. **Forced tokens** (§4a). Promoted from "the designed future": it spends oracle work
    to skip a whole forward pass, and at the measured 20:1 model-to-oracle ratio that
    is now a better trade than any oracle optimisation. Design it as `at_most_one` as
    §4a already says.
-6. **Short-circuit `viable`** (§2a), demoted to last, with the free 2b/2c cleanups. At
+8. **Short-circuit `viable`** (§2a), demoted to last, with the free 2b/2c cleanups. At
    most a 5–11% slice, behind a refusal loop the measurement shows barely runs.
-7. **Drop §3e.** `draw` is ~1%. There is nothing there.
+9. **Drop §3e.** `draw` is ~1%. There is nothing there.
 
 <details><summary>The original ordering, written before the measurement</summary>
 
@@ -602,8 +633,13 @@ it, because the difference between the two *is* the finding.
 GEMM (§3a). 7. Re-measure, then choose between §3c and §4a.
 
 The two lists agree on §1a and §3b and disagree about everything downstream of them —
-§2a fell four places, §4a rose from "not in the list" to fifth, and §3e left. Every
-one of those moves is a bet the bench settled, and it took an hour.
+§2a fell, §4a rose from "not in the list", and §3e left. Every one of those moves is a
+bet the bench settled, and it took an hour.
+
+And then §3b — the one item both lists agreed on — turned out to be worth 1.4%. Two
+for two: the sections of this file that reason confidently about where time goes have
+now been wrong twice, in different directions. Measure before each of the remaining
+items, not before the batch.
 
 </details>
 
