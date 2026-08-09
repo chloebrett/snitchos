@@ -41,6 +41,7 @@
 | heap-oom | heap-oom | cpu | heap, oom |
 | supervisor-detects-and-kills-a-hung-service | hung-detect | cpu | userspace |
 | boot-reaches-heartbeat | init | wfi | boot |
+| build-regime-is-reported | init | wfi | boot |
 | frame-allocator-metrics | init | wfi | frame |
 | heartbeat-cadence | init | wfi | boot |
 | init-brings-up-fs-server | init | cpu | userspace |

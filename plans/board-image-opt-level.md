@@ -171,7 +171,36 @@ any conditionals; a `format!` of two env vars is not.
 > And ASCII only — the board's console is both the channel that most needs this
 > line and the least able to render anything exotic (debt #18).
 >
-> **4b — the frame + the itest assertion.** Still to do.
+> **4b — DONE.** `Frame::BuildInfo { kernel_profile, userspace_opt }` appended at
+> the END of the enum (postcard is positional; `wire_encoding_is_stable` confirms
+> nothing renumbered), `OwnedFrame` + `from_borrowed`, a collector arm, the
+> harness's two `describe` matches, and the `build-regime-is-reported` scenario.
+>
+> Four things worth keeping:
+>
+> - **The frame carries `&str`, not `StringId`s.** They are `env!` literals sent
+>   once, so interning buys nothing and would make boot provenance depend on the
+>   intern table — which can allocate, the re-entry hazard telemetry must avoid.
+>   It also leaves `pre-init-order`'s "every id resolves through an earlier
+>   `StringRegister`" invariant untouched.
+> - **`tracing::open_stream` replaced two open-coded `send_hello` +
+>   `flush_pre_init` pairs.** Both transports (virtio-console, UDP) reach that
+>   moment, and adding a third call to each would have been a sequence that only
+>   works if every site remembers every step. `send_hello`/`send_build_info` are
+>   now private, so a new transport cannot get half a preamble.
+> - **The expectation is a process-wide value, not a threaded field.** First
+>   attempt put `opt` on `Boot` and `View`; that needed threading through the
+>   QEMU boot, the snemu live machine, the replay collapse and four unit tests —
+>   five constructors, any one of which could default and quietly disagree with
+>   the kernel it checks. `CAPTURE_LEVEL` already solves exactly this, so
+>   `BUILD_OPT` copies it.
+> - **The check discriminates, verified rather than assumed.** It passes at
+>   `--opt mid` (opt-1) and `--opt max` (opt-3) — both sides moving together — and
+>   a forced wrong expectation makes it fail 0/1. Two passes alone would not have
+>   shown this; see [[feedback_control_that_cannot_discriminate]].
+>
+> Adding a scenario also drifts `docs/generated/itest-matrix.md`, which is a
+> gated contract artifact — regenerated with `cargo xtask diagram itest-matrix`.
 
 **Two design points that are not incidental:**
 
