@@ -76,10 +76,89 @@ discriminate, measure the discrimination somewhere cheap"*, and
 it cheaply: it emits raw PCs (`[user:0x100053ac]`) with no symbolisation, so you
 objdump a 4.5 MB stripped ELF by hand.
 
-Everything below is ranked by my guess at (win × cheapness). §0 exists because I
-expect at least one of those guesses to be wrong by an order of magnitude — that is
-what happened to the 0.2–0.5B instruction prediction, and to every perf estimate in
-post 73.
+### Measured 2026-08-09: the split, and §2 is wrong
+
+`cargo run --release -p kvetch-serve --bin bench-serve` — the bench §0 asks for,
+built and run. Six tokens into a 256-byte buffer (what `RuntimePlatform` sends),
+`drivel-b9b10-30k`, mean of four seeds, host release build. Buckets are disjoint and
+sum to total; the model bucket is split into **prefill** (step 0, which processes the
+whole prefix) and **decode** (one position of work per later token).
+
+**Cold session — the first Tab on a line:**
+
+| prefix | bytes | tok | asks | encode | prefill | decode | oracle | sample | total |
+|---|---|---|---|---|---|---|---|---|---|
+| `greet(name) {` | 13 | 6 | 6 | 1% | 51% | 44% | 4% | 1% | 11.1 ms |
+| `let total = ` | 12 | 6 | 6 | 1% | 48% | 48% | 2% | 1% | 10.1 ms |
+| mid-body | 77 | 6 | 6 | 2% | 79% | 17% | 2% | 0% | 29.2 ms |
+| near-full buffer | 208 | 6 | 6 | 2% | **89%** | 8% | 2% | 0% | 68.6 ms |
+
+**Warm session — Tab again on the extended line. The on-target server process is
+long-lived and its `Session` survives, so this is what a REPL mostly pays.** (The
+`prefill` column is still step 0's forward, but on a warm session the cache already
+covers everything but the tail, which is why it collapses.)
+
+| prefix | bytes | tok | asks | encode | prefill | decode | oracle | sample | total |
+|---|---|---|---|---|---|---|---|---|---|
+| `greet(name) {` | 13 | 6 | 10 | 3% | 14% | 71% | 11% | 1% | 6.6 ms |
+| `let total = ` | 12 | 6 | 6 | 4% | 15% | 76% | 4% | 1% | 6.1 ms |
+| mid-body | 77 | 6 | 6 | 4% | 8% | 80% | 8% | 1% | 13.8 ms |
+| near-full buffer | 208 | 6 | 6 | **15%** | 13% | 59% | 11% | 1% | 8.9 ms |
+
+**The transformer is 92–97% of a cold Tab and 72–93% of a warm one. The oracle is
+2–5% and 4–11%.** §2's opening line — *"this is where I'd put money before
+measuring"* — loses the bet by roughly an order of magnitude, which is exactly the
+outcome §0 was written to expect.
+
+Five things the table says that the prose above did not:
+
+- **`asks` equals `tok` in almost every cell.** The model's first proposal is legal
+  essentially every time; the refusal loop does not run. §2a reasons from *"up to
+  ~12,000 parses per Tab"* — the real figure here is ~6 verdicts × 118 parses ≈ 700,
+  a ~17× overestimate, and it is the arithmetic that made the oracle look like the
+  loop. The one cell that refused (warm/short, 10 asks for 6 tokens) still spent 11%.
+- **A cold Tab is prefill-bound and a warm one is decode-bound**, and the crossover
+  is steep: prefill goes 51% → 89% as the prefix goes 13 → 208 bytes. Both are the
+  same `Model::step` code, so §3a–3d pay in both regimes — but *which* of them pays
+  most depends on which regime you are optimising.
+- **Decode is ~0.9–1.6 ms/token and flat in prefix length.** The KV cache is doing
+  its job; there is no hidden re-run of the prefix per token.
+- **`vocab.encode` (§2e) is 1–2% cold but 15% of a warm long Tab.** Once prefill is
+  gone it is the third-largest bucket. It is the one §2 item the measurement
+  *promotes* rather than demotes.
+- **`draw` itself (§3e) is ~1%.** The softmax over 2048 entries and the inverse-CDF
+  walks are not worth touching. Delete that item.
+
+§2d's quadratic is real and visible — a single legality verdict costs 26 µs at 12
+bytes and 163 µs at 208 — it is simply not binding at a 256-byte REPL buffer, which
+is what §2d already said.
+
+**The re-ranking this forces.** §4a (forced tokens) moves *up*, not down: it spends
+oracle work to skip a forward pass entirely, and at a measured 20:1 model-to-oracle
+ratio that trade is far better than it looked when the oracle was the suspect. §2a
+moves down — it is at most a 5–11% slice, behind a refusal loop that rarely runs.
+
+**What transfers and what does not.** The absolute milliseconds are host numbers and
+mean nothing for the U74. The *ratio* transfers, for §0's stated reason: both halves
+are scalar `f32` and pointer-chasing with no vendor acceleration on either machine.
+Run it `--release` — a debug host build penalises the bounds-checked GEMM far harder
+than the oracle's allocator traffic, tilting the very ratio being measured.
+
+**The instrument checks itself.** Timing the buckets needs the legality predicate
+inside a closure the bench owns, so `timed_request` restates `handle_request`'s loop
+rather than calling it — and a restatement that has drifted does not error, it
+*agrees*. So the bench refuses to print a number until it has shown both loops serve
+byte-identical completions across every prefix and seed. Verified to discriminate:
+changing the step-seed mixer from `^` to `+` — one operator — is caught on the first
+prefix and withholds the whole report. Two further guards came out of the first run:
+the four prefixes are asserted **viable** before use, because the first draft's long
+prefix was already dead and its row silently reported the cost of seventeen refusals
+rather than of a long line ([[feedback_print_samples_beside_the_metric]] again).
+
+Everything below was ranked by my guess at (win × cheapness), written before the
+table above. §0 exists because I expected at least one of those guesses to be wrong by
+an order of magnitude — that is what happened to the 0.2–0.5B instruction prediction,
+and to every perf estimate in post 73, and it is what has now happened to §2.
 
 ---
 
@@ -169,6 +248,13 @@ address arithmetic matters, or as a deliberate snemu-fidelity milestone.
 
 This is where I'd put money before measuring, and it is worth stating why so §0 can
 refute it.
+
+> **⚠ §0 refuted it, 2026-08-09.** The oracle is **2–5% of a cold Tab and 4–11% of a
+> warm one**; the transformer is 72–97%. The section is kept as written because the
+> reasoning is sound and only the premise is wrong — but read §0's table before acting
+> on anything below. The load-bearing error is 2a's *"up to ~12,000 parses"*: `draw`
+> asks for 17 verdicts only when 16 candidates are refused, and measured `asks` equals
+> the token count in almost every cell. §2e survives and is promoted; §2a is demoted.
 
 ### 2a. `viable()` builds 118 ASTs to answer a boolean
 
@@ -391,7 +477,11 @@ Give `Session` a scratch arena sized from `ModelConfig` at first use and reused
 across steps. Mechanical, and it composes with 3c (which deletes the 32 largest of
 them outright).
 
-### 3e. `weighted_pick` re-sums the whole vocab on every refusal
+### 3e. `weighted_pick` re-sums the whole vocab on every refusal — **measured at ~1%, dropped**
+
+> `draw` in total, softmax included, is 0–1% of every row in §0's table. The
+> re-summing is real waste and fixing it would buy nothing measurable. Recorded as a
+> negative result so it is not re-derived.
 
 `sample.rs:99` sums all 2048 weights, and `draw` calls it once per attempt — up to
 17× per token — when a struck candidate changes the total by exactly its own weight.
@@ -480,24 +570,42 @@ confused with a board lever.
 
 ## What I would actually do, in order
 
-1. **The host split bench** (§0). An afternoon at most. It decides whether §2 or §3
-   is the real work, and it should time four buckets, not two: `vocab.encode`
-   (once per request), `Session::logits_for`, `extends_legally`, and the rest.
-   Without it, everything below is a guess.
-2. **`--opt` on `cargo xtask image`** (§1a). One flag, expect the largest single
-   factor, and it makes every subsequent measurement mean something. Boot the board
-   straight after — this is the regime that hid the `tp` truncation and the SBI
-   `a1` clobber.
-3. **`rope_one`'s 32× transcendental redundancy** (§3b). Smallest diff in this
-   document, bit-identical, and it is the same lever that was the single largest win
-   of the training-throughput sweep.
-4. **Short-circuit `viable`** (§2a), designed as `at_most_one` so §4a composes, with
-   the free 2b/2c cleanups alongside it.
-5. **In-place `collapse_pair`** (§2e). Deletes ~90,000 allocations per Tab without
-   touching merge order, so the frozen vocab is untouched.
-6. **Row-order GEMM in `kvetch-model`** (§3a), lifted from `cram::blocked_band`, with
-   the bit-identity assertion re-run as the gate.
-7. Re-measure, then choose between §3c (head-major KV) and §4a (forced tokens).
+**Revised 2026-08-09 against the split measurement.** The original list is kept below
+it, because the difference between the two *is* the finding.
+
+1. ~~**The host split bench** (§0)~~ — **done**, `kvetch-serve/src/bin/bench-serve.rs`.
+   Re-run it after each step below; it is the yardstick for everything else here.
+2. **`--opt` on `cargo xtask image`** (§1a). Unmoved at #2: it is the only item that
+   is not a guess about where time goes, and it makes every subsequent measurement
+   mean something. Boot the board straight after — this is the regime that hid the
+   `tp` truncation and the SBI `a1` clobber.
+3. **The forward pass, all of it** (§3a–3d) — now 72–97% of a Tab rather than a
+   co-suspect. Take them in diff-size order, since all four are bit-identical and hit
+   prefill and decode alike: §3b `rope_one` (smallest diff in this document, and the
+   same lever that was the single largest win of the training sweep), then §3a
+   row-order GEMM lifted from `cram::blocked_band`, then §3c head-major KV, then §3d
+   the scratch arena.
+4. **In-place `collapse_pair`** (§2e). Promoted past §2a: 15% of a warm long Tab, and
+   it deletes ~90,000 allocations without touching merge order.
+5. **Forced tokens** (§4a). Promoted from "the designed future": it spends oracle work
+   to skip a whole forward pass, and at the measured 20:1 model-to-oracle ratio that
+   is now a better trade than any oracle optimisation. Design it as `at_most_one` as
+   §4a already says.
+6. **Short-circuit `viable`** (§2a), demoted to last, with the free 2b/2c cleanups. At
+   most a 5–11% slice, behind a refusal loop the measurement shows barely runs.
+7. **Drop §3e.** `draw` is ~1%. There is nothing there.
+
+<details><summary>The original ordering, written before the measurement</summary>
+
+1. The host split bench (§0). 2. `--opt` on `cargo xtask image` (§1a). 3. `rope_one`
+(§3b). 4. Short-circuit `viable` (§2a). 5. In-place `collapse_pair` (§2e). 6. Row-order
+GEMM (§3a). 7. Re-measure, then choose between §3c and §4a.
+
+The two lists agree on §1a and §3b and disagree about everything downstream of them —
+§2a fell four places, §4a rose from "not in the list" to fifth, and §3e left. Every
+one of those moves is a bet the bench settled, and it took an hour.
+
+</details>
 
 Separately and **not** as part of this thread: **make snemu reject an unrecognised
 `funct7`** (§1b step 1). It is a correctness bug that exists today, it is what turns

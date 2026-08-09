@@ -27,7 +27,14 @@ wall-clock pacing.
   `enable_fwcfg_ramfb()` is opt-in, so pixels need a drawing workload wired up too —
   a second project riding along. Milestone 2, once this proves the shim.
 - **Guest input.** `push_console_input()` exists and works; wiring keystrokes is
-  milestone 3.
+  milestone 3 — and that is the milestone worth wanting, since
+  `snemu boot --interactive --workload stitch-kvetch` already gives a Stitch REPL with
+  a trained model answering Tab. Two things land there and are recorded now so they are
+  not surprises: xterm.js's `onKey` needs an explicit map from special keys (Enter,
+  Backspace, Esc, arrows) to the byte sequences the guest expects, printable characters
+  going through unchanged (`~/c/slay/www/main.js` does exactly this); and the guest's
+  emoji-width assumption may disagree with xterm.js's, which we cannot fix from the
+  host side because the guest already laid the frame out.
 - **Wall-clock pacing.** Named in [docs/scaling-down-snitchos.md](../docs/scaling-down-snitchos.md);
   irrelevant to a page that boots, prints, and stops. Milestone 4.
 - **Backend B / any JIT in the browser.** wasm gets Backend A by construction.
@@ -50,19 +57,70 @@ honest for a wasm target.
 `itest::run_unit_tests` derives its list from `workspace_members()` minus
 `NOT_HOST_TESTED`. Nothing to update; do not add it to a list.
 
+## Prior art: `~/c/slay` shipped this exact shape
+
+A sibling project — a Slay-the-Spire clone — already runs a Rust TUI in a browser tab
+at [slay.chloe.casa](https://slay.chloe.casa): `slay-core` compiles to wasm32, a
+`slay-wasm` crate wraps it in `#[wasm_bindgen]`, and **xterm.js** renders the output.
+Read `~/c/slay/plans/wasm.md` and `~/c/slay/www/main.js` before step 6. What it
+teaches, in descending order of how much it changes this plan:
+
+1. **Use xterm.js, not a `<pre>`.** This is the biggest correction. snemu's
+   `uart_output()` is a *terminal* byte stream — the guest emits ANSI colour, cursor
+   motion, and (via the Stitch renderer) emoji. A `<pre>` renders escape bytes as
+   garbage. Vendored xterm.js is one 283 KB `<script>` tag, no bundler, no CDN, and
+   consumes those bytes directly. This *shrinks* step 6: no ANSI handling of our own.
+
+2. **"Compiles for wasm32" is necessary, not sufficient.** slay's TUI built clean and
+   then panicked in the tab — `std::time::Instant::now()` is unavailable on
+   `wasm32-unknown-unknown` (`git -C ~/c/slay show 2263ea8`). This plan's premise is a
+   successful *build*; that is weaker evidence than it reads as. See step 1b.
+
+3. **A thin bindgen shell is a discipline, not a consequence.** slay's own plan said
+   "push the logic down"; its shipped `crates/slay-wasm/src/lib.rs::send` nonetheless
+   grew branching, pile-rendering, and save-prompt state — logic that is now only
+   reachable through a `#[wasm_bindgen]` method. Step 5's "too thin to test" bar is the
+   thing that erodes first. Hold it.
+
+4. **Feature-gate the browser-only crate behind a trait seam.** `slay-wasm/src/persist.rs`
+   is the pattern worth copying wholesale: a `Storage` trait, a `MemoryStorage` test
+   double, a `LocalStorage` impl behind `feature = "browser"` — 12 lines of `web_sys`,
+   everything else host-tested. Any browser state this page grows (chosen workload,
+   scrollback) goes through that shape.
+
+5. **Emoji width drifts in xterm.js** — it renders `⚔️` as 2 columns where
+   `unicode-width` says 1. slay fixed it by emitting an absolute cursor position per
+   cell (`wasm_backend.rs:69`). **We cannot use that fix**: the *guest* computed the
+   layout, and we only relay its bytes. The Stitch renderer already carries a known
+   "emoji width is terminal-dependent" caveat, so this is a real milestone-3 risk and
+   is called out there rather than discovered live.
+
+6. **Small page mechanics that are free to copy:** `visibility: hidden` on the terminal
+   div until after the first fit (otherwise the tab flashes an unsized terminal —
+   `git -C ~/c/slay show e3bca04`); a `measureCell()` probe span to derive cols/rows
+   from the real font metrics; and an explicit mobile bail-out ("works best on a
+   desktop browser") instead of a broken experience.
+
 ## Acceptance criteria
 
 - [ ] `cargo test -p snemu-wasm` runs on the host and covers the drain cursor and
       status encoding.
 - [ ] `cargo xtask test` runs `snemu-wasm`'s suite without any list edit.
-- [ ] Opening the page boots the real kernel and shows the UART boot log, ending with
-      a `kernel.heartbeat`-era log line.
+- [ ] Opening the page boots the real kernel and shows the UART boot log **in an
+      xterm.js terminal**, ending with a `kernel.heartbeat`-era log line, with the
+      guest's own colour/formatting intact rather than escaped.
 - [ ] The page shows decoded telemetry: at minimum `kernel.boot`, and span/metric
       names resolved through their `StringRegister`s.
 - [ ] The tab stays responsive throughout (a button or animation keeps working while
       the guest boots).
 - [ ] Two loads of the same page produce byte-identical UART output — determinism
       survives the browser.
+- [ ] **The wasm build agrees with the native one.** For a fixed ELF and a fixed
+      instret budget, `state_hash()` and the UART bytes are identical between a native
+      run and a wasm32 run. This is the criterion that catches 32-bit `usize`
+      truncation; self-consistency across two page loads does not.
+- [ ] The page displays the fingerprint of the `kernel.elf` it loaded, so a stale
+      artifact is visible rather than mysterious.
 
 ## Steps
 
@@ -98,6 +156,38 @@ exists.
 **MUTATE**: N/A (no logic yet).
 **REFACTOR**: N/A.
 **Done when**: `cargo xtask test` shows a `snemu-wasm` suite; human approves commit.
+
+### Step 1b: Prove the core *runs* under wasm32, not just builds
+
+**Acceptance criteria**: snemu's existing test suite (or a boot-to-heartbeat subset of
+it) executes under a wasm32 runtime — `wasm-pack test --node`, or `wasmtime` against a
+`wasm32-wasip1` build, whichever is less ceremony — and passes. The point is to convert
+this plan's premise from "it compiles" into "it executes", which is the exact gap that
+cost `~/c/slay` a runtime panic.
+
+Two specific hazards to look for, both invisible to the 64-bit host suite:
+
+- **32-bit `usize`.** There are ~72 `as usize` casts across `snemu/src/`. Guest
+  addresses are `u64` and higher-half kernel VAs (`0xffffffff80200000`) do not fit in
+  32 bits. Spot-checking says the careful pattern is already in use — `fetch_cache.rs:91`
+  masks *before* casting and keeps `tag: u64` (`fetch_cache.rs:56`), so aliasing PCs
+  4 GiB apart still compare distinct — but the class is unaudited. A truncation here
+  does not crash; it silently executes the wrong instruction.
+- **128 MiB of guest RAM as a `Vec<u8>`** on a 32-bit target, plus whatever the browser
+  will let a wasm module grow its linear memory to. `Memory::high_water` already tracks
+  the guest's true footprint, so the page can likely boot in far less than `main.rs`'s
+  `RAM_SIZE`; measure it rather than assuming 128 MiB is fine.
+
+**RED**: The differential check itself — assert a wasm-side boot's `state_hash()` and
+UART bytes equal the native side's for the same budget. Expect it to pass; run it
+because a silent disagreement is the failure mode, and a passing differential is cheap
+insurance against a class we otherwise cannot see.
+**GREEN**: Whatever the check turns up. Possibly nothing — that is a result, not a
+wasted step.
+**MUTATE**: N/A (no new production logic).
+**REFACTOR**: N/A.
+**Done when**: The wasm32 suite runs green and the native/wasm differential agrees;
+human approves commit.
 
 ### Step 2: A pure drain cursor over cumulative device output
 
@@ -167,14 +257,29 @@ silently.
 **REFACTOR**: Assess.
 **Done when**: The wasm target builds; human approves commit.
 
-### Step 6: The page — boot log and live spans, without freezing the tab
+### Step 6: The page — boot log in a real terminal, live spans, no frozen tab
 
 **Acceptance criteria**: A static page (`web/`, no bundler,
 `wasm-pack build --target web`) fetches `kernel.elf`, constructs the machine, and runs
-a rAF loop calling `step_budget(~2M)` per frame, appending drained UART text to a
-`<pre>` and drained frames to a span/metric view. **The tab stays responsive** — a
-spinning element or a clickable button proves it. Boot reaches heartbeat. Two loads
-produce byte-identical UART output.
+a rAF loop calling `step_budget(~2M)` per frame, writing drained UART bytes straight to
+an **xterm.js** terminal via `term.write()` and drained frames to a span/metric view.
+**The tab stays responsive** — a spinning element or a clickable button proves it. Boot
+reaches heartbeat. Two loads produce byte-identical UART output.
+
+Mirror `~/c/slay/www/` for the page mechanics rather than rediscovering them:
+
+- **Vendor xterm.js** into `web/xterm/` (`xterm.js` + `xterm.css`, ~290 KB total) and
+  load it with a plain `<script>` tag. No CDN — the page must work offline — and no
+  bundle step.
+- **Size the terminal from real font metrics.** An off-screen probe span measures one
+  character cell; derive `cols`/`rows` from `window.innerWidth/Height` and re-fit on
+  `resize`. (M1's guest never learns the size, so this is cosmetic here — but M3's
+  interactive Stitch REPL will want it, and it costs ten lines now.)
+- **Keep `#terminal` at `visibility: hidden` until after the first fit**, then reveal.
+  Otherwise the page flashes a wrongly-sized terminal on every load.
+- **Bail out on mobile** with a notice rather than shipping something unusable.
+- **Serve over HTTP** — `python3 -m http.server` or equivalent. `file://` cannot load
+  ES modules, so a double-clicked `index.html` will fail confusingly.
 **RED**: Manual, and honest about it: this step is DOM glue, and a headless-browser
 harness would cost more than this milestone is worth. The Rust behaviour beneath it is
 already covered by steps 2–4. Verify by driving the page and observing.
@@ -187,16 +292,22 @@ commit.
 ## Open questions to settle before step 6
 
 - **Where does `kernel.elf` come from for the page?** The release kernel is 1.8 MB and
-  is a build artifact, not a repo file. Options: an `xtask` subcommand that stages it
-  next to the page, or a documented manual copy. Prefer the former, but it's a real
-  decision — `cargo xtask` currently has no "build for the web" verb.
+  is a build artifact, not a repo file. `~/c/slay` answers the equivalent question by
+  **committing** its built `www/pkg/*.wasm` (1.1 MB) so GitHub Pages needs no CI — and
+  pays for it in commits literally titled "Update wasm binary" and "Update wasm". This
+  project already knows that failure mode by name: a VF2 "regression" is a missed
+  `cargo xtask image` until proven otherwise. Here it would be **two** derived artifacts
+  (the wasm module and the kernel ELF) with no compiler to notice they disagree.
+  So: prefer a `cargo xtask web` verb that builds and stages both, and — whichever way
+  the commit-or-generate call goes — **the page must show the kernel build's
+  fingerprint**, which is why that is now an acceptance criterion rather than a nicety.
 - **Should the page drive `workload=` selection?** `dtb.rs` already patches bootargs in
   a firmware role, so a `<select>` that reboots into `workload=smp` is nearly free and
   is a genuinely good demo. Tempting scope creep; decide explicitly rather than
   drifting into it.
-- **Is `snemu` missing from `run_clippy`'s `-p` list deliberate?** It is absent
-  (`xtask/src/main.rs:1401`), as are `stitch` and `hitch`. If that's an oversight it's
-  a separate fix — but `snemu-wasm` should land in whichever list is correct.
+- ~~**Is `snemu` missing from `run_clippy`'s `-p` list deliberate?**~~ Settled: it was
+  an oversight, and all three gate lists are metadata-derived now. `snemu-wasm` needs no
+  clippy-list edit — only the `MUTANT_CRATES` entry noted in the quality gate below.
 
 ## Pre-PR quality gate
 

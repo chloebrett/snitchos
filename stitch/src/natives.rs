@@ -65,6 +65,7 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "listRemoveAt", arity: 2, func: native_list_remove_at, module: Some("List"), export_as: Some("removeAt") },
     // --- Map module: a dictionary you can build, not just write down ---
     NativeFn { name: "mapGet",       arity: 2, func: native_map_get,       module: Some("Map"),  export_as: Some("get") },
+    NativeFn { name: "mapHas",       arity: 2, func: native_map_has,       module: Some("Map"),  export_as: Some("has") },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -1154,6 +1155,21 @@ fn native_map_get(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     Ok(map_lookup(expect_map("get", map)?, key))
 }
 
+/// `Map.has(m, k)` — whether `k` is one of `m`'s keys.
+///
+/// Not redundant with the prelude's `contains`, which folds over *entries* and
+/// so asks whether a whole `(key, value)` pair is present. Key membership is the
+/// question programs actually ask, and only this answers it.
+fn native_map_has(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [map, key] = args else {
+        return Err(RuntimeError::new("has expects (map, key)"));
+    };
+    let present = expect_map("has", map)?
+        .iter()
+        .any(|(candidate, _)| candidate == key);
+    Ok(Value::Bool(present))
+}
+
 /// `join(list, sep)` — the displayed elements concatenated with `sep` between.
 fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     let [list, separator] = args else {
@@ -1749,8 +1765,16 @@ mod tests {
     // present?". Key membership is a different question and needs its own native.
     #[test]
     fn map_has_asks_about_keys_where_contains_asks_about_entries() {
+        // `contains` matches a whole entry...
         assert_eq!(run_map(r#"contains(["a": 1], ("a", 1))"#), Value::Bool(true));
-        assert_eq!(run_map(r#"contains(["a": 1], "a")"#), Value::Bool(false));
+        // ...and asked about a bare key it does not quietly answer `false`: `==`
+        // is strict across kinds, so it *faults*. `contains` therefore cannot
+        // stand in for key membership even by accident — which is what earns
+        // `Map.has` its place beside a prelude that already looks complete.
+        assert_eq!(
+            run_map_err(r#"contains(["a": 1], "a")"#),
+            "operator Eq cannot apply to Tuple and Str"
+        );
         assert_eq!(run_map(r#"Map.has(["a": 1], "a")"#), Value::Bool(true));
     }
 

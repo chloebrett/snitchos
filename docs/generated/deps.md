@@ -172,6 +172,7 @@ graph LR
     xtask_itest --> stitch
     xtask_itest --> xtask_qemu
     xtask_itest --> xtask_snemu
+    xtask_qemu --> kernel_boot
     xtask_snemu --> diagram
     xtask_snemu --> magnitude
     xtask_snemu --> protocol
