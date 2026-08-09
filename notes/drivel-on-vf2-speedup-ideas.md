@@ -372,6 +372,45 @@ and neither touches the frozen vocab artifact.
 
 ## 3. The forward pass
 
+### Measured 2026-08-09: which multiply the 90% is in
+
+`cargo run --release -p kvetch-serve --bin bench-forward` — a [`Gemm`] decorator that
+delegates to `NaiveGemm` and keeps a stopwatch, so every matmul is attributed by shape
+with no production code touched. drivel, 208-byte prefix (63 tokens):
+
+| bucket | `transpose_b` | prefill | decode |
+|---|---|---|---|
+| ffn down (`k=512, n=128`) | false | 27.8% | 26.7% |
+| ffn up (`k=128, n=512`) | false | 25.9% | 24.9% |
+| proj q/k/v/o (`k=128, n=128`) | false | 23.7% | 22.7% |
+| logits (`k=128, n=2048`) | **true** | 14.9% | 14.0% |
+| attention (scores + apply) | mixed | 2.0% | 4.1% |
+| **matmul, all of it** | | **94.3%** | **92.5%** |
+| everything else | | 5.7% | 7.5% |
+
+Prefill and decode agree to within a point, which is worth noting on its own: they are
+the same code at different `m`, and no lever will help one without the other.
+
+Three conclusions, and they re-rank the rest of this section:
+
+- **§3a is the lever, and it is bigger than §3a claims.** Every `transpose_b: false`
+  multiply strides `b` by `n` per step (`b[inner * n + column]`, `lib.rs:233`), and
+  those are **77.4% of the forward pass** — ffn down, ffn up and the four projections.
+  The `logits` multiply and `attn scores` pass `transpose_b: true`, which indexes
+  `b[column * k + inner]` and is *already* contiguous, so they are not part of the
+  problem and would not benefit.
+- **§3c and §3d are both bounded by the 5.7–7.5% residual.** Everything the `Gemm`
+  decorator cannot see — the norms, the rotation, `silu`, `gather_head`'s copies and
+  all ~116 allocations — adds up to that, and §3c and §3d each own only a slice of it.
+  §3c's *"~400 KB of memcpy per token"* is real and is inside a bucket worth at most
+  7%. Both drop below §2e.
+- **At `m = 1` this is a matrix-*vector* product, not a matmul.** Which is good news
+  for §3a: `blocked_band`'s accumulate-into-the-output-row-over-`k` becomes, at `m=1`,
+  a single sequential pass over `b` — `out[..n] += a[j] * b[j*n..][..n]` — reading
+  each cache line once instead of once per output column.
+
+---
+
 drivel is `d_model` 128, 4 layers, 4 heads, `ffn` 512, vocab 2048 = **1,049,728
 params / 4.2 MB f32**. With the KV cache a decode step is ~2.1 MFLOP and reads each
 weight once. At the board's measured 1.5–3 GB/s that is a **~1.4–2.8 ms/token
@@ -473,7 +512,7 @@ per layer — 16 per token for a value that depends only on `head_dim`.
 learned once.** If I had to pick one model-side change without measuring, it's this
 one rather than the GEMM.
 
-### 3c. `gather_head` copies the whole KV history, per head, per layer, per token
+### 3c. `gather_head` copies the whole KV history, per head, per layer, per token — **capped at ≤7%**
 
 ```rust
 // kvetch-model/src/lib.rs:1049-1062
@@ -491,7 +530,7 @@ The cache is stored position-major (`positions × d_model`) because that is what
 copies outright. It changes no arithmetic, so bit-identity is preserved by
 construction.
 
-### 3d. `Model::step` makes ~116 heap allocations per token
+### 3d. `Model::step` makes ~116 heap allocations per token — **capped at ≤7%, shared with 3c**
 
 Counted across `lib.rs:560-628`: 2 per `rms_norm` (it always allocates and returns
 the inverse-RMS the inference path never reads), one per `project`, 4 per head in
@@ -608,16 +647,18 @@ it, because the difference between the two *is* the finding.
 3. ~~**§3b `rope_one`**~~ — **done, ~1.4%.** See the banner on §3b: the training
    analogy that made it look like a factor does not survive at one position. It is
    kept, and it is not the lever.
-4. **Per-op counters inside `Model::step`** — the thing §3b's result makes
-   unavoidable. `bench-serve` splits at the *request* level, so it can say the forward
-   pass is 90% and not which of the projections, attention, norms or the logit
-   multiply that 90% is. §3a's diff is large enough that guessing costs more than
-   measuring, and §3b is the standing proof that this file's §3 rankings are guesses.
-5. **The rest of the forward pass** (§3a row-order GEMM lifted from
-   `cram::blocked_band`, §3c head-major KV, §3d scratch arena) — ordered by what step 4
-   says, not by what §3 asserts.
-6. **In-place `collapse_pair`** (§2e). Promoted past §2a: 15% of a warm long Tab, and
-   it deletes ~90,000 allocations without touching merge order.
+4. ~~**Per-op counters inside `Model::step`**~~ — **done**,
+   `kvetch-serve/src/bin/bench-forward.rs`. Matmul is 92–94% of the forward pass; see
+   §3's measured subsection for the shape breakdown.
+5. **§3a row-order GEMM**, lifted from `cram::blocked_band`. Now the clear lever:
+   **77% of the forward pass** is `transpose_b: false` and strides `b` by `n`. Note
+   the target is a matrix-*vector* product at `m = 1`, and that `logits` and
+   `attn scores` already pass `transpose_b: true` and need nothing. Bit-identity
+   assertion re-run as the gate; drop `blocked_band`'s `if left == 0.0 { continue }`,
+   which is not identical for `inf`/`NaN`/signed zero.
+6. **In-place `collapse_pair`** (§2e). Promoted past §2a *and* past §3c/§3d: 15% of a
+   warm long Tab, while those two share a residual worth at most 7% of the forward
+   pass.
 7. **Forced tokens** (§4a). Promoted from "the designed future": it spends oracle work
    to skip a whole forward pass, and at the measured 20:1 model-to-oracle ratio that
    is now a better trade than any oracle optimisation. Design it as `at_most_one` as
