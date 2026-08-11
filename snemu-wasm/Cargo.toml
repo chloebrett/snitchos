@@ -21,6 +21,12 @@ protocol = { path = "../protocol", features = ["std"] }
 # that shell.
 wasm-bindgen = "0.2"
 
+[dev-dependencies]
+# The wasm32 test harness. `cargo test` cannot run on wasm32-unknown-unknown
+# (no threads, no process exit), so `wasm-pack test --node` drives the tests
+# through this instead. Dev-only: nothing shipped to the browser depends on it.
+wasm-bindgen-test = "0.3"
+
 [lints]
 workspace = true
 

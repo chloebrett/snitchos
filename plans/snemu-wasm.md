@@ -115,10 +115,13 @@ teaches, in descending order of how much it changes this plan:
       the guest boots).
 - [ ] Two loads of the same page produce byte-identical UART output — determinism
       survives the browser.
-- [ ] **The wasm build agrees with the native one.** For a fixed ELF and a fixed
-      instret budget, `state_hash()` and the UART bytes are identical between a native
-      run and a wasm32 run. This is the criterion that catches 32-bit `usize`
-      truncation; self-consistency across two page loads does not.
+- [x] **The wasm build agrees with the native one.** For a fixed program and a fixed
+      instret budget, the *architectural* result — every register, the UART bytes, the
+      retired instret — is identical between a native run and a wasm32 run. This is the
+      criterion that catches 32-bit `usize` truncation; self-consistency across two page
+      loads does not. **Corrected after measuring**: this originally said
+      "`state_hash()` and the UART bytes", which is not achievable — `state_hash()` is
+      pointer-width-dependent by construction (step 1b). The hash is pinned host-only.
 - [ ] The page displays the fingerprint of the `kernel.elf` it loaded, so a stale
       artifact is visible rather than mysterious.
 
@@ -206,6 +209,44 @@ wasted step.
 **REFACTOR**: N/A.
 **Done when**: The wasm32 suite runs green and the native/wasm differential agrees;
 human approves commit.
+
+**Outcome (2026-08-10): done, and it found something.**
+
+*The premise holds.* snemu's core does not merely build for wasm32 — it **runs**
+correctly on `wasm32-unknown-unknown`, the real browser target, under Node via
+`wasm-pack test --node`. No `Instant::now`-style trap of the kind that bit `~/c/slay`.
+
+*The emulator is width-clean on the paths exercised.* A hand-assembled RV64 program
+(`snemu-wasm/src/probe.rs`) building a value wider than 2^32, a guest address above
+2^31, an 8-byte store/load round-trip and a UART MMIO byte write produces **identical**
+registers, UART bytes and instret on both targets. The `as usize` hazard this step was
+written to hunt did not materialise here — consistent with the spot-checks
+(`fetch_cache.rs` masks before casting; `mem.rs::span` uses a *checked*
+`usize::try_from`, so an out-of-range address returns `OutOfRange` rather than
+truncating).
+
+*What did diverge: `Machine::state_hash()`.* Byte-identical machine state hashes
+differently on the two targets. Isolated rather than inferred — `probe::hash_diagnostics`
+hashes three things and compares each across targets: a bare `u64` **agrees**, raw bytes
+via `Hasher::write` **agree**, and only `<[u8]>::hash` **differs**, because slice hashing
+length-prefixes with a `usize` (8 bytes on the host, 4 in the browser). So it is not
+`SipHash`, not the toolchain, and not snemu's arithmetic — it is one width-dependent
+length prefix. snemu's own doc already says the value is "not a cross-toolchain-stable
+digest"; this measures exactly where that boundary falls.
+
+*Consequences.* The differential asserts the architectural result (portable) and pins
+the hash host-only. Both facts are executable: a wasm test asserts the hash *differs*,
+so if snemu's digest is ever made width-independent that test fails and tells us the
+differential can be widened. Making it width-independent is a small change (hash lengths
+as an explicit `u64`; `Hasher::write` for byte slices) and its consumers are all
+same-process comparisons — snapshot-tree fork verification and `snemu_audit`, no
+committed baselines — but nothing needs it today, so it stays a deliberate non-change.
+
+*Known gap.* The wasm test is **not in `cargo xtask test`**. It needs Node on `PATH`
+plus the `wasm-bindgen` CLI, and the local Node 16 is too old (the toolchain emits
+`externref`; Node 24 works). Run it by hand for now:
+`PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH" wasm-pack test --node snemu-wasm`.
+Wiring it into the gate needs a decision about that toolchain dependency.
 
 ### Step 2: A pure drain cursor over cumulative device output
 
