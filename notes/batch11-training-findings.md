@@ -576,6 +576,50 @@ short to evaluate quip fairly and this comparison is mildly biased against it. R
 This is the third time in this study that eyeballing samples failed to track the gate
 metric — see also the drivel three-way above, where the ranking came out backwards.
 
+### quip at 60k — converged, and the noise is not what I said it was
+
+quip@30k was still falling 0.043 per 6k steps, so the 30k numbers were a lower
+bound. Re-run at 60 000 steps, same corpus, same frozen vocab and held-out, two seeds:
+
+| run | seed 0 | seed 1 | mean | seed spread |
+|---|---|---|---|---|
+| quip @30k | 2.3819 | 2.3244 | 2.3532 | 0.0575 |
+| **quip @60k** | 2.2980 | **2.2571** | **2.2776** | 0.0409 |
+
+Doubling the steps bought **0.076 nats** (−0.0839 / −0.0673 across seeds).
+
+**It has converged.** The last 6k steps move 0.001 (2.2581 → 2.2571) against 0.043 per
+6k at the end of the 30k run. This is quip's ceiling on this corpus at this LR, and it
+discharges the "lower bound" caveat on every quip figure above. Note a 60k run is not
+a 30k run continued — cosine decay runs over the configured horizon, so the whole LR
+trajectory differs; this is a new absolute, not a paired delta.
+
+At convergence the rung gap is **larger** than mid-descent: drivel (2.5354 mean, flat
+to 0.004/3k) against quip@60k (2.2776) is **0.258 nats**, up from 0.162–0.182.
+
+**The seed-noise prediction was half right, which is to say wrong.** The 30k spread of
+0.0575 was explained above as an un-converged-endpoint artifact, predicting it would
+shrink on a flatter curve. It shrank — 0.0575 → 0.0409, the right direction — but only
+29%, and 0.0409 is still 3–10× drivel's 0.004–0.016 on a run that is now demonstrably
+converged. **Endpoint steepness cannot be the main cause.** The untuned 3e-3 LR,
+inherited from a model a third the size, is now the prime suspect: seeds settling into
+materially different optima. An LR sweep moves from optional to the obvious next
+experiment, and it would also revisit whether quip's 0.258 is itself understated.
+
+### The levers, ranked by measurement
+
+| lever | cost | buys | status |
+|---|---|---|---|
+| 3× params (drivel → quip) | 1.8× compute | **0.258** | measured |
+| 2× steps (30k → 60k) | 2× compute | 0.076 | **spent** — quip is converged |
+| +55.7% corpus (b10-full + b11) | 14.9 h generation | 0.025 | saturated |
+| LR tuning for quip | ~4 short runs | unknown | **untried** |
+
+Throughput note: two quip runs in parallel gave ~11 300 tok/s each against 20 500
+solo — aggregate 1.1×, where drivel got 1.78×. quip's larger matmuls already saturate
+the AMX unit, so parallel quip runs contend for it rather than filling idle capacity.
+Plan quip work as roughly serial.
+
 ## Artifacts
 
 Checkpoints and curves in `checkpoints/` (gitignored), seventeen runs.
@@ -586,12 +630,19 @@ drivel: `drivel-B-repro`, `drivel-B-repro-s1`, `drivel-E-b9b10full`,
 `drivel-G-ex-noexheld`, `drivel-G-ex-noexheld-s1`, `drivel-H-swap-noexheld`,
 `drivel-H-swap-noexheld-s1`.
 
-quip: `quip-B-b9b10`, `quip-B-b9b10-s1`, `quip-D-b9b10b11`, `quip-D-b9b10b11-s1`.
+quip: `quip-B-b9b10`, `quip-B-b9b10-s1`, `quip-D-b9b10b11`, `quip-D-b9b10b11-s1`,
+`quip-D-60k`, `quip-D-60k-s1`.
 
-**`quip-D-b9b10b11-s1` (2.3244) is the best checkpoint this project has produced**,
-0.207 nats ahead of the best drivel. Like every checkpoint here it is *not* promoted —
-and note that promoting a quip rung would change the embedded model's size, not just
-its weights.
+**`quip-D-60k-s1` (2.2571) is the best checkpoint this project has produced**, 0.274
+nats ahead of the best drivel (`drivel-D-b9b10b11`, 2.5309). Like every checkpoint here
+it is *not* promoted, and a quip promotion is a **kernel-image budget** decision before
+it is a model one: a quip checkpoint is **12.2 MB against drivel's 4.2 MB**, and the
+itest image already broke unrelated scenarios with `OutOfFrames` at 4.5 MB of weights.
+It likely needs its own feature gate rather than riding the shared image.
+
+Two caveats on quoting 2.2571. It is the better of a seed pair spanning 0.041, so the
+*expected* value of a fresh quip@60k run is nearer 2.28 than 2.26. And the seed spread
+itself is unexplained — see the LR suspicion above.
 
 Derived corpora in `corpora/` (gitignored, all reproducible):
 
