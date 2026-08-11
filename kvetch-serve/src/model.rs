@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use kvetch_model::{Model, NaiveGemm, Session};
+use kvetch_model::{Model, RowGemm, Session};
 use kvetch_vocab::TokenId;
 
 use crate::serve::Logits;
@@ -52,7 +52,12 @@ impl Logits for ModelLogits {
         // times. The session gives the same numbers — bit for bit, which
         // `generating_with_a_cache_is_bit_identical_to_re_running_the_prefix` pins —
         // for one position of work per token.
-        self.session.logits_for(&self.model, tokens, &NaiveGemm)
+        //
+        // `RowGemm` rather than `NaiveGemm`: same arithmetic, same bits, walked in the
+        // order the weights are laid out. 77% of the forward pass is a multiply that
+        // `NaiveGemm` reads one useful float per cache line from — see
+        // `RowGemm`'s own docs and `notes/drivel-on-vf2-speedup-ideas.md` §3.
+        self.session.logits_for(&self.model, tokens, &RowGemm)
     }
 }
 

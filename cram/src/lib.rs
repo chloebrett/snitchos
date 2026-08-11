@@ -50,35 +50,17 @@ impl Gemm for BlockedGemm {
 /// Accumulating into the output row-by-row over `k` — rather than computing each
 /// dot product independently — is what makes `b`'s access sequential, which is
 /// the whole win over the naive triple loop.
+///
+/// The body now lives in `kvetch_model::row_order_band`, because the *serving* path
+/// wants exactly this traversal at `m = 1` and two copies of a kernel that must agree
+/// bit for bit is a bug waiting for a long prefix. All this adds is the threading.
+///
+/// One behavioural change came with the move: the old body skipped an inner step when
+/// `left == 0.0`, and the shared kernel does not. The skip is a no-op for finite
+/// values and *not* for `inf`/`NaN`/signed zero, and training activations are
+/// essentially never exactly zero, so it was buying a branch rather than work.
 fn blocked_band(spec: GemmSpec, a: &[f32], b: &[f32], band: &mut [f32], first_row: usize, rows: usize) {
-    band.fill(0.0);
-
-    for local_row in 0..rows {
-        let row = first_row + local_row;
-        let target = &mut band[local_row * spec.n..][..spec.n];
-
-        for inner in 0..spec.k {
-            let left = if spec.transpose_a {
-                a[inner * spec.m + row]
-            } else {
-                a[row * spec.k + inner]
-            };
-            if left == 0.0 {
-                continue;
-            }
-
-            if spec.transpose_b {
-                for (column, slot) in target.iter_mut().enumerate() {
-                    *slot += left * b[column * spec.k + inner];
-                }
-            } else {
-                let b_row = &b[inner * spec.n..][..spec.n];
-                for (slot, value) in target.iter_mut().zip(b_row) {
-                    *slot += left * value;
-                }
-            }
-        }
-    }
+    kvetch_model::row_order_band(spec, a, b, band, first_row, rows);
 }
 
 /// Apple's Accelerate framework, which is the only way to reach the **AMX**

@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use kvetch_model::{Gemm, GemmSpec, Model, ModelConfig, NaiveGemm, Session};
+use kvetch_model::{Gemm, GemmSpec, Model, ModelConfig, NaiveGemm, RowGemm, Session};
 use kvetch_vocab::Vocab;
 
 /// The prefix to profile. Long enough that prefill is the dominant cost — which is the
@@ -74,8 +74,16 @@ fn main() -> ExitCode {
     // Prefill: a cold session over the whole prefix. Decode: one more token against a
     // session already holding it. `bench-serve` showed a cold Tab is 89% the former
     // and a warm one 59-76% the latter, so both are worth attributing.
-    report("prefill (whole prefix, cold session)", &model, &tokens, None);
-    report("decode (one token, warm session)", &model, &tokens, Some(&tokens));
+    //
+    // Both kernels, side by side, because the interesting question after §3a is not
+    // "where does the time go" but "did the bucket it was supposed to move, move".
+    // Same bin, same prefix, same run — the cleanest A/B available.
+    println!("=== NaiveGemm ===");
+    report("NaiveGemm prefill (whole prefix, cold session)", &model, &tokens, None, || NaiveGemm);
+    report("NaiveGemm decode (one token, warm session)", &model, &tokens, Some(&tokens), || NaiveGemm);
+    println!("=== RowGemm ===");
+    report("RowGemm prefill (whole prefix, cold session)", &model, &tokens, None, || RowGemm);
+    report("RowGemm decode (one token, warm session)", &model, &tokens, Some(&tokens), || RowGemm);
 
     ExitCode::SUCCESS
 }
@@ -84,22 +92,41 @@ fn main() -> ExitCode {
 ///
 /// `warm_with`, when given, is run through an untimed session first, so the timed run
 /// measures only the positions the cache does not already hold.
-fn report(label: &str, model: &Model, tokens: &[u16], warm_with: Option<&[u16]>) {
-    let mut session = Session::new();
+fn report<G: Gemm>(
+    label: &str,
+    model: &Model,
+    tokens: &[u16],
+    warm_with: Option<&[u16]>,
+    kernel: fn() -> G,
+) {
     let mut timed: Vec<u16> = tokens.to_vec();
-    if let Some(warm) = warm_with {
-        session.logits_for(model, warm, &NaiveGemm);
+    if warm_with.is_some() {
         // One further token, drawn from the vocabulary rather than sampled: this
         // measures a step, not a completion, and any id does the same work.
         timed.push(1);
     }
 
-    let gemm = TimingGemm::new(model.config(), model.vocab());
-    let started = Instant::now();
-    session.logits_for(model, &timed, &gemm);
-    let total = started.elapsed();
+    let (config, vocab) = (model.config(), model.vocab());
+    let run = |gemm: &TimingGemm<G>| {
+        let mut session = Session::new();
+        if let Some(warm) = warm_with {
+            session.logits_for(model, warm, &NaiveGemm);
+        }
+        let started = Instant::now();
+        session.logits_for(model, &timed, gemm);
+        started.elapsed()
+    };
 
+    // **Discarded warm-up, and it is not a formality.** The first kernel measured
+    // pulls 4.2 MB of weights into cache and the second finds them there, so a
+    // straight back-to-back A/B hands the *second* one a tailwind and calls it a win.
+    // Caught by `bench-serve` and this bin disagreeing 2× on the same prefill.
+    run(&TimingGemm::new(kernel(), config, vocab));
+
+    let gemm = TimingGemm::new(kernel(), config, vocab);
+    let total = run(&gemm);
     let buckets = gemm.buckets.into_inner();
+
     let matmul: Duration = buckets.values().map(|bucket| bucket.elapsed).sum();
     let calls: u32 = buckets.values().map(|bucket| bucket.calls).sum();
 
@@ -127,8 +154,8 @@ struct Bucket {
 
 /// [`NaiveGemm`] with a stopwatch, bucketed by which multiply in the architecture the
 /// shape belongs to.
-struct TimingGemm {
-    inner: NaiveGemm,
+struct TimingGemm<G: Gemm> {
+    inner: G,
     config: ModelConfig,
     vocab: usize,
     /// `BTreeMap` so the report comes out in a stable order run to run — a profile
@@ -136,9 +163,9 @@ struct TimingGemm {
     buckets: RefCell<BTreeMap<&'static str, Bucket>>,
 }
 
-impl TimingGemm {
-    fn new(config: ModelConfig, vocab: usize) -> Self {
-        Self { inner: NaiveGemm, config, vocab, buckets: RefCell::new(BTreeMap::new()) }
+impl<G: Gemm> TimingGemm<G> {
+    fn new(inner: G, config: ModelConfig, vocab: usize) -> Self {
+        Self { inner, config, vocab, buckets: RefCell::new(BTreeMap::new()) }
     }
 
     /// Which multiply in `Model::step` this shape is.
@@ -162,7 +189,7 @@ impl TimingGemm {
     }
 }
 
-impl Gemm for TimingGemm {
+impl<G: Gemm> Gemm for TimingGemm<G> {
     fn sgemm(&self, spec: GemmSpec, a: &[f32], b: &[f32], c: &mut [f32]) {
         let started = Instant::now();
         self.inner.sgemm(spec, a, b, c);
@@ -175,19 +202,28 @@ impl Gemm for TimingGemm {
     }
 }
 
-/// A wrapped run must produce exactly what an unwrapped one produces.
+/// Neither the stopwatch nor the kernel under test may move a single logit.
 ///
-/// Delegation makes that true by construction, which is the point: the assertion is
-/// cheap and it fails loudly if the decorator ever grows a shortcut, a reordering, or
-/// a different inner backend — any of which would leave a profile of something other
-/// than the code being profiled.
+/// Two claims in one comparison, both of which the report depends on:
+///
+/// - **the decorator is transparent** — it delegates, so a difference means it grew a
+///   shortcut or a reordering, and the profile would describe something other than the
+///   code being profiled;
+/// - **`RowGemm` equals `NaiveGemm` at the real model's scale.** The unit test pins
+///   that on hand-sized shapes; this pins it on drivel's own weights over a 63-token
+///   prefix, which is where an accumulation-order slip would actually show up.
 fn timing_changes_no_arithmetic(model: &Model, tokens: &[u16]) -> Result<(), String> {
+    let (config, vocab) = (model.config(), model.vocab());
     let plain = Session::new().logits_for(model, tokens, &NaiveGemm);
-    let timed = Session::new().logits_for(model, tokens, &TimingGemm::new(model.config(), model.vocab()));
 
-    if plain == timed {
-        return Ok(());
+    for (name, logits) in [
+        ("the timed NaiveGemm", Session::new().logits_for(model, tokens, &TimingGemm::new(NaiveGemm, config, vocab))),
+        ("the timed RowGemm", Session::new().logits_for(model, tokens, &TimingGemm::new(RowGemm, config, vocab))),
+    ] {
+        if logits != plain {
+            let differing = plain.iter().zip(&logits).filter(|(left, right)| left != right).count();
+            return Err(format!("{name} changed {differing} of {} logits", plain.len()));
+        }
     }
-    let differing = plain.iter().zip(&timed).filter(|(left, right)| left != right).count();
-    Err(format!("the timed multiply changed {differing} of {} logits", plain.len()))
+    Ok(())
 }

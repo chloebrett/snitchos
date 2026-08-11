@@ -240,6 +240,91 @@ impl Gemm for NaiveGemm {
     }
 }
 
+/// The same arithmetic as [`NaiveGemm`], walked so that `b` is read sequentially —
+/// which means walking it **two different ways depending on how `b` is stored**.
+///
+/// `b` is the big operand (the weights), so it is the one whose traversal decides the
+/// cache behaviour:
+///
+/// - **`transpose_b: false`** — `b` is `k × n`, so a fixed output column lives at
+///   `b[inner * n + column]`, striding by `n` floats per step. `NaiveGemm` finishes one
+///   output element at a time and therefore takes **one useful float per cache line**,
+///   re-streaming the whole matrix once per output column. Accumulating into the output
+///   *row* over `k` instead reads each row of `b` once, sequentially.
+/// - **`transpose_b: true`** — `b` is `n × k`, so one output element's inputs are
+///   already contiguous at `b[column * k ..][.. k]`. Here `NaiveGemm`'s traversal is
+///   the cache-optimal one, and row-accumulation is the pessimal one: it strides `b` by
+///   `k` *and* read-modify-writes the entire output row once per `k`.
+///
+/// Measured on drivel, 63-token prefill: the row-accumulating half took ffn-up from
+/// 36.56 ms to 1.79, the projections from 35.04 to 1.74 and ffn-down from 29.85 to
+/// 1.67 — **18–20× each**, and 5.6× on the whole prefill. Forcing that same traversal
+/// onto the `transpose_b: true` `logits` multiply instead made it **1.7× slower**
+/// (10.75 → 18.12 ms), which is why the dispatch exists rather than one loop. See
+/// `notes/drivel-on-vf2-speedup-ideas.md` §3a.
+///
+/// **Bit-identical to [`NaiveGemm`] either way, which is the constraint that matters.**
+/// Neither traversal reorders the *accumulation*: each output element is still summed
+/// over `k` ascending into a zero-initialised slot, exactly as `Iterator::sum` does.
+/// `the_row_order_multiply_is_bit_identical_to_the_naive_one` pins it, and the serving
+/// path's byte-exact completion contract is why it must be bit-equality rather than a
+/// tolerance.
+pub struct RowGemm;
+
+impl Gemm for RowGemm {
+    fn sgemm(&self, spec: GemmSpec, a: &[f32], b: &[f32], c: &mut [f32]) {
+        row_order_band(spec, a, b, c, 0, spec.m);
+    }
+}
+
+/// `rows` output rows starting at `first_row`, written into `band`.
+///
+/// Banded rather than whole-matrix because the threaded backend in `cram` splits the
+/// output by rows and needs to drive exactly this kernel — one implementation of the
+/// multiply, not two that must be kept in agreement.
+///
+/// Note there is deliberately **no `if left == 0.0 { continue }` skip** in the
+/// accumulating branch. It is a no-op for finite values and not for `inf`, `NaN` or
+/// signed zero — `0.0 * inf` is `NaN`, which the skip would quietly avoid — and "not
+/// provably identical" is not worth a branch in the inner loop.
+pub fn row_order_band(
+    spec: GemmSpec,
+    a: &[f32],
+    b: &[f32],
+    band: &mut [f32],
+    first_row: usize,
+    rows: usize,
+) {
+    let left_at = |row: usize, inner: usize| {
+        if spec.transpose_a { a[inner * spec.m + row] } else { a[row * spec.k + inner] }
+    };
+
+    // `b` already contiguous per output element: finish one element at a time, which
+    // also spares the output row `k` read-modify-write passes.
+    if spec.transpose_b {
+        for local_row in 0..rows {
+            let row = first_row + local_row;
+            for (column, slot) in band[local_row * spec.n..][..spec.n].iter_mut().enumerate() {
+                *slot = (0..spec.k).map(|inner| left_at(row, inner) * b[column * spec.k + inner]).sum();
+            }
+        }
+        return;
+    }
+
+    band.fill(0.0);
+    for local_row in 0..rows {
+        let row = first_row + local_row;
+        let target = &mut band[local_row * spec.n..][..spec.n];
+
+        for inner in 0..spec.k {
+            let left = left_at(row, inner);
+            for (slot, value) in target.iter_mut().zip(&b[inner * spec.n..][..spec.n]) {
+                *slot += left * value;
+            }
+        }
+    }
+}
+
 /// Incremental generation: the keys and values of everything already seen.
 ///
 /// **Why this exists.** [`Model::forward`] computes logits for *every* position and
@@ -1208,6 +1293,53 @@ mod tests {
             ..plain
         };
         assert_eq!(product(both, &A, &B), [76.0, 103.0, 100.0, 136.0]);
+    }
+
+    /// **`RowGemm` must equal `NaiveGemm` bit for bit, not within a tolerance.**
+    ///
+    /// The two differ only in traversal order — `NaiveGemm` finishes one output
+    /// element at a time, `RowGemm` accumulates a whole output row over `k` — and
+    /// reordering the traversal does not reorder the *accumulation*: each element is
+    /// still summed over `k` ascending into a zero-initialised slot. That is what makes
+    /// exact equality the right assertion rather than an optimistic one, and it is
+    /// what lets the serving path switch kernels without moving a served byte.
+    ///
+    /// The shapes are the ones drivel actually runs (`m = 1`, and both `k < n` and
+    /// `k > n`, which are the ffn's two halves), plus every transpose combination —
+    /// a kernel that special-cased one of them would otherwise pass on the others.
+    #[test]
+    fn the_row_order_multiply_is_bit_identical_to_the_naive_one() {
+        for (m, k, n) in [(1, 128, 128), (1, 128, 512), (1, 512, 128), (1, 4, 2048), (3, 5, 7)] {
+            for transpose_a in [false, true] {
+                for transpose_b in [false, true] {
+                    let spec = GemmSpec { m, k, n, transpose_a, transpose_b };
+                    let a = pseudo_random_weights(m * k, 11);
+                    let b = pseudo_random_weights(k * n, 22);
+
+                    let mut naive = vec![0.0; m * n];
+                    NaiveGemm.sgemm(spec, &a, &b, &mut naive);
+                    let mut row_order = vec![0.0; m * n];
+                    RowGemm.sgemm(spec, &a, &b, &mut row_order);
+
+                    assert_eq!(row_order, naive, "{spec:?}");
+                }
+            }
+        }
+    }
+
+    /// A caller may hand `RowGemm` a buffer holding a previous result — `Model::step`
+    /// reuses `logits` across tokens — so the kernel must *overwrite* rather than
+    /// accumulate into what it finds. Accumulating is the natural bug when a kernel is
+    /// built around `+=`, and it produces plausible drifting output rather than a
+    /// crash.
+    #[test]
+    fn the_row_order_multiply_overwrites_whatever_was_in_the_output() {
+        let spec = GemmSpec { m: 2, k: 3, n: 2, transpose_a: false, transpose_b: false };
+        let mut out = vec![999.0; 4];
+
+        RowGemm.sgemm(spec, &A, &B, &mut out);
+
+        assert_eq!(out, [58.0, 64.0, 139.0, 154.0]);
     }
 
     const TINY: ModelConfig = ModelConfig {

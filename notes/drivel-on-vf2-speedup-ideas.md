@@ -417,7 +417,57 @@ weight once. At the board's measured 1.5–3 GB/s that is a **~1.4–2.8 ms/toke
 bandwidth floor, i.e. ~350–700 tok/s** — which is the number to compare any
 measurement against, and is far above anything we are seeing.
 
-### 3a. The on-target GEMM walks the weight matrix **down columns**
+### 3a. The on-target GEMM walks the weight matrix **down columns** — **done, ~3–5× on the forward pass**
+
+> **Landed 2026-08-10** as `kvetch_model::RowGemm` + `row_order_band`, with
+> `cram::blocked_band` delegating to it so there is one kernel rather than two.
+> `kvetch-serve` serves through it. Bit-identical, pinned by
+> `the_row_order_multiply_is_bit_identical_to_the_naive_one` (every transpose
+> combination × drivel's own shapes) and by `bench-forward` re-checking equality on
+> the real checkpoint over a 63-token prefix.
+>
+> Measured per bucket (63-token prefill, `bench-forward`, warm-up equalised):
+>
+> | bucket | `transpose_b` | Naive | Row | |
+> |---|---|---|---|---|
+> | ffn up | false | 36.56 ms | 1.79 | **20×** |
+> | proj q/k/v/o | false | 35.04 | 1.74 | **20×** |
+> | ffn down | false | 29.85 | 1.67 | **18×** |
+> | attn apply | false | 0.77 | 0.20 | 4× |
+> | attn scores | true | 0.56 | 0.59 | — |
+> | logits | true | 11.22 | 11.94 | — |
+> | **whole prefill** | | **120.8** | **21.5** | **5.6×** |
+>
+> Across runs: **~3–5.6× on prefill, ~2–4× on decode.** The spread is host load, not
+> method — absolute totals moved 2.5× between runs while the ratio held — so treat the
+> range as the result and re-measure on a quiet machine before quoting one number. The
+> `transpose_b: false` buckets are the ones that move, exactly as predicted; the two
+> `transpose_b: true` buckets sit at parity, which is the dispatch working.
+>
+> `cargo xtask itest stitch-drivel-completes` passes, so the served completion is
+> byte-for-byte what it was — the change is invisible to everything except the clock.
+>
+> **Two corrections this section needs.**
+>
+> 1. **"The fix is already written, in `cram`" was half right.** Lifting
+>    `blocked_band` verbatim made the `transpose_b: true` multiplies *slower* —
+>    `logits` went 10.75 → 18.12 ms, **1.7× worse**, because row-accumulation strides
+>    `b` by `k` *and* read-modify-writes the whole 2048-entry output row `k` times,
+>    where `NaiveGemm`'s per-element dot product was already reading `b` contiguously.
+>    The kernel now dispatches on `transpose_b` and picks whichever traversal makes `b`
+>    sequential. Caught only because `bench-forward` reports per shape; a single
+>    end-to-end number would have shown the net win and hidden the regression.
+> 2. **Dropping the `if left == 0.0 { continue }` skip was right**, as this section
+>    said, and it cost nothing measurable in training either.
+>
+> **What is now the biggest matmul: `logits`.** At 2048 outputs against `d_model` 128
+> it is ~50% of the remaining forward pass, and it is the one bucket this change did
+> not move. That is the next place to look, not §3c or §3d.
+>
+> One methodological trap worth keeping: the first A/B ran both kernels back to back,
+> so the second found 4.2 MB of weights already in cache and got a ~2× tailwind.
+> `bench-forward` now runs a discarded warm-up per kernel. The tell was this bin and
+> `bench-serve` disagreeing 2× about the same prefill.
 
 `NaiveGemm` (`kvetch-model/src/lib.rs:211-241`) computes each output element as an
 independent dot product. Every projection in `Model::step` passes
@@ -650,22 +700,26 @@ it, because the difference between the two *is* the finding.
 4. ~~**Per-op counters inside `Model::step`**~~ — **done**,
    `kvetch-serve/src/bin/bench-forward.rs`. Matmul is 92–94% of the forward pass; see
    §3's measured subsection for the shape breakdown.
-5. **§3a row-order GEMM**, lifted from `cram::blocked_band`. Now the clear lever:
-   **77% of the forward pass** is `transpose_b: false` and strides `b` by `n`. Note
-   the target is a matrix-*vector* product at `m = 1`, and that `logits` and
-   `attn scores` already pass `transpose_b: true` and need nothing. Bit-identity
-   assertion re-run as the gate; drop `blocked_band`'s `if left == 0.0 { continue }`,
-   which is not identical for `inf`/`NaN`/signed zero.
-6. **In-place `collapse_pair`** (§2e). Promoted past §2a *and* past §3c/§3d: 15% of a
+5. ~~**§3a row-order GEMM**~~ — **done, ~3–5× on the forward pass.** See §3a's banner,
+   including the regression it caused on the `transpose_b: true` multiplies before the
+   dispatch was added.
+6. **The `logits` multiply** — new, and now ~50% of what is left of the forward pass.
+   `k = 128, n = 2048, transpose_b: true`, one call per token, and §3a did not move it.
+   It reads the whole 1 MB embedding table per token, so it is plausibly bandwidth-
+   bound rather than traversal-bound — measure before assuming a kernel change helps.
+   Note §4a (forced tokens) skips this multiply entirely on 8.3% of steps.
+7. **In-place `collapse_pair`** (§2e). Promoted past §2a *and* past §3c/§3d: 15% of a
    warm long Tab, while those two share a residual worth at most 7% of the forward
-   pass.
-7. **Forced tokens** (§4a). Promoted from "the designed future": it spends oracle work
+   pass — and note §3a shrank the forward pass, so **re-run `bench-serve` before
+   ranking anything below here**; every share in this list was measured against a
+   forward pass that is now 3–5× cheaper.
+8. **Forced tokens** (§4a). Promoted from "the designed future": it spends oracle work
    to skip a whole forward pass, and at the measured 20:1 model-to-oracle ratio that
    is now a better trade than any oracle optimisation. Design it as `at_most_one` as
    §4a already says.
-8. **Short-circuit `viable`** (§2a), demoted to last, with the free 2b/2c cleanups. At
-   most a 5–11% slice, behind a refusal loop the measurement shows barely runs.
-9. **Drop §3e.** `draw` is ~1%. There is nothing there.
+9. **Short-circuit `viable`** (§2a), with the free 2b/2c cleanups. It was last at a
+   5–11% slice; §3a moved the denominator, so re-read its share before dismissing it.
+10. **Drop §3e.** `draw` is ~1%. There is nothing there.
 
 <details><summary>The original ordering, written before the measurement</summary>
 
