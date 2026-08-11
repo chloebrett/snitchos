@@ -308,12 +308,26 @@ fn lex_placeholder(chars: &mut Cursor<'_>) -> TokenKind {
 
 /// Lex a `"…"` string literal, splitting `{expr}` interpolations into parts.
 fn lex_string(chars: &mut Cursor<'_>) -> TokenKind {
+    lex_string_reporting_closure(chars).0
+}
+
+/// [`lex_string`], also reporting whether a closing quote was actually found.
+///
+/// The distinction matters only to [`trailing_region`] and only in the same way it
+/// does for comments: running out of input is not the same as closing on the last
+/// byte, and an unterminated literal swallows everything appended after it.
+fn lex_string_reporting_closure(chars: &mut Cursor<'_>) -> (TokenKind, bool) {
     chars.next(); // opening quote
+    let mut closed = false;
     let mut parts = Vec::new();
     let mut lit = String::new();
     loop {
         match chars.next() {
-            None | Some('"') => break,
+            None => break,
+            Some('"') => {
+                closed = true;
+                break;
+            }
             Some('\\') => match chars.next() {
                 Some('n') => lit.push('\n'),
                 Some('t') => lit.push('\t'),
@@ -350,7 +364,7 @@ fn lex_string(chars: &mut Cursor<'_>) -> TokenKind {
     if !lit.is_empty() || parts.is_empty() {
         parts.push(StrPart::Lit(lit));
     }
-    TokenKind::Str(parts)
+    (TokenKind::Str(parts), closed)
 }
 
 /// Capture the raw source inside a `{…}` interpolation up to the matching
@@ -393,6 +407,13 @@ pub enum Trailing {
     LineComment,
     /// Inside a `/* */` block comment, at any nesting depth.
     BlockComment,
+    /// Inside an unterminated string literal.
+    ///
+    /// The same hole as a comment and, measured, the one that matters more: a `"` the
+    /// model opens and never closes swallows every byte appended after it, so the
+    /// grammar stops constraining and the completion collapses into fragments. Seen at
+    /// press 46 of an 80-press run, after which the output never recovered.
+    Str,
 }
 
 impl Trailing {
@@ -409,6 +430,7 @@ impl Trailing {
             Self::Code => "",
             Self::LineComment => "\n",
             Self::BlockComment => "*/",
+            Self::Str => "\"",
         }
     }
 }
@@ -426,7 +448,9 @@ pub fn trailing_region(src: &str) -> Trailing {
     while let Some(c) = chars.peek() {
         // Strings first, so a `//` or `/*` inside one opens nothing.
         if c == '"' {
-            lex_string(&mut chars);
+            if !lex_string_reporting_closure(&mut chars).1 {
+                return Trailing::Str;
+            }
             continue;
         }
         if c == '/' && matches!(chars.peek2(), Some('/' | '*')) {
@@ -771,6 +795,12 @@ mod tests {
             // A newline does not close a block comment, which is why the region has
             // to be named rather than assumed.
             ("/* open\nstill open", Trailing::BlockComment),
+            // An unterminated string swallows everything after it, including what
+            // looks like a comment — measured as the hole that mattered most.
+            (r#"let s = "unterminated"#, Trailing::Str),
+            (r#"let s = "open // not a comment"#, Trailing::Str),
+            (r#"let s = "closed" "#, Trailing::Code),
+            (r#"let s = "escaped \" still open"#, Trailing::Str),
         ] {
             assert_eq!(trailing_region(src), want, "{src:?}");
         }
@@ -787,6 +817,7 @@ mod tests {
             "let x = 1 /* note",
             "let x = 1 /* a /* b */",
             r#"let s = "// not a comment""#,
+            r#"let s = "unterminated"#,
         ] {
             let before = toks(src).len();
             let after = toks(&alloc::format!("{src}z")).len();
