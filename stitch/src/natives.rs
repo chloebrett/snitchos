@@ -68,6 +68,9 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "mapHas",       arity: 2, func: native_map_has,       module: Some("Map"),  export_as: Some("has") },
     NativeFn { name: "mapInsert",    arity: 3, func: native_map_insert,    module: Some("Map"),  export_as: Some("insert") },
     NativeFn { name: "mapRemove",    arity: 2, func: native_map_remove,    module: Some("Map"),  export_as: Some("remove") },
+    NativeFn { name: "mapKeys",      arity: 1, func: native_map_keys,      module: Some("Map"),  export_as: Some("keys") },
+    NativeFn { name: "mapValues",    arity: 1, func: native_map_values,    module: Some("Map"),  export_as: Some("values") },
+    NativeFn { name: "mapEntries",   arity: 1, func: native_map_entries,   module: Some("Map"),  export_as: Some("entries") },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -1207,6 +1210,49 @@ fn native_map_remove(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> 
     Ok(Value::Map(entries.into()))
 }
 
+/// `Map.keys(m)` — `m`'s keys as a `List`, in insertion order.
+fn native_map_keys(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [map] = args else {
+        return Err(RuntimeError::new("keys expects (map)"));
+    };
+    let keys = expect_map("keys", map)?
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    Ok(Value::List(keys.into()))
+}
+
+/// `Map.values(m)` — `m`'s values as a `List`, in insertion order.
+fn native_map_values(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [map] = args else {
+        return Err(RuntimeError::new("values expects (map)"));
+    };
+    let values = expect_map("values", map)?
+        .iter()
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    Ok(Value::List(values.into()))
+}
+
+/// `Map.entries(m)` — `m`'s entries as a `List` of `(key, value)` tuples, in
+/// insertion order. The named inverse of `Map.fromList`.
+///
+/// Derivable (`map(m, e -> e)` is the same list) and kept anyway: the round-trip
+/// law `Map.fromList(Map.entries(m)) == m` is what the `Map` module's build story
+/// rests on, and it reads as a law only with both names present. `Map.keys` and
+/// `Map.values` are *not* similarly derivable — their `map`-based spellings need
+/// a `match` wrapper to reach past the tuple.
+fn native_map_entries(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [map] = args else {
+        return Err(RuntimeError::new("entries expects (map)"));
+    };
+    let entries = expect_map("entries", map)?
+        .iter()
+        .map(|(key, value)| entry_tuple(key, value))
+        .collect::<Vec<_>>();
+    Ok(Value::List(entries.into()))
+}
+
 /// `join(list, sep)` — the displayed elements concatenated with `sep` between.
 fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     let [list, separator] = args else {
@@ -1781,6 +1827,70 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(run_map(r#"Map.get([:], "a") == None"#), Value::Bool(true));
+    }
+
+    // Two entries, distinct keys — the smallest map whose reversal is visible. A
+    // one-entry map agrees with any implementation and would prove nothing.
+    #[test]
+    fn map_keys_and_values_project_in_insertion_order() {
+        assert_eq!(
+            run_map(r#"Map.keys(["a": 1, "b": 2]) == ["a", "b"]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.values(["a": 1, "b": 2]) == [1, 2]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(run_map(r#"Map.keys([:]) == []"#), Value::Bool(true));
+        assert_eq!(run_map(r#"Map.values([:]) == []"#), Value::Bool(true));
+    }
+
+    #[test]
+    fn map_entries_yields_destructurable_key_value_tuples() {
+        assert_eq!(
+            run_map(r#"Map.entries(["a": 1, "b": 2]) == [("a", 1), ("b", 2)]"#),
+            Value::Bool(true)
+        );
+        // The shape matters as much as the contents: an entry must destructure,
+        // because that is how every consumer reads one.
+        assert_eq!(
+            run_map(
+                r#"Map.entries(["a": 1, "b": 2])
+                   |> map(e -> match e { (k, _) => k })
+                   == ["a", "b"]"#
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(run_map(r#"Map.entries([:]) == []"#), Value::Bool(true));
+    }
+
+    // `Map.entries` is deliberately kept despite being derivable — it is the
+    // named inverse of `Map.fromList`, and the round-trip law reads far better
+    // with both names present. This test makes the redundancy *explicit* rather
+    // than leaving it implied, so a future reviewer who wants to cut it can see
+    // exactly what the replacement spelling is.
+    #[test]
+    fn map_entries_is_the_named_spelling_of_mapping_entries_to_themselves() {
+        assert_eq!(
+            run_map(r#"Map.entries(["a": 1, "b": 2]) == map(["a": 1, "b": 2], e -> e)"#),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn map_projections_refuse_a_non_map_receiver() {
+        assert_eq!(
+            run_map_err(r#"Map.keys([1, 2, 3])"#),
+            "keys expects a Map, got List"
+        );
+        assert_eq!(
+            run_map_err(r#"Map.values([1, 2, 3])"#),
+            "values expects a Map, got List"
+        );
+        assert_eq!(
+            run_map_err(r#"Map.entries([1, 2, 3])"#),
+            "entries expects a Map, got List"
+        );
     }
 
     // Insertion order is a **contract**, not an implementation detail: it is what
