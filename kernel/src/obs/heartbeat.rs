@@ -177,14 +177,22 @@ pub fn run(metrics: Metrics) -> ! {
             count += 1;
             // Board liveness pulse on the human UART. `vf2`-only so QEMU stays quiet,
             // and **text mode only**: in `console=frames` the heartbeat span and every
-            // other frame already carry liveness on the wire, and a raw `hb` line would
-            // both be redundant and shred a console-owning workload (the Stitch REPL) —
-            // the interleaving bug that `console=frames` exists to fix (one writer per
-            // stream). This replaces the old `board-heartbeat-print` feature: the mode
-            // subsumes it. Run the REPL with `console=frames`, a headless bring-up with
-            // `console=text`.
+            // other frame already carry liveness on the wire, so a raw `hb` line is
+            // redundant there. This replaces the old `board-heartbeat-print` feature.
+            //
+            // Also suppressed for a console-*owning* workload, whatever the mode: the
+            // Stitch REPL and the shell write their prompt to this same UART, and an
+            // `hb` line landing mid-prompt shreds it (one writer per stream). Mode
+            // alone can't stand in for this — `console=frames` silences the pulse but
+            // also diverts the REPL's own `ConsoleWrite` output to the wire (it routes
+            // through `print!`, see `syscall/console.rs`), leaving a dark terminal. An
+            // interactive board session is `console=text`, and this predicate is what
+            // makes that quiet.
             #[cfg(feature = "vf2")]
-            if crate::console::console_mode() == kernel_boot::bootargs::ConsoleMode::Text {
+            if crate::console::console_mode() == kernel_boot::bootargs::ConsoleMode::Text
+                && !crate::boot_workload::selected()
+                    .is_some_and(kernel_boot::bootargs::WorkloadKind::owns_console)
+            {
                 crate::println!("hb {count}");
             }
             frame_smoke();

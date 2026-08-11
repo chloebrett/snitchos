@@ -446,6 +446,33 @@ impl WorkloadKind {
                 | Self::VirtioStorm
         )
     }
+
+    /// True for workloads that drive the UART terminal themselves — the
+    /// interactive REPLs and the powerbox shell, which write a prompt and read a
+    /// line back. The kernel must not print to a console a workload owns: one
+    /// writer per stream, or the two interleave and shred each other's output
+    /// (an `hb` pulse landing mid-prompt at the Stitch REPL is the case that
+    /// motivated this).
+    ///
+    /// [`ConsoleEcho`](Self::ConsoleEcho) is deliberately absent: it *reads* the
+    /// console but writes to the telemetry stream via `DebugWrite`, so it owns no
+    /// UART output there is anything to corrupt.
+    ///
+    /// Orthogonal to [`ConsoleMode`]: that says *where* kernel output goes, this
+    /// says whether it should exist at all. A console-owning workload in
+    /// `ConsoleMode::Frames` is already safe (kernel lines go to the wire), but
+    /// so is its own output — which is why the REPL is run in `Text` and needs
+    /// this predicate.
+    pub fn owns_console(self) -> bool {
+        matches!(
+            self,
+            Self::Shell
+                | Self::StitchDrivel
+                | Self::StitchFs
+                | Self::StitchKvetch
+                | Self::StitchRepl
+        )
+    }
 }
 
 /// Where the kernel's human log output goes, selected by the `console=` bootarg.
@@ -787,6 +814,26 @@ mod tests {
         assert_eq!(select("workload=smp-spsc-batch"), Some(WorkloadKind::SmpSpscBatch));
         // Distinct from the per-item spsc variant.
         assert_ne!(select("workload=smp-spsc-batch"), Some(WorkloadKind::SmpSpsc));
+    }
+
+    #[test]
+    fn owns_console_classifies_terminal_owning_workloads() {
+        // The interactive REPLs and the powerbox shell write their prompt and
+        // results to the UART, so an unsolicited kernel line corrupts them.
+        assert!(WorkloadKind::Shell.owns_console());
+        assert!(WorkloadKind::StitchRepl.owns_console());
+        assert!(WorkloadKind::StitchFs.owns_console());
+        assert!(WorkloadKind::StitchKvetch.owns_console());
+        assert!(WorkloadKind::StitchDrivel.owns_console());
+
+        // `console-echo` *reads* the console but writes to the telemetry stream
+        // (`DebugWrite`), so it owns no UART output for the kernel to shred.
+        assert!(!WorkloadKind::ConsoleEcho.owns_console());
+
+        // Headless workloads: the liveness pulse is the whole point on these.
+        assert!(!WorkloadKind::Init.owns_console());
+        assert!(!WorkloadKind::Smp.owns_console());
+        assert!(!WorkloadKind::SpawnStorm.owns_console());
     }
 
     #[test]
