@@ -30,7 +30,10 @@ pub struct GrammarCompleter;
 
 impl Completer for GrammarCompleter {
     fn complete_line(&self, line: &str) -> Completion {
-        complete(line, line.len())
+        // The forced-token livelock is the grammar's own, not the model's — see
+        // [`reopened`]. A completer that skipped this would loop here too.
+        let (closer, line) = reopened(line);
+        behind(closer, complete(&line, line.len()))
     }
 }
 
@@ -58,14 +61,69 @@ impl<'a> ModelCompleter<'a> {
     }
 }
 
+/// If the line ends inside a comment, the only useful completion is the one that ends
+/// the comment.
+///
+/// **Two bugs live here, and they are the same bug.** A completer decides what may
+/// come next from the token stream but writes bytes at the end of the buffer, and
+/// inside a comment the lexer has skipped everything between them. So:
+///
+/// - a *forced* token appended there never joins the token stream, the grammar state
+///   never advances, and the same token is forced again on the next keystroke —
+///   observed on the VF2 as a line filling with `(((((((`, one byte per Tab, forever;
+/// - a *model* suggestion there is unconstrained, because every byte extends a comment
+///   legally, so the completion budget goes on prose. drivel's corpus is ~47% comments,
+///   so it stays once it drifts in.
+///
+/// Emitting the closer rather than declining is deliberate: declining would strand the
+/// line, and the point of pressing Tab repeatedly is to keep building. One Tab closes
+/// the comment; the next resumes ordinary completion with the insertion point back in
+/// code.
+/// The text that must precede any completion for this line, and the line as it will
+/// read once that text is in place.
+///
+/// Returned together rather than applied early because the closer is not the answer —
+/// it is a *prefix* to the answer. Closing the comment and stopping would spend a whole
+/// keypress on a newline, which is a third of them when the model is writing comments;
+/// closing and then completing against the reopened line spends none.
+fn reopened(line: &str) -> (&'static str, String) {
+    let closer = crate::lexer::trailing_region(line).closer();
+    let mut effective = String::from(line);
+    effective.push_str(closer);
+    (closer, effective)
+}
+
+/// `completion`, with `closer` in front of whatever text it carries.
+///
+/// A `Choices` answer loses its menu here, deliberately: when a comment is open the
+/// menu is the one thing that cannot help — every byte is legal inside a comment, so
+/// the classes it would list are about a position the user is not at. Closing is the
+/// only progress available, so offer that instead.
+fn behind(closer: &'static str, completion: Completion) -> Completion {
+    if closer.is_empty() {
+        return completion;
+    }
+    match completion {
+        Completion::Forced(text) => Completion::Forced(alloc::format!("{closer}{text}")),
+        Completion::Suggested(text) => Completion::Suggested(alloc::format!("{closer}{text}")),
+        Completion::Choices(_) | Completion::None => Completion::Suggested(String::from(closer)),
+    }
+}
+
 impl Completer for ModelCompleter<'_> {
     fn complete_line(&self, line: &str) -> Completion {
+        // An open comment first: until it closes, the insertion point and the token
+        // stream are in different places and nothing downstream can make progress.
+        let (closer, line) = reopened(line);
+        let line = line.as_str();
+
         let grammar = complete(line, line.len());
         let Completion::Choices(choices) = grammar else {
-            return grammar; // forced or dead — decided already, and for free
+            return behind(closer, grammar); // forced or dead — decided already, and for free
         };
         let Some(text) = self.platform.complete(line, self.max_tokens) else {
-            return Completion::Choices(choices); // no service: the menu is the floor
+            // No service: the menu is the floor — but a pending closer still beats it.
+            return behind(closer, Completion::Choices(choices));
         };
         // The suggestion crossed a process boundary. kvetch only emits
         // oracle-approved tokens, but a client that *assumed* that would be
@@ -77,9 +135,9 @@ impl Completer for ModelCompleter<'_> {
             .union(valid_next_in(&extended, extended.len(), Entry::Expr))
             .is_empty();
         if text.is_empty() || !survives {
-            return Completion::Choices(choices);
+            return behind(closer, Completion::Choices(choices));
         }
-        Completion::Suggested(text)
+        behind(closer, Completion::Suggested(text))
     }
 }
 
@@ -179,8 +237,48 @@ pub fn complete(line: &str, cursor: usize) -> Completion {
 
 #[cfg(test)]
 mod tests {
-    use super::{Completer, Completion, complete};
+    use super::{Completer, Completion, GrammarCompleter, complete};
     use crate::oracle::TokenClass;
+    use alloc::string::String;
+
+    /// **The livelock, pinned.** A line ending inside a comment used to make the
+    /// grammar force the same token forever: the lexer skips the comment, so the
+    /// appended byte never reaches the token stream, the grammar state never advances,
+    /// and the next press forces it again. On the VF2 this filled a line with
+    /// `(((((((`, one byte per Tab.
+    ///
+    /// The property asserted is "repeatedly completing makes progress", not "the
+    /// completion is a newline" — progress is what was violated, and pinning the exact
+    /// text would pass just as well for a loop that emitted something else.
+    #[test]
+    fn completing_repeatedly_inside_a_comment_makes_progress_rather_than_looping() {
+        let mut line = String::from("greet(name)\n    // Try to");
+
+        for press in 0..4 {
+            let before = line.clone();
+            match GrammarCompleter.complete_line(&line) {
+                Completion::Forced(text) | Completion::Suggested(text) => line.push_str(&text),
+                Completion::Choices(_) | Completion::None => break,
+            }
+            assert_ne!(line, before, "press {press} appended nothing");
+        }
+
+        assert_eq!(
+            crate::lexer::trailing_region(&line),
+            crate::lexer::Trailing::Code,
+            "still inside a comment after four presses: {line:?}",
+        );
+    }
+
+    /// A block comment is not closed by a newline, so the completer must offer `*/` —
+    /// the case a "just emit a newline" fix would loop on forever.
+    #[test]
+    fn an_open_block_comment_is_closed_by_its_own_terminator() {
+        assert_eq!(
+            GrammarCompleter.complete_line("greet(name) /* aside"),
+            Completion::Suggested("*/".into()),
+        );
+    }
 
     #[test]
     fn a_single_legal_spelling_is_typed_for_the_user() {

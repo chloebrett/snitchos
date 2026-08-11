@@ -84,8 +84,17 @@ fn main() -> ExitCode {
 
     let (buffer_bytes, tabs) = (buffer_bytes(), tabs());
     for tab in 1..=tabs {
-        // Step 1, as `ModelCompleter` does it: the grammar answers first, and a
-        // forced or dead verdict never reaches the model.
+        // Step 0, as `ModelCompleter` does it: a line ending inside a comment can make
+        // no progress until the comment closes, because the lexer skips everything
+        // between the token stream and the insertion point. The closer is a *prefix*
+        // to the answer, not the answer — closing and stopping would spend a whole
+        // keypress on a newline.
+        let closer = stitch::lexer::trailing_region(&line).closer();
+        let opened = line.len();
+        line.push_str(closer);
+
+        // Step 1: the grammar answers first, and a forced or dead verdict never
+        // reaches the model.
         let grammar = complete(&line, line.len());
         let Completion::Choices(choices) = &grammar else {
             println!("tab {tab:>2}: grammar decided alone — {grammar:?}");
@@ -121,9 +130,8 @@ fn main() -> ExitCode {
         };
 
         println!(
-            "tab {tab:>2}: {:>3} bytes, in_comment={:<5} {verdict}",
-            line.len(),
-            ends_inside_a_comment(&line),
+            "tab {tab:>2}: {opened:>4} bytes, closed={:<5} {verdict}",
+            !closer.is_empty(),
         );
 
         if served.is_empty() || !survives {
@@ -134,13 +142,4 @@ fn main() -> ExitCode {
 
     println!("\nfinal buffer:\n{line}");
     ExitCode::SUCCESS
-}
-
-/// Does the buffer end inside a `//` comment — i.e. after a `//` with no newline since?
-///
-/// The suspected mechanism: a comment runs to end of line, so while the buffer ends
-/// inside one, *every* byte extends it legally and the grammar constraint says nothing
-/// at all. A model whose corpus is ~47% comments will happily stay there.
-fn ends_inside_a_comment(line: &str) -> bool {
-    line.rsplit('\n').next().is_some_and(|last| last.contains("//"))
 }

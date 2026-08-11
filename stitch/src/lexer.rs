@@ -378,23 +378,94 @@ fn read_interpolation(chars: &mut Cursor<'_>) -> String {
     expr
 }
 
+/// Which lexical region the end of a source buffer falls in.
+///
+/// Exists for completion: a completer decides *what* may come next from the token
+/// stream, but writes bytes at the end of the buffer, and those are the same place
+/// only in [`Self::Code`]. Inside a comment an appended token is skipped by the lexer,
+/// so the token stream never advances — which turns a forced token into an infinite
+/// loop, one byte per keystroke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trailing {
+    /// Ordinary code. An appended token joins the token stream.
+    Code,
+    /// Inside a `//` line comment.
+    LineComment,
+    /// Inside a `/* */` block comment, at any nesting depth.
+    BlockComment,
+}
+
+impl Trailing {
+    /// The shortest text that returns the buffer to [`Self::Code`], or `""` if it is
+    /// already there.
+    ///
+    /// A newline closes a line comment and **does not** close a block comment, which
+    /// is the whole reason the region is named rather than guessed at. For a nested
+    /// block comment this closes one level, so a caller that must reach `Code` applies
+    /// it until [`trailing_region`] says so.
+    #[must_use]
+    pub const fn closer(self) -> &'static str {
+        match self {
+            Self::Code => "",
+            Self::LineComment => "\n",
+            Self::BlockComment => "*/",
+        }
+    }
+}
+
+/// Which region the end of `src` falls in.
+///
+/// Deliberately built from the lexer's own scan rather than a scan of its own: the
+/// string, comment and nesting rules are only stated once, in [`lex`], and a second
+/// statement of them would be free to disagree — quietly, and only on the inputs
+/// nobody tried. `code_means_an_appended_token_actually_reaches_the_lexer` is the
+/// standing cross-check.
+#[must_use]
+pub fn trailing_region(src: &str) -> Trailing {
+    let mut chars = Cursor::new(src);
+    while let Some(c) = chars.peek() {
+        // Strings first, so a `//` or `/*` inside one opens nothing.
+        if c == '"' {
+            lex_string(&mut chars);
+            continue;
+        }
+        if c == '/' && matches!(chars.peek2(), Some('/' | '*')) {
+            let block = chars.peek2() == Some('*');
+            if !skip_comment(&mut chars) {
+                return if block { Trailing::BlockComment } else { Trailing::LineComment };
+            }
+            continue;
+        }
+        chars.next();
+    }
+    Trailing::Code
+}
+
 /// Skip a `//` line comment or a nestable `/* */` block comment.
 /// The leading `/` is still on the cursor.
-fn skip_comment(chars: &mut Cursor<'_>) {
+///
+/// Returns whether the comment was **closed**, which [`trailing_region`] needs and
+/// [`lex`] does not: running out of input is not the same as closing at the last byte,
+/// and only the scan itself can tell them apart. A line comment counts as closed only
+/// by a newline — one with nothing after it is still open, because that is precisely
+/// the state in which appended text would land inside it.
+fn skip_comment(chars: &mut Cursor<'_>) -> bool {
     chars.next(); // '/'
     if chars.next() == Some('/') {
         while let Some(d) = chars.peek() {
             if d == '\n' {
-                break;
+                return true;
             }
             chars.next();
         }
-    } else {
+        return false;
+    }
+    {
         // block comment (the '*' is consumed), nestable
         let mut depth = 1u32;
         while depth > 0 {
             match chars.next() {
-                None => break,
+                None => return false,
                 Some('/') if chars.peek() == Some('*') => {
                     chars.next();
                     depth += 1;
@@ -406,6 +477,7 @@ fn skip_comment(chars: &mut Cursor<'_>) {
                 Some(_) => {}
             }
         }
+        true
     }
 }
 
@@ -467,7 +539,7 @@ fn lex_operator(chars: &mut Cursor<'_>) -> Option<TokenKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StrPart, Token, TokenKind, lex};
+    use super::{StrPart, Token, TokenKind, Trailing, lex, trailing_region};
 
     /// Lex and keep only the tokens (dropping the error channel) — for the token
     /// tests that assert on token shape.
@@ -669,6 +741,64 @@ mod tests {
             toks("\"{{x}}\""),
             vec![TokenKind::Str(vec![StrPart::Lit("{x}".to_string())]), TokenKind::Eof]
         );
+    }
+
+    #[test]
+    /// **Where a completion would land.** A completer computes what may come next
+    /// from the *token stream*, but writes bytes at the *end of the buffer*. Inside a
+    /// comment those are different places: the lexer skipped the comment, so an
+    /// appended token is invisible, the token stream never advances, and a forced
+    /// token is proposed again on the next keystroke — forever. Observed on the VF2
+    /// as a line filling with `(((((((`.
+    ///
+    /// So the completer has to be able to ask where the end of the buffer *is*, and
+    /// `src.ends_with("//")`-style scanning cannot answer it: a `//` inside a string
+    /// literal opens nothing, and a block comment nests.
+    #[test]
+    fn the_trailing_region_is_reported_for_each_way_a_buffer_can_end() {
+        for (src, want) in [
+            ("let x = 1", Trailing::Code),
+            ("let x = 1 // note", Trailing::LineComment),
+            ("let x = 1 // note\n", Trailing::Code),
+            ("let x = 1 /* note", Trailing::BlockComment),
+            ("let x = 1 /* note */", Trailing::Code),
+            // Nestable: the inner close leaves the outer one open.
+            ("let x = 1 /* a /* b */", Trailing::BlockComment),
+            ("let x = 1 /* a /* b */ */", Trailing::Code),
+            // A `//` inside a string opens no comment — the case a naive scan fails.
+            (r#"let s = "// not a comment""#, Trailing::Code),
+            (r#"let s = "/* nor this""#, Trailing::Code),
+            // A newline does not close a block comment, which is why the region has
+            // to be named rather than assumed.
+            ("/* open\nstill open", Trailing::BlockComment),
+        ] {
+            assert_eq!(trailing_region(src), want, "{src:?}");
+        }
+    }
+
+    /// The claim `Trailing::Code` makes is operational: an appended token is really
+    /// in the token stream. Cross-checked against [`lex`] rather than asserted, so
+    /// the scanner cannot drift away from the lexer it is describing.
+    #[test]
+    fn code_means_an_appended_token_actually_reaches_the_lexer() {
+        for src in [
+            "let x = 1",
+            "let x = 1 // note",
+            "let x = 1 /* note",
+            "let x = 1 /* a /* b */",
+            r#"let s = "// not a comment""#,
+        ] {
+            let before = toks(src).len();
+            let after = toks(&alloc::format!("{src}z")).len();
+            let reached = after > before;
+            assert_eq!(
+                trailing_region(src) == Trailing::Code,
+                reached,
+                "{src:?}: region says {:?} but appending a token {} reach the lexer",
+                trailing_region(src),
+                if reached { "did" } else { "did not" },
+            );
+        }
     }
 
     #[test]
