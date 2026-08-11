@@ -523,6 +523,29 @@ impl Machine {
     /// The value is stable within a build (a fixed-key `DefaultHasher`), enough to
     /// key a cache and to compare two states in the same process; it is not a
     /// cross-toolchain-stable digest.
+    ///
+    /// **It is also pointer-width-dependent, which measurement pinned down in
+    /// 2026-08.** Byte-identical machine state hashes differently on a 64-bit host
+    /// and on `wasm32`. The cause is not `SipHash` and not this emulator's
+    /// arithmetic: `<[u8]>::hash` length-prefixes with a **`usize`**, 8 bytes on the
+    /// host and 4 in a browser, and the fold below is full of slices and arrays
+    /// (`Hart::x`, `Hart::f`, the UART and virtio output buffers, `ram[..written]`).
+    /// Hashing a bare `u64`, and writing raw bytes via `Hasher::write`, both agree
+    /// across the two targets — so the length prefix is the whole of it.
+    /// `snemu-wasm/src/probe.rs::hash_diagnostics` is the experiment that isolated
+    /// it, and it runs on both targets so the finding cannot rot.
+    ///
+    /// Making it width-independent is a small, contained change if a reason ever
+    /// appears: write lengths explicitly as `u64` and push byte slices through
+    /// `Hasher::write`, at each link of the `hash_state` chain (`cpu.rs`, `csr.rs`,
+    /// `mem.rs`, `bus.rs`, `pwmdac.rs`). It is safe to do — every consumer compares
+    /// two hashes computed in the *same* process (the snapshot tree's fork
+    /// verification and `snemu_audit`), so there are no committed baselines to
+    /// invalidate. It is deliberately **not** done: nothing needs it today, and the
+    /// cross-target differential in `snemu-wasm` deliberately asserts the
+    /// architectural result (registers, UART bytes, retired instret — all of which
+    /// *do* match) rather than this digest. A wasm test asserts the hashes differ,
+    /// so if someone makes this width-independent that test fails and says so.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
