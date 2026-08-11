@@ -22,7 +22,7 @@
 //! - `weight > 0.0` → `>=` differs only when the draw point lands on exactly `0.0`
 //!   *and* a struck candidate precedes the survivor, in which case a refused token is
 //!   offered a second time. [`draw`] re-checks legality on everything it is handed, so
-//!   the whole cost is one of sixteen refusals. Pinning an exact float coincidence
+//!   the whole cost is one refusal out of [`MAX_REFUSALS`]. Pinning an exact float coincidence
 //!   would buy a fragile test for a rounding-width bug.
 
 use alloc::vec::Vec;
@@ -31,12 +31,32 @@ use kvetch_vocab::TokenId;
 
 /// How many refusals to absorb before giving up on a position.
 ///
-/// A cap rather than an exhaustive walk, because the tail is worthless: if the top
-/// candidates are all illegal, the model has no useful opinion here and the honest
-/// answer is to stop the completion rather than keep digging for the least-bad legal
-/// token. Stopping early is always safe — a completion is a *fragment*, and a shorter
-/// fragment is still a valid one.
-pub const MAX_REFUSALS: usize = 16;
+/// **A latency budget, not a quality heuristic** — and it used to be the latter. At 16
+/// the reasoning was that "the tail is worthless: if the top candidates are all
+/// illegal, the model has no useful opinion here and the honest answer is to stop".
+/// That holds for a six-token nudge, where a bad suggestion is worse than none. It
+/// inverts once a completion is meant to *build* something: the least-bad legal token
+/// beats stopping, because the alternative is a line that cannot grow.
+///
+/// Measured on the host, Tab pressed repeatedly against a growing line
+/// (`bin/repl-tabs`), 80 presses from `greet(name) {`:
+///
+/// | cap | presses before the line stalls |
+/// |---|---|
+/// | 16 | 29 |
+/// | 64 | never (80/80) |
+/// | 2048 (a full mask) | never (80/80) |
+///
+/// So the depth actually needed sits between 17 and 64, and the stall was the cap
+/// rather than the grammar: the menu shown at the stall listed **27 legal classes**,
+/// one of which was the `)` that would have closed the expression the model had opened.
+///
+/// 64 rather than 2048 because the walk is what bounds worst-case latency: a verdict
+/// costs a lex and 118 parses of the whole prefix, so an exhaustive walk is ~2048 of
+/// those for one token. Making a *deeper* walk affordable is the case for the oracle's
+/// early-exit (`notes/drivel-on-vf2-speedup-ideas.md` §2a), which is worth ~20× per
+/// verdict and which this measurement promotes.
+pub const MAX_REFUSALS: usize = 64;
 
 /// Draw a token that `legal` accepts, or `None` if this position has no useful
 /// continuation.
