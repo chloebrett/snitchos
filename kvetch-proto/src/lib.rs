@@ -134,6 +134,22 @@ pub enum Status {
     Refused = 1,
     /// The request did not decode.
     Malformed = 2,
+    /// The buffer was already full: not one token would fit, so nothing was
+    /// appended.
+    ///
+    /// **Distinct from `Ok` with `written: 0`, which is "I had nothing to say".** A
+    /// client cannot tell the two apart from the byte count, and the difference is
+    /// what it should show the user: a full line wants "the line is full", while an
+    /// empty opinion wants whatever its fallback is. Collapsing them made a REPL
+    /// whose line had simply filled up display a grammar token menu, which reads as
+    /// the text being *rejected* — observed on the VF2.
+    ///
+    /// The client cannot re-derive it either: it knows its own buffer size, but
+    /// "would the next token have fit" is a fact about a tokenizer it does not link.
+    ///
+    /// Appended, never renumbered — an older client meeting this gets
+    /// [`WireError::UnknownStatus`] and refuses, rather than misreading it as `Ok`.
+    NoRoom = 3,
 }
 
 impl Status {
@@ -142,6 +158,7 @@ impl Status {
             0 => Some(Self::Ok),
             1 => Some(Self::Refused),
             2 => Some(Self::Malformed),
+            3 => Some(Self::NoRoom),
             _ => None,
         }
     }
@@ -281,7 +298,7 @@ mod tests {
 
     #[test]
     fn a_reply_round_trips_for_every_status() {
-        for status in [Status::Ok, Status::Refused, Status::Malformed] {
+        for status in [Status::Ok, Status::Refused, Status::Malformed, Status::NoRoom] {
             let reply = Reply { status, written: 37 };
             assert_eq!(Reply::decode(reply.encode()), Ok(reply));
         }

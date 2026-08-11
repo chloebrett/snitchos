@@ -66,9 +66,18 @@ impl<L: Logits> Server<L> {
             return Reply { status: Status::Malformed, written: 0 };
         };
 
+        // Nothing can fit, so say that rather than spending a forward pass to
+        // discover it. Both halves matter: the caller gets `NoRoom` instead of an
+        // `Ok` it must guess at, and a REPL whose line has filled up stops paying for
+        // a transformer step per Tab.
+        if prefix_len == buf.len() {
+            return Reply { status: Status::NoRoom, written: 0 };
+        }
+
         let mut text = String::from(prefix);
         let mut tokens = self.vocab.encode(prefix);
         let mut committed = text.len();
+        let mut status = Status::Ok;
 
         for step in 0..max_tokens {
             let logits = self.logits.next(&tokens);
@@ -99,6 +108,13 @@ impl<L: Logits> Server<L> {
             // token from the one the oracle approved (babble's `truncation` rule,
             // and the reason it is a rule rather than a nicety).
             if committed + piece.len() > buf.len() {
+                // Out of room before writing anything: the line is full, which is a
+                // different answer from having no opinion. Once something *is*
+                // committed the client has a completion to insert, so stopping here
+                // is an ordinary success.
+                if committed == prefix_len {
+                    status = Status::NoRoom;
+                }
                 break;
             }
             text.push_str(piece);
@@ -108,7 +124,7 @@ impl<L: Logits> Server<L> {
 
         let completion = &text.as_bytes()[prefix_len..committed];
         buf[prefix_len..committed].copy_from_slice(completion);
-        Reply { status: Status::Ok, written: (committed - prefix_len) as u32 }
+        Reply { status, written: (committed - prefix_len) as u32 }
     }
 }
 
@@ -217,9 +233,13 @@ mod tests {
         let prefix = "greet(name) {";
         for extra in 0..24 {
             let (status, text) = serve(&mut server, prefix, prefix.len() + extra, 12, 11);
-            assert_eq!(status, Status::Ok);
+            assert!(matches!(status, Status::Ok | Status::NoRoom), "cap +{extra}: {status:?}");
             assert!(text.len() <= prefix.len() + extra, "overflowed at cap +{extra}");
             assert!(viable(&text), "cap +{extra} left the buffer dead: {text:?}");
+            // `NoRoom` is a claim about room, so it must never accompany a completion.
+            if status == Status::NoRoom {
+                assert_eq!(text, prefix, "cap +{extra} appended bytes and still claimed NoRoom");
+            }
         }
     }
 
@@ -266,8 +286,42 @@ mod tests {
     fn a_buffer_with_no_room_serves_nothing_rather_than_overflowing() {
         let prefix = "greet(name) {";
         let (status, text) = serve(&mut server(None), prefix, prefix.len(), 20, 3);
-        assert_eq!(status, Status::Ok);
+        assert_eq!(status, Status::NoRoom);
         assert_eq!(text, prefix, "nothing should have been appended");
+    }
+
+    /// **"I had no room" and "I had no opinion" must not look alike.** Both used to
+    /// come back as `Ok` with `written: 0`, and the REPL's completer reads that single
+    /// shape as "nothing to suggest" — so a line that had simply filled up produced a
+    /// token menu, which reads as the grammar refusing the text. Observed on the VF2;
+    /// reproduced on the host by `repl-tabs`, where a line reaches the 256-byte request
+    /// buffer after eleven Tabs.
+    ///
+    /// The client cannot re-derive this: it knows its own buffer size, but "does the
+    /// next *token* fit" is a fact about a tokenizer it does not link.
+    #[test]
+    fn a_full_buffer_is_distinguishable_from_having_nothing_to_say() {
+        let prefix = "greet(name) {";
+
+        let full = serve(&mut server(None), prefix, prefix.len(), 20, 3);
+        // Room to spare, but no budget to use it: nothing written, and nothing to do
+        // with room.
+        let no_budget = serve(&mut server(None), prefix, prefix.len() + 64, 0, 3);
+
+        assert_eq!(full.0, Status::NoRoom);
+        assert_eq!(no_budget.0, Status::Ok);
+        assert_eq!(full.1, no_budget.1, "both appended nothing; only the reason differs");
+    }
+
+    /// A completion that stops *part way* because the next token would not fit is an
+    /// ordinary success — the client has something to insert, and the line is not full
+    /// until nothing fits at all.
+    #[test]
+    fn running_out_of_room_after_writing_something_is_still_ok() {
+        let prefix = "let x = 1";
+        let (status, text) = serve(&mut server(Some(b' ')), prefix, prefix.len() + 3, 20, 5);
+        assert_eq!(status, Status::Ok);
+        assert!(text.len() > prefix.len(), "expected a partial completion, got {text:?}");
     }
 
     #[test]
