@@ -92,6 +92,10 @@ fn main() -> ExitCode {
         let closer = stitch::lexer::trailing_region(&line).closer();
         let opened = line.len();
         line.push_str(closer);
+        // Per-press wall clock. The point of a completion at a prompt is that it feels
+        // instant, and both halves of its cost grow with the line: prefill is linear in
+        // the prefix and every legality verdict re-parses the whole of it.
+        let started = std::time::Instant::now();
 
         // Step 1: the grammar answers first, and a forced or dead verdict never
         // reaches the model.
@@ -130,7 +134,8 @@ fn main() -> ExitCode {
         };
 
         println!(
-            "tab {tab:>2}: {opened:>4} bytes, closed={:<5} {verdict}",
+            "tab {tab:>2}: {opened:>4} bytes, {:>6.1}ms, closed={:<5} {verdict}",
+            started.elapsed().as_secs_f64() * 1e3,
             !closer.is_empty(),
         );
 

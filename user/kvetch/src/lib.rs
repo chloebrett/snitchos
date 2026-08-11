@@ -31,7 +31,11 @@ fn endpoint() -> Endpoint {
 /// Server-side scratch for one request's prefix + completion. A client may
 /// offer a larger buffer; this server declines to work on more than it can
 /// hold, and says so rather than truncating silently.
-const SCRATCH: usize = 512;
+///
+/// The size is the protocol's agreed one rather than a number of this server's own:
+/// it and the client's buffer are a single decision, and holding it in two places is
+/// how a client that raised its buffer got every request refused.
+const SCRATCH: usize = kvetch_proto::COMPLETION_BUFFER;
 
 /// The per-boot entropy root.
 ///

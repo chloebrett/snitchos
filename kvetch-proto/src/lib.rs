@@ -17,6 +17,27 @@ pub use snitchos_abi::MSG_WORDS;
 /// number that arrives from another process.
 pub const MAX_BUFFER: u32 = 64 * 1024;
 
+/// The completion buffer both sides agree on: what a client offers, and what a server
+/// keeps scratch for.
+///
+/// **One constant because it is one decision.** It used to be two — 256 bytes in the
+/// REPL, 512 in the kvetch server — coupled only by the server refusing any `cap`
+/// larger than its own scratch. Nothing named the coupling, so raising either alone
+/// fails silently in one direction (every request refused) or pointlessly in the other
+/// (completions capped by the number nobody looked at).
+///
+/// **4 KiB because that is the size of a small Stitch program**, not because it is a
+/// round number: `examples/stitch/` runs 3.5 KB to 15 KB, and the REPL's line is
+/// grown by its own completions, so the working size is a program's, not a line's. The
+/// old 256 was sized when a completion was a six-token nudge, and its comment still
+/// said "a REPL line is short".
+///
+/// Both sides put this on the stack, which the 512 KiB user stack
+/// (`user/runtime/user.ld`) swallows without noticing. The real cost is time, not
+/// space: every legality verdict re-parses the whole prefix, so a longer line makes
+/// each Tab dearer — see `notes/drivel-on-vf2-speedup-ideas.md` §2d.
+pub const COMPLETION_BUFFER: usize = 4096;
+
 /// The seed for the `counter`-th completion of a boot whose entropy root is
 /// `boot_seed`.
 ///
@@ -191,7 +212,7 @@ impl Reply {
 
 #[cfg(test)]
 mod tests {
-    use super::{Complete, MAX_BUFFER, Reply, Status, WireError, request_seed};
+    use super::{COMPLETION_BUFFER, Complete, MAX_BUFFER, Reply, Status, WireError, request_seed};
 
     #[test]
     fn each_request_in_a_boot_gets_its_own_seed() {
@@ -264,6 +285,29 @@ mod tests {
 
     fn request() -> Complete {
         Complete { max_tokens: 12, ptr: 0xdead_0000, cap: 4096, prefix_len: 13 }
+    }
+
+    /// **The client's buffer and the server's scratch are one decision, so they are
+    /// one constant.** They were two: a 256-byte buffer in `stitch`'s REPL and a
+    /// 512-byte scratch in `user/kvetch`, coupled only by the server refusing any
+    /// `cap` larger than its own. Raising either alone is silent — too big and every
+    /// request is refused, too small and the completion is capped by the number nobody
+    /// looked at.
+    #[test]
+    fn the_agreed_completion_buffer_is_a_buffer_a_server_will_accept() {
+        assert!(COMPLETION_BUFFER > 0);
+        assert!(
+            COMPLETION_BUFFER as u32 <= MAX_BUFFER,
+            "a client offering the agreed buffer would be refused as oversized"
+        );
+        // Decodes as a request, which is the property a client depends on.
+        let request = Complete {
+            max_tokens: 6,
+            ptr: 0x1000,
+            cap: COMPLETION_BUFFER as u32,
+            prefix_len: 0,
+        };
+        assert_eq!(Complete::decode(request.encode()), Ok(request));
     }
 
     #[test]

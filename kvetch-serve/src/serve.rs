@@ -143,7 +143,24 @@ fn extends_legally(text: &str, vocab: &Vocab, candidate: TokenId) -> bool {
     };
     let mut extended = String::from(text);
     extended.push_str(piece);
-    viable(&extended)
+    ends_where_the_grammar_can_speak(&extended) && viable(&extended)
+}
+
+/// Does the buffer end somewhere the oracle has an opinion about what comes next?
+///
+/// **The completion budget must not be spent where the grammar is blind.** Inside a
+/// `//` or `/* */` comment every byte extends the buffer legally, so [`viable`] returns
+/// `true` for all 2048 candidates and the model's prior decides alone — and drivel's
+/// corpus is ~47% comments. A single `//` therefore hands the rest of the request over
+/// to unconstrained prose. Observed on the VF2 as a completion that was twelve comment
+/// lines and one declaration, and in miniature as `let x = 1////////`.
+///
+/// A constraint on the *region*, not on comments: a comment opened and closed inside
+/// one completion passes, because the buffer ends in code. Checked before [`viable`]
+/// because a lex is far cheaper than the 118 parses a legality verdict costs, so this
+/// also spares the oracle every candidate it could not have judged anyway.
+fn ends_where_the_grammar_can_speak(text: &str) -> bool {
+    stitch::lexer::trailing_region(text) == stitch::lexer::Trailing::Code
 }
 
 /// Both REPL readings, unioned — a line may be a declaration or an expression, and
@@ -162,6 +179,26 @@ mod tests {
     use alloc::vec::Vec;
     use kvetch_proto::Status;
     use kvetch_vocab::{TokenId, Vocab};
+
+    /// **The completion budget must not be spent where the oracle is blind.** Inside a
+    /// `//` comment every byte extends the buffer legally, so `viable` says yes to
+    /// anything and the model's prior — a corpus that is ~47% comments — decides the
+    /// rest of the request unchallenged. Observed on the VF2 as a completion that was
+    /// twelve comment lines and one declaration.
+    ///
+    /// The rule is about the *region*, not about comments: a candidate may not leave
+    /// the buffer somewhere the grammar cannot constrain what comes next. A comment
+    /// opened and closed within one completion is fine, because the buffer ends in
+    /// code.
+    #[test]
+    fn a_token_that_leaves_the_buffer_inside_a_comment_is_refused() {
+        // The model adores `/`, so it will offer one at every opportunity; the second
+        // one would open a comment and strand the buffer in unconstrained territory.
+        let (status, text) = serve(&mut server(Some(b'/')), "let x = 1", 4096, 8, 3);
+
+        assert_eq!(status, Status::Ok);
+        assert!(!text.contains("//"), "a comment was opened and left open: {text:?}");
+    }
 
     /// A byte-level vocab makes token ids *be* bytes, so a test can say "the model
     /// adores a semicolon" without a trained tokenizer in the way.

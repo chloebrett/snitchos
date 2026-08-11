@@ -463,10 +463,14 @@ mod on_target {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    /// Room for one completion request: the prefix plus what comes back. A REPL
-    /// line is short, and the server declines anything larger rather than
-    /// truncating silently.
-    const COMPLETION_BUF: usize = 256;
+    /// Room for one completion request: the prefix plus what comes back.
+    ///
+    /// The protocol's agreed size, not a number of the REPL's own — the server keeps
+    /// scratch for exactly this much and refuses anything larger, so the two are one
+    /// decision. It was 256 here against 512 there, on the reasoning that "a REPL line
+    /// is short"; a line grown by its own repeated completions is not, and 256 was
+    /// reached after eleven Tabs.
+    const COMPLETION_BUF: usize = kvetch_proto::COMPLETION_BUFFER;
 
     /// How many tokens one Tab asks for. Small: a completion at a prompt is a
     /// nudge, not a paragraph, and a short answer is cheap to reject.
