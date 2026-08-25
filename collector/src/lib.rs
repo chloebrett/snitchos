@@ -22,6 +22,12 @@ mod caps;
 #[cfg(feature = "native")]
 mod url;
 
+// Serial-line logic — `call_out_alternative` and `SerialReader`. Deliberately not
+// `native`-gated despite looking like host I/O: nothing here opens a port, and
+// keeping it in the core is what lets `cargo xtask board` reuse it without
+// inheriting `ureq`/`ring`/`tiny_http`. See the module docs.
+pub mod serial;
+
 // HTTP exporters + the Prometheus server. `ureq` pulls in `ring`, which has no
 // wasm build, so these are gated: present for the binary, absent for wasm.
 #[cfg(feature = "native")]
