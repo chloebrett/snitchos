@@ -15,6 +15,7 @@
 // starts an arm with `(`, so it never triggers.
 
 use List
+use Map
 
 prod Card(rank: Int, suit: Str)
 
@@ -34,13 +35,15 @@ min2(a: Int, b: Int) -> Int = a < b => a | b
 
 prod RankCount(rank: Int, count: Int)
 
-// Association list again (json.st's entry) — tallying "how many of each
-// rank" is exactly the shape `Map` can't be built from at runtime.
+// The tally is `Map.update` over a fold. `RankCount` survives the arrival of
+// `Map` on its own merits rather than as a workaround: `classifyByCount` reads
+// `top.rank`/`top.count`/`second.rank`/`second.count` a dozen times, where a
+// bare `(Int, Int)` entry would need a `match` at every use. Build with the
+// dictionary, hand back the named pair.
 groupByRank(cards: List<Card>) -> List<RankCount> =
-    fold(cards, [], (acc, c) -> match find(acc, rc -> rc.rank == c.rank) {
-        None => concat(acc, [RankCount(c.rank, 1)])
-        Some(_) => map(acc, rc -> rc.rank == c.rank => RankCount(c.rank, rc.count + 1) | rc)
-    })
+    fold(cards, [:], (acc, c) -> Map.update(acc, c.rank, 1, $ + 1))
+        |> Map.entries
+        |> map(e -> match e { (rank, n) => RankCount(rank, n) })
 
 // Every adjacent pair in `sortedRanks` differs by exactly 1 — rigorous
 // against a hand with a pair (e.g. `2,2,3,4,6`, whose min/max also happen

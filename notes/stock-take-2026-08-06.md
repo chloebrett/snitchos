@@ -6,7 +6,7 @@
 > inherited), debt **#19 has a plan** ([../plans/board-image-opt-level.md](../plans/board-image-opt-level.md)),
 > and three of the Stitch gaps §2C lists now have plans of their own
 > ([stitch-language-improvements.md](../plans/stitch-language-improvements.md),
-> [stitch-map-you-can-build.md](../plans/stitch-map-you-can-build.md)) with work in
+> [stitch-map-you-can-build.md](../plans/legacy/stitch-map-you-can-build.md)) with work in
 > flight in `stitch/src/natives.rs`. Per-item corrections are inline below. A
 > stock-take is a snapshot, and this line exists so nobody reads it as a standing claim.
 
@@ -104,7 +104,7 @@ The stitch-18 batch left a specific, well-characterised list open:
   inconsistency rather than a documented gap.
 
 **Update (same day):** this list is no longer just a list — `Map` construction now has
-[stitch-map-you-can-build.md](../plans/stitch-map-you-can-build.md) and the rest are
+[stitch-map-you-can-build.md](../plans/legacy/stitch-map-you-can-build.md) and the rest are
 scoped in [stitch-language-improvements.md](../plans/stitch-language-improvements.md),
 with work in flight in `stitch/src/natives.rs`.
 

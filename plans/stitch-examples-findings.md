@@ -51,7 +51,7 @@ question above was answered — `Map.fromList` *and* the rest of a module:
 plus `fold`/`map`/`filter` taught to accept a `Map` (which lit up
 `count`/`any`/`all`/`find` and the rest of the fold-derived prelude for free).
 Built over eleven TDD increments; plan, decisions and rejected alternatives in
-[stitch-map-you-can-build.md](stitch-map-you-can-build.md), contract summarised
+[stitch-map-you-can-build.md](legacy/stitch-map-you-can-build.md), contract summarised
 in [../docs/language-design.md](../docs/language-design.md).
 
 **Every future program should use `Map` directly.** The association-list

@@ -1,10 +1,11 @@
 # Plan: `Map` you can build
 
 **Branch**: none — all work lands directly on `main` (project rule).
-**Status**: Active
+**Status**: COMPLETE (2026-08-25) — archived to `plans/legacy/`. All eleven
+steps shipped; see the per-criterion notes below for the one partial.
 **Source**: proposal 1 of
-[stitch-language-improvements.md](stitch-language-improvements.md), evidenced by
-[stitch-examples-findings.md](stitch-examples-findings.md).
+[stitch-language-improvements.md](../stitch-language-improvements.md), evidenced by
+[stitch-examples-findings.md](../stitch-examples-findings.md).
 
 ## Goal
 
@@ -155,20 +156,35 @@ not "is `"a"` a key?". Key membership genuinely is a different question.
 
 ## Acceptance Criteria
 
-- [ ] A Stitch program can build a dictionary from a runtime-length sequence of
+- [x] A Stitch program can build a dictionary from a runtime-length sequence of
       pairs, with no association-list `prod` in sight.
-- [ ] The per-key tally that `logstats.st` and `inventory.st` each hand-wrote as
+      (`map_from_list_builds_from_a_runtime_length_list`)
+- [x] The per-key tally that `logstats.st` and `inventory.st` each hand-wrote as
       a five-line O(n²) `fold`/`find`/`map` is expressible as one `Map.update`
-      call, and both files use it.
-- [ ] `count`, `any`, `all` and `find` work on a `Map` with no `Map.`-prefixed
-      equivalents added.
-- [ ] `map` over a `Map` yields a `List`; `filter` over a `Map` yields a `Map`.
-- [ ] A map built by `Map.insert` and an equal map written as a literal are
-      `==`, and render identically through string interpolation.
-- [ ] `Map.fromList(Map.entries(m)) == m`.
-- [ ] `m[k]` and `Map.get(m, k)` can never disagree — they are one code path.
-- [ ] Every existing gate stays green: `cargo xtask test && cargo xtask itest
-      && cargo xtask itest --scramble`, plus the `no_std` riscv64 lib build.
+      call, and both files use it. (`map_update_expresses_a_tally_in_one_expression`,
+      and both files rewritten in `b8a0acc`)
+- [x] `count`, `any`, `all` and `find` work on a `Map` with no `Map.`-prefixed
+      equivalents added. (`the_fold_derived_prelude_reads_a_map`)
+- [x] `map` over a `Map` yields a `List`; `filter` over a `Map` yields a `Map`.
+      (`map_over_a_map_projects_its_entries_into_a_list`,
+      `filter_over_a_map_preserves_the_map_shape`)
+- [x] A map built by `Map.insert` and an equal map written as a literal are
+      `==` — `a_built_map_is_indistinguishable_from_the_literal`. **Partial:**
+      the *rendering* half of this criterion was never separately asserted. It
+      follows from the two entry vectors being identical, but "follows by
+      construction" is exactly the reasoning that missed the ordering contract
+      three times during this build, so it is recorded as untested rather than
+      ticked clean.
+- [x] `Map.fromList(Map.entries(m)) == m`. (`map_from_list_round_trips_with_entries`,
+      which also asserts the key order survives — equality alone cannot see it)
+- [x] `m[k]` and `Map.get(m, k)` can never disagree — they are one code path.
+      (`interp::map_lookup`, one function with two callers;
+      `map_get_is_the_same_lookup_as_indexing`)
+- [x] Every existing gate stays green: `cargo xtask itest` and `--scramble` at
+      131/131, the `stitch` suite at 789, and the `no_std` riscv64 lib build.
+      **Caveat:** `cargo xtask test` is red on an unrelated pre-existing
+      rustdoc error in `snemu-wasm` (`unresolved link to `FrameView``,
+      committed in `00efc23`); all 2812 of its tests pass.
 
 ## Explicitly out of scope
 

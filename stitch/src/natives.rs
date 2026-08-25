@@ -1240,7 +1240,7 @@ fn native_map_map_values(args: &[Value], env: &Env) -> Result<Value, RuntimeErro
 /// `Map.update/4`. The alternative reading is the special case reached by passing
 /// `f(default)` here, and cannot express a first-seen value outside `f`'s image
 /// (no `Int` doubles to 5), so this is strictly the more expressive of the two.
-/// Decided in `plans/stitch-map-you-can-build.md`.
+/// Decided in `plans/legacy/stitch-map-you-can-build.md`.
 ///
 /// This is the operation six of the twelve association-list workarounds in the
 /// examples corpus were actually reaching for.
