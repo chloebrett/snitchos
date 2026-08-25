@@ -28,6 +28,38 @@ pub enum Source {
     /// A UDP port the board/QEMU streams telemetry datagrams to (M2.5). Each
     /// datagram is a COBS batch; the payloads concatenate into one frame stream.
     Udp(u16),
+    /// A physical serial line — the VisionFive 2's UART (M2). The board's own
+    /// transport, and the only one where the bytes cross a wire we do not control.
+    Serial(SerialConfig),
+}
+
+/// Which serial line, and how fast.
+///
+/// Baud is part of the identity, not a tuning knob: at the wrong rate the port
+/// opens happily and delivers garbage, so it belongs anywhere the device does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerialConfig {
+    /// The device path — a **call-out** (`cu.*`) node on macOS.
+    pub device: String,
+    /// Line rate. 115200 is B3 Step 6's measured choice: steady-state telemetry
+    /// runs ~5.5 KB/s against this rate's ~11.5 KB/s.
+    pub baud: u32,
+}
+
+/// The `cu.*` path to use instead, if `device` names a macOS **call-in** node.
+///
+/// On macOS `open()` on a `tty.*` node blocks until carrier detect, which a
+/// USB-TTL adapter never asserts — so it hangs forever with no error, which is
+/// indistinguishable from a board that never booted. Returning the corrected path
+/// rather than a bare "bad device" lets the caller name the fix.
+///
+/// Keys on the `tty.` prefix **including the dot**: Linux's `ttyUSB0` / `ttyACM0`
+/// are call-out nodes and must pass through untouched.
+#[must_use]
+pub fn call_out_alternative(device: &str) -> Option<String> {
+    let (dir, name) = device.rsplit_once('/')?;
+    let rest = name.strip_prefix("tty.")?;
+    Some(std::format!("{dir}/cu.{rest}"))
 }
 
 /// The source flags as the CLI received them, before resolution.
@@ -42,6 +74,8 @@ pub struct SourceSelection {
     pub replay: Option<PathBuf>,
     /// `--udp <port>`: the `net=` datagram transport.
     pub udp: Option<u16>,
+    /// `--serial <dev> --baud <n>`: the board's physical UART.
+    pub serial: Option<SerialConfig>,
     /// The live telemetry socket — the fallback when no source flag is given.
     pub socket: PathBuf,
 }
@@ -53,14 +87,15 @@ impl Source {
     /// **Total by design.** The CLI's `ArgGroup` makes more than one source
     /// unreachable through the binary, but this is a library function and must be
     /// defined for every input, so the precedence stays: replay wins (offline
-    /// analysis is the deliberate override), then UDP, then the socket.
+    /// analysis is the deliberate override), then serial, then UDP, then the socket.
     #[must_use]
     pub fn resolve(selection: SourceSelection) -> Self {
-        let SourceSelection { replay, udp, socket } = selection;
-        match (replay, udp) {
-            (Some(path), _) => Source::Replay(path),
-            (None, Some(port)) => Source::Udp(port),
-            (None, None) => Source::Socket(socket),
+        let SourceSelection { replay, udp, serial, socket } = selection;
+        match (replay, serial, udp) {
+            (Some(path), _, _) => Source::Replay(path),
+            (None, Some(config), _) => Source::Serial(config),
+            (None, None, Some(port)) => Source::Udp(port),
+            (None, None, None) => Source::Socket(socket),
         }
     }
 
@@ -73,8 +108,11 @@ impl Source {
         match self {
             Source::Socket(_) => OnDecodeError::Fail,
             // UDP is lossy — a dropped/reordered datagram is expected, and the
-            // next datagram begins on a frame boundary, so resync recovers.
-            Source::Replay(_) | Source::Udp(_) => OnDecodeError::Resync,
+            // next datagram begins on a frame boundary, so resync recovers. A
+            // serial line is lossy for reasons no software prevents (noise, an
+            // overrun, a board resetting mid-frame), and COBS resyncs at the next
+            // delimiter — which is what the framing is for.
+            Source::Replay(_) | Source::Udp(_) | Source::Serial(_) => OnDecodeError::Resync,
         }
     }
 
@@ -87,6 +125,22 @@ impl Source {
             Source::Socket(path) => Ok(Box::new(UnixStream::connect(path)?)),
             Source::Replay(path) => Ok(Box::new(std::fs::File::open(path)?)),
             Source::Udp(port) => Ok(Box::new(UdpReader::new(UdpSocket::bind(("0.0.0.0", *port))?))),
+            Source::Serial(SerialConfig { device, baud }) => {
+                if let Some(alternative) = call_out_alternative(device) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        std::format!(
+                            "{device} is a call-in device — opening it blocks until carrier \
+                             detect, which a USB-TTL adapter never asserts. Use {alternative}."
+                        ),
+                    ));
+                }
+                let port = serialport::new(device, *baud)
+                    .timeout(SERIAL_READ_TIMEOUT)
+                    .open()
+                    .map_err(|e| std::io::Error::other(std::format!("opening {device}: {e}")))?;
+                Ok(Box::new(SerialReader::new(port)))
+            }
         }
     }
 
@@ -97,6 +151,9 @@ impl Source {
             Source::Socket(path) => std::format!("socket {}", path.display()),
             Source::Replay(path) => std::format!("replay {}", path.display()),
             Source::Udp(port) => std::format!("udp :{port}"),
+            Source::Serial(SerialConfig { device, baud }) => {
+                std::format!("serial {device} @ {baud}")
+            }
         }
     }
 }
@@ -126,6 +183,13 @@ impl RecvDatagram for UdpSocket {
 /// batch payload ≤ ~1.5 KB), so this has ample margin; an oversized datagram is
 /// truncated by `recv` and resync recovers.
 const MAX_DATAGRAM: usize = 2048;
+
+/// The serial port's read timeout — what paces [`SerialReader`]'s idle loop.
+///
+/// It is not a deadline on the board: an idle port must not busy-wait, and a
+/// responsive Ctrl-C wants the loop to come up for air regularly. This value is
+/// the only thing standing between "quiet board" and "pinned CPU core".
+const SERIAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Presents a datagram source as a byte [`Read`] stream by concatenating payloads.
 /// Each datagram is a COBS batch ending on a frame boundary, so the concatenation
@@ -227,7 +291,12 @@ mod tests {
     /// A selection naming only the fallback socket. Tests override one field, so
     /// what a case is *about* is the line that differs from this.
     fn selection() -> SourceSelection {
-        SourceSelection { replay: None, udp: None, socket: PathBuf::from("/tmp/sock") }
+        SourceSelection {
+            replay: None,
+            udp: None,
+            serial: None,
+            socket: PathBuf::from("/tmp/sock"),
+        }
     }
 
     #[test]
@@ -285,6 +354,67 @@ mod tests {
     #[test]
     fn udp_resyncs_like_a_lossy_transport() {
         assert_eq!(Source::Udp(9000).policy(), OnDecodeError::Resync);
+    }
+
+    fn serial_at(device: &str) -> SerialConfig {
+        SerialConfig { device: device.to_string(), baud: 115_200 }
+    }
+
+    #[test]
+    fn resolve_with_serial_uses_the_serial_source() {
+        let s = Source::resolve(SourceSelection {
+            serial: Some(serial_at("/dev/cu.usbserial-1")),
+            ..selection()
+        });
+        assert_eq!(
+            s,
+            Source::Serial(SerialConfig { device: "/dev/cu.usbserial-1".to_string(), baud: 115_200 })
+        );
+    }
+
+    #[test]
+    fn serial_resyncs_like_the_lossy_physical_line_it_is() {
+        // A UART drops bytes for reasons no software can prevent — noise, an
+        // overrun, a board reset mid-frame. Failing the session on an undecodable
+        // frame would end a capture the operator wanted to keep watching.
+        assert_eq!(Source::Serial(serial_at("/dev/cu.x")).policy(), OnDecodeError::Resync);
+    }
+
+    #[test]
+    fn describe_names_the_device_and_the_baud() {
+        // Baud is half of "am I talking to the board correctly?" — a mismatch
+        // yields garbage, not silence, so the startup line has to state it.
+        let d = Source::Serial(serial_at("/dev/cu.usbserial-1")).describe();
+        assert!(d.contains("serial"), "{d}");
+        assert!(d.contains("/dev/cu.usbserial-1"), "{d}");
+        assert!(d.contains("115200"), "{d}");
+    }
+
+    /// On macOS a `tty.*` node is the *call-in* device: `open()` blocks until
+    /// carrier detect, which a USB-TTL adapter never asserts, so it hangs forever
+    /// with no error — indistinguishable from a board that never booted. The
+    /// `cu.*` node is the call-out device and skips the wait. Naming the exact
+    /// replacement path is the difference between an error and a fix.
+    #[test]
+    fn a_call_in_device_names_its_call_out_alternative() {
+        assert_eq!(
+            call_out_alternative("/dev/tty.usbserial-A50285BI").as_deref(),
+            Some("/dev/cu.usbserial-A50285BI")
+        );
+    }
+
+    #[test]
+    fn a_call_out_device_is_accepted_as_is() {
+        assert_eq!(call_out_alternative("/dev/cu.usbserial-A50285BI"), None);
+    }
+
+    /// The check keys on the macOS `tty.` prefix — **with the dot**. Linux names
+    /// its perfectly-good serial nodes `ttyUSB0` / `ttyACM0`, and a naive
+    /// "contains tty" test would refuse the only devices that work there.
+    #[test]
+    fn a_linux_serial_node_is_not_a_call_in_device() {
+        assert_eq!(call_out_alternative("/dev/ttyUSB0"), None);
+        assert_eq!(call_out_alternative("/dev/ttyACM0"), None);
     }
 
     #[test]

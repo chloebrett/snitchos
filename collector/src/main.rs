@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use clap::{ArgGroup, Parser};
 use protocol::Frame;
 
-use collector::source::{Source, SourceSelection, run_source};
+use collector::source::{SerialConfig, Source, SourceSelection, run_source};
 use collector::{SpanExporter, loki, otlp, prom, state};
 
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
@@ -27,7 +27,7 @@ const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
 // Exactly one source, or none (the default socket). Silent precedence between
 // transports would let `--replay x --udp 9000` discard one without saying so; the
 // group makes that a usage error naming both. `--serial` joins this list in Step 10b.
-#[command(group(ArgGroup::new("source").multiple(false).args(["replay", "udp"])))]
+#[command(group(ArgGroup::new("source").multiple(false).args(["replay", "udp", "serial"])))]
 struct Args {
     /// Print decoded frames to stdout in addition to other outputs.
     #[arg(long)]
@@ -76,6 +76,19 @@ struct Args {
     /// decode is resync-tolerant, since UDP may drop or reorder datagrams.
     #[arg(long, value_name = "PORT")]
     udp: Option<u16>,
+
+    /// Read the board's telemetry from a serial line — the VisionFive 2's UART
+    /// (M2). On macOS this must be a **call-out** (`/dev/cu.*`) device: opening
+    /// the `tty.*` node blocks until carrier detect, which a USB-TTL adapter
+    /// never asserts. Decode is resync-tolerant, since a physical line drops
+    /// bytes for reasons no software prevents.
+    #[arg(long, value_name = "DEVICE")]
+    serial: Option<String>,
+
+    /// Line rate for `--serial`. The default is the measured choice: steady-state
+    /// telemetry runs ~5.5 KB/s against 115200's ~11.5 KB/s (B3 Step 6).
+    #[arg(long, default_value_t = 115_200, requires = "serial")]
+    baud: u32,
 }
 
 #[cfg_attr(test, mutants::skip)] // I/O entry point — not unit-testable
@@ -98,6 +111,10 @@ fn main() -> std::io::Result<()> {
     let source = Source::resolve(SourceSelection {
         replay: args.replay.clone(),
         udp: args.udp,
+        serial: args
+            .serial
+            .clone()
+            .map(|device| SerialConfig { device, baud: args.baud }),
         socket: PathBuf::from(SOCKET_PATH),
     });
     eprintln!("collector: source = {}", source.describe());

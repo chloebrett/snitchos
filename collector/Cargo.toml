@@ -19,7 +19,7 @@ tempfile = "3"
 # `ring`, which has no wasm build, so this split is load-bearing, not cosmetic.
 # See docs/uart-telemetry-design.md §"Where this is going".
 default = ["native"]
-native = ["dep:ureq", "dep:tiny_http", "dep:clap"]
+native = ["dep:ureq", "dep:tiny_http", "dep:clap", "dep:serialport"]
 
 [dependencies]
 protocol = { path = "../protocol", features = ["std"] }
@@ -28,6 +28,10 @@ prost = "0.13"
 clap = { version = "4", features = ["derive"], optional = true }
 ureq = { version = "2", optional = true }
 tiny_http = { version = "0.12", optional = true }
+# The board's UART (M2, Step 10b). `default-features = false` drops the `libudev`
+# enumeration backend: we open a device path the operator named, never scan for
+# ports, so the feature buys nothing and would add a system dependency on Linux.
+serialport = { version = "4", default-features = false, optional = true }
 
 [lints]
 workspace = true
