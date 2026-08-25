@@ -16,6 +16,7 @@
 
 use Str
 use List
+use Map
 
 // --- tokens ---
 
@@ -167,15 +168,15 @@ parseAtom(tokens: List<Token>, pos: Int) -> Result<Parsed, Str> =
 
 // --- evaluation ---
 
-prod Binding(name: Str, value: Int)
-
-lookup(env: List<Binding>, name: Str) -> Result<Int, Str> =
-    match find(env, b -> b.name == name) {
+// The environment is a `Map<Str, Int>` — it was an association list plus a
+// hand-written `find` until `Map` became buildable.
+lookup(env: Map<Str, Int>, name: Str) -> Result<Int, Str> =
+    match Map.get(env, name) {
         None => Err("unbound variable: " + name)
-        Some(b) => Ok(b.value)
+        Some(value) => Ok(value)
     }
 
-eval(expr: Expr, env: List<Binding>) -> Result<Int, Str> =
+eval(expr: Expr, env: Map<Str, Int>) -> Result<Int, Str> =
     match expr {
         ENum(n) => Ok(n)
         EVar(name) => lookup(env, name)
@@ -185,13 +186,13 @@ eval(expr: Expr, env: List<Binding>) -> Result<Int, Str> =
         EDiv(l, r) => evalBin(l, r, env, (a, b) -> b == 0 => Err("division by zero") | Ok(a / b))
     }
 
-evalBin(l: Expr, r: Expr, env: List<Binding>, f) -> Result<Int, Str> = {
+evalBin(l: Expr, r: Expr, env: Map<Str, Int>, f) -> Result<Int, Str> = {
     let lv = eval(l, env)?
     let rv = eval(r, env)?
     f(lv, rv)
 }
 
-run(src: Str, env: List<Binding>) -> Result<Int, Str> = {
+run(src: Str, env: Map<Str, Int>) -> Result<Int, Str> = {
     let expr = parse(src)?
     eval(expr, env)
 }
@@ -212,53 +213,53 @@ test "tokenize ignores whitespace between tokens" {
 }
 
 test "multiplication binds tighter than addition" {
-    expect run("1 + 2 * 3", []) == Ok(7)
-    expect run("2 * 3 + 1", []) == Ok(7)
+    expect run("1 + 2 * 3", [:]) == Ok(7)
+    expect run("2 * 3 + 1", [:]) == Ok(7)
 }
 
 test "parens override precedence" {
-    expect run("(1 + 2) * 3", []) == Ok(9)
+    expect run("(1 + 2) * 3", [:]) == Ok(9)
 }
 
 test "subtraction and division are left-associative" {
-    expect run("10 - 2 - 3", []) == Ok(5)
-    expect run("100 / 5 / 2", []) == Ok(10)
+    expect run("10 - 2 - 3", [:]) == Ok(5)
+    expect run("100 / 5 / 2", [:]) == Ok(10)
 }
 
 test "variables resolve against the supplied environment" {
-    let env = [Binding("x", 2), Binding("y", 5)]
+    let env = ["x": 2, "y": 5]
     expect run("x + y", env) == Ok(7)
     expect run("x * (y - 1)", env) == Ok(8)
 }
 
 test "an unbound variable is a named error, not a fault" {
-    expect run("x + 1", []) == Err("unbound variable: x")
+    expect run("x + 1", [:]) == Err("unbound variable: x")
 }
 
 test "division by zero is a named error" {
-    expect run("1 / 0", []) == Err("division by zero")
+    expect run("1 / 0", [:]) == Err("division by zero")
 }
 
 test "a syntax error is reported rather than silently truncating" {
-    match run("1 +", []) {
+    match run("1 +", [:]) {
         Err(_) => expect true
         Ok(_) => expect false
     }
 }
 
 test "trailing tokens after a complete expression are rejected" {
-    expect run("1 + 2 3", []) == Err("trailing tokens after the expression")
+    expect run("1 + 2 3", [:]) == Err("trailing tokens after the expression")
 }
 
 test "unary minus is out of scope and reported as a syntax error" {
-    match run("-5", []) {
+    match run("-5", [:]) {
         Err(_) => expect true
         Ok(_) => expect false
     }
 }
 
 test "an empty expression is an error, not zero" {
-    match run("", []) {
+    match run("", [:]) {
         Err(_) => expect true
         Ok(_) => expect false
     }

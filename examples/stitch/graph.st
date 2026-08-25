@@ -2,15 +2,12 @@
 // directed graph, built entirely from `fold`/`map`/`filter`/`find` — no
 // mutation anywhere, including during construction.
 //
-// The adjacency structure would be `Map<Str, List<Str>>` in a language with
-// a growable map; here it's `List<AdjEntry>`, an association list, for the
-// reason recorded at length in plans/stitch-examples-findings.md (json.st's
-// entry): `Map` today is a fixed-arity literal plus read-only indexing, not
-// a type you can build from a computed, variable-length sequence of pairs.
-// `Edge`/`AdjEntry`/`Degree` are all named `prod`s rather than tuples for
-// the same reason vm.st's `Popped` was — every one of them gets read by
-// field name more than once, which a tuple + a hand-rolled `at2` can't do
-// as clearly.
+// The adjacency structure is `Map<Str, List<Str>>`. It was `List<AdjEntry>`,
+// an association list, until `Map` became buildable from a computed sequence
+// of pairs — the gap recorded at length in plans/stitch-examples-findings.md.
+// `Edge` stays a named `prod` rather than a tuple for the same reason vm.st's
+// `Popped` did: it gets read by field name more than once, which a tuple plus
+// a `match` at every use can't do as clearly.
 //
 // `bfs`/`dfs`/`topoSort` are all written as a `worker(state...) -> result`
 // tail-recursive loop over an explicit queue/stack/frontier — the same
@@ -23,11 +20,10 @@
 // to real Rust recursion).
 
 use List
+use Map
 
 prod Edge(from: Str, to: Str)
-prod AdjEntry(node: Str, neighbors: List<Str>)
-prod Degree(node: Str, count: Int)
-prod Graph(nodes: List<Str>, adj: List<AdjEntry>)
+prod Graph(nodes: List<Str>, adj: Map<Str, List<Str>>)
 
 // --- construction ---
 
@@ -36,7 +32,7 @@ prod Graph(nodes: List<Str>, adj: List<AdjEntry>)
 // in `g.adj` and in every traversal that starts from it, rather than
 // silently vanishing because it never appeared on either side of an edge.
 buildGraph(nodes: List<Str>, edges: List<Edge>) -> Graph = {
-    let empty = map(nodes, n -> AdjEntry(n, []))
+    let empty = Map.fromList(map(nodes, n -> (n, [])))
     Graph(nodes, fold(edges, empty, (acc, e) -> addEdge(acc, e.from, e.to)))
 }
 
@@ -44,7 +40,7 @@ buildGraph(nodes: List<Str>, edges: List<Edge>) -> Graph = {
 // below assumes this — component membership isn't meaningful on a directed
 // graph without picking a convention for it, so this file doesn't try.
 buildUndirectedGraph(nodes: List<Str>, edges: List<Edge>) -> Graph = {
-    let empty = map(nodes, n -> AdjEntry(n, []))
+    let empty = Map.fromList(map(nodes, n -> (n, [])))
     let adj = fold(edges, empty, (acc, e) -> addEdge(addEdge(acc, e.from, e.to), e.to, e.from))
     Graph(nodes, adj)
 }
@@ -55,13 +51,18 @@ buildUndirectedGraph(nodes: List<Str>, edges: List<Edge>) -> Graph = {
 // an out-of-range `from` itself; only a caller handing in an edge whose
 // endpoint wasn't in `nodes` could, and dropping it silently is at least as
 // defensible as faulting on it here.
-addEdge(adj: List<AdjEntry>, from: Str, to: Str) -> List<AdjEntry> =
-    map(adj, entry -> entry.node == from => AdjEntry(from, concat(entry.neighbors, [to])) | entry)
+// Written as get-then-insert rather than `Map.update`, deliberately: `update`
+// would *create* an entry for an unknown `from`, and the no-op above is the
+// documented behaviour. Absence has to stay absence.
+addEdge(adj: Map<Str, List<Str>>, from: Str, to: Str) -> Map<Str, List<Str>> =
+    match Map.get(adj, from) {
+        None => adj
+        Some(neighbors) => Map.insert(adj, from, concat(neighbors, [to]))
+    }
 
 // --- queries ---
 
-adjOf(g: Graph, node: Str) -> List<Str> =
-    find(g.adj, e -> e.node == node) |> mapMaybe(e -> e.neighbors) |> unwrapOr([])
+adjOf(g: Graph, node: Str) -> List<Str> = Map.get(g.adj, node) |> unwrapOr([])
 
 // --- breadth-first search ---
 //
@@ -126,21 +127,30 @@ reachable(g: Graph, from: Str, to: Str) -> Bool = contains(bfs(g, from), to)
 
 topoSort(g: Graph) -> Result<List<Str>, Str> = topoLoop(g, initialDegrees(g), [])
 
-initialDegrees(g: Graph) -> List<Degree> = map(g.nodes, n -> Degree(n, incomingCount(g, n)))
+initialDegrees(g: Graph) -> Map<Str, Int> =
+    Map.fromList(map(g.nodes, n -> (n, incomingCount(g, n))))
 
 incomingCount(g: Graph, node: Str) -> Int =
-    g.adj |> map(e -> contains(e.neighbors, node) => 1 | 0) |> total
+    g.adj |> map(e -> match e { (_, neighbors) => (contains(neighbors, node) => 1 | 0) }) |> total
 
-topoLoop(g: Graph, degrees: List<Degree>, acc: List<Str>) -> Result<List<Str>, Str> = {
-    let zeros = filter(degrees, d -> d.count == 0)
-    match first(zeros) {
+// Kahn's algorithm over a `Map<Str, Int>` of in-degrees. `Map` preserves
+// insertion order and `initialDegrees` seeds it from `g.nodes`, so "the first
+// zero-degree node" is the same deterministic choice the `List<Degree>`
+// version made — the output ordering of a valid topological sort is not
+// unique, and this is what pins it.
+topoLoop(g: Graph, degrees: Map<Str, Int>, acc: List<Str>) -> Result<List<Str>, Str> = {
+    let zeros = filter(degrees, d -> match d { (_, degree) => degree == 0 })
+    match first(Map.keys(zeros)) {
         None => count(degrees) == 0 => Ok(reverse(acc)) | Err("cycle detected")
         Some(chosen) => {
-            let remaining = filter(degrees, d -> d.node != chosen.node)
-            let removedNeighbors = adjOf(g, chosen.node)
-            let updated = map(remaining, d ->
-                contains(removedNeighbors, d.node) => Degree(d.node, d.count - 1) | d)
-            topoLoop(g, updated, concat([chosen.node], acc))
+            let remaining = Map.remove(degrees, chosen)
+            let removedNeighbors = adjOf(g, chosen)
+            let updated = fold(removedNeighbors, remaining, (ds, n) ->
+                match Map.get(ds, n) {
+                    None => ds
+                    Some(degree) => Map.insert(ds, n, degree - 1)
+                })
+            topoLoop(g, updated, concat([chosen], acc))
         }
     }
 }

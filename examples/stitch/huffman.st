@@ -4,13 +4,17 @@
 // text`) is the test that actually matters here — any bug in either
 // direction shows up as corrupted text, not a subtly-wrong number.
 //
-// `List<Freq>`/`List<Code>` instead of `Map<Str, Int>`/`Map<Str, Str>` —
-// the batch's standard association-list substitute (json.st's entry).
+// Frequencies are a `Map<Str, Int>` and the code table a `Map<Str, Str>`.
+// Both were association lists (`List<Freq>`/`List<Code>` plus hand-written
+// linear scans) until `Map` became buildable; the code table is the one that
+// mattered, since `encodeChars` looked its symbol up once *per character of
+// input* — a scan that is now a `Map.get`.
 // `sortBy(xs, key)` (used to repeatedly pick the two lightest subtrees) is
 // key-based, not comparator-based — pass the projection, not a `<`.
 
 use Str
 use List
+use Map
 
 // `Str.split(s, "")` is not "the characters of `s`" — it's a direct pass-
 // through to Rust's `str::split`, whose documented behavior for an empty
@@ -28,24 +32,16 @@ sum HuffTree = Leaf(Str, Int) | Node(HuffTree, HuffTree, Int)
 
 weight(t: HuffTree) -> Int = match t { Leaf(_, w) => w  Node(_, _, w) => w }
 
-prod Freq(char: Str, count: Int)
-
-frequencies(text: Str) -> List<Freq> =
-    fold(chars(text), [], (acc, c) -> bump(acc, c))
-
-bump(freqs: List<Freq>, c: Str) -> List<Freq> =
-    match find(freqs, f -> f.char == c) {
-        None => concat(freqs, [Freq(c, 1)])
-        Some(_) => map(freqs, f -> f.char == c => Freq(c, f.count + 1) | f)
-    }
+frequencies(text: Str) -> Map<Str, Int> =
+    fold(chars(text), [:], (acc, c) -> Map.update(acc, c, 1, $ + 1))
 
 // The classic greedy build: repeatedly combine the two lightest trees into
 // one until a single tree remains. `None` for no input at all; a
 // single-symbol input degenerates to one bare `Leaf` (no `Node` at all) —
 // `codesOf`/`decode` below both special-case that, since a tree with no
 // branch point can't derive a code by walking branches.
-buildTree(freqs: List<Freq>) -> Maybe<HuffTree> =
-    reduceTrees(map(freqs, f -> Leaf(f.char, f.count)))
+buildTree(freqs: Map<Str, Int>) -> Maybe<HuffTree> =
+    reduceTrees(map(freqs, f -> match f { (char, n) => Leaf(char, n) }))
 
 reduceTrees(trees: List<HuffTree>) -> Maybe<HuffTree> =
     count(trees) == 0
@@ -67,33 +63,35 @@ combineLightest(trees: List<HuffTree>) -> List<HuffTree> = {
     concat([Node(a, b, weight(a) + weight(b))], rest)
 }
 
-prod Code(char: Str, bits: Str)
-
 // A single-`Leaf` tree has no branches to spell a code from — it gets the
 // fixed one-bit code `"0"` (one bit per occurrence is the only sensible
 // encoding when there's only one symbol to distinguish from nothing).
-codesOf(tree: HuffTree) -> List<Code> =
+//
+// The walk collects `(symbol, bits)` pairs and `Map.fromList` turns them into
+// the lookup table at the end — cheaper than merging a `Map` at every `Node`,
+// and there is no `Map.merge` to do it with anyway.
+codesOf(tree: HuffTree) -> Map<Str, Str> =
     match tree {
-        Leaf(c, _) => [Code(c, "0")]
-        Node(_, _, _) => walkCodes(tree, "")
+        Leaf(c, _) => Map.fromList([(c, "0")])
+        Node(_, _, _) => Map.fromList(walkCodes(tree, ""))
     }
 
-walkCodes(tree: HuffTree, prefix: Str) -> List<Code> =
+walkCodes(tree: HuffTree, prefix: Str) -> List<(Str, Str)> =
     match tree {
-        Leaf(c, _) => [Code(c, prefix)]
+        Leaf(c, _) => [(c, prefix)]
         Node(l, r, _) => concat(walkCodes(l, prefix + "0"), walkCodes(r, prefix + "1"))
     }
 
-encode(text: Str, codes: List<Code>) -> Result<Str, Str> = encodeChars(chars(text), codes)
+encode(text: Str, codes: Map<Str, Str>) -> Result<Str, Str> = encodeChars(chars(text), codes)
 
-encodeChars(chars: List<Str>, codes: List<Code>) -> Result<Str, Str> =
+encodeChars(chars: List<Str>, codes: Map<Str, Str>) -> Result<Str, Str> =
     match first(chars) {
         None => Ok("")
-        Some(c) => match find(codes, code -> code.char == c) {
+        Some(c) => match Map.get(codes, c) {
             None => Err("no code for character '" + c + "'")
-            Some(code) => {
+            Some(bits) => {
                 let rest = encodeChars(List.removeAt(chars, 0), codes)?
-                Ok(code.bits + rest)
+                Ok(bits + rest)
             }
         }
     }
@@ -126,9 +124,10 @@ decodeLoop(bits: Str, pos: Int, root: HuffTree, node: HuffTree, acc: Str) -> Str
 // --- tests ---
 
 test "frequencies counts each distinct character" {
-    expect frequencies("abracadabra") == [
-        Freq("a", 5), Freq("b", 2), Freq("r", 2), Freq("c", 1), Freq("d", 1),
-    ]
+    expect frequencies("abracadabra") == ["a": 5, "b": 2, "r": 2, "c": 1, "d": 1]
+    // `Map` equality is unordered; the `List<Freq>` this replaced asserted
+    // first-seen order for free, so that half is now said explicitly.
+    expect Map.keys(frequencies("abracadabra")) == ["a", "b", "r", "c", "d"]
 }
 
 test "a single-symbol text builds a bare Leaf, not a Node" {
@@ -147,7 +146,7 @@ test "codesOf gives every symbol a distinct prefix-free-by-construction code" {
             // No code is a prefix of another's — guaranteed structurally by
             // "every code is the path to a distinct leaf" rather than
             // checked here, but the count and shape are.
-            expect find(codes, c -> c.char == "a") |> mapMaybe(c -> Str.length(c.bits)) != None
+            expect Map.has(codes, "a")
         }
     }
 }

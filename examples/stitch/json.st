@@ -17,15 +17,16 @@
 //   exist when this file was first written; see the findings doc for that
 //   story. It closed the `Str -> Int` half of this gap, not the `Float`
 //   half.)
-// - **Objects are `List<(Str, Json)>`, not `Map<Str, Json>`.** `Map` in
-//   today's interpreter is a *fixed-arity literal* (`[k: v, …]`, entry count
-//   fixed at parse time) plus read-only `map[key]` indexing — there is no
-//   native to build one from a runtime-computed, variable-length sequence of
-//   pairs. An association list has no such ceiling, so that's the object
-//   representation; `jsonGet` below is the linear-scan lookup `Map` would
-//   otherwise give for free.
+// - **Objects are `Map<Str, Json>`.** They were `List<(Str, Json)>` — an
+//   association list with a hand-written linear-scan `jsonGet` — until `Map`
+//   became buildable from a runtime-computed sequence of pairs. `Map`
+//   preserves insertion order, so parse→print round-trips field order the way
+//   the association list did. One deliberate behaviour change: a duplicate key
+//   in the input now resolves last-wins (`Map`'s rule, and JavaScript's)
+//   instead of keeping both copies.
 
 use Str
+use Map
 
 // --- the AST ---
 
@@ -35,21 +36,16 @@ sum Json =
     | JNum(Int)
     | JStr(Str)
     | JArr(List<Json>)
-    | JObj(List<(Str, Json)>)
+    | JObj(Map<Str, Json>)
 
 // Look up a key in a parsed object. `None` for a missing key *or* for a
 // non-object — the caller asked "what's under this key", and a scalar has no
 // keys, so the two failure shapes are the same answer.
 jsonGet(j: Json, key: Str) -> Maybe<Json> =
     match j {
-        JObj(fields) => find(fields, pair -> at(pair, 0) == key) |> mapMaybe(pair -> at(pair, 1))
+        JObj(fields) => Map.get(fields, key)
         _ => None
     }
-
-// Tuple field access by position — there is no `.0`/`.1` on a tuple (the only
-// projection is pattern-matching one apart), so this is the reusable version
-// of `match t { (a, b) => a }`.
-at(pair: (Str, Json), i: Int) -> Json = match pair { (a, b) => i == 0 => a | b }
 
 // --- parsing ---
 //
@@ -223,7 +219,7 @@ scanArr(src: Str, pos: Int, acc: List<Json>) -> Result<(Json, Int), Str> =
 parseObj(src: Str, pos: Int) -> Result<(Json, Int), Str> = {
     let afterBrace = skipWs(src, pos + 1)
     Str.slice(src, afterBrace, afterBrace + 1) == "}}"
-        => Ok((JObj([]), afterBrace + 1))
+        => Ok((JObj([:]), afterBrace + 1))
         | scanObj(src, afterBrace, [])
 }
 
@@ -237,7 +233,10 @@ scanObj(src: Str, pos: Int, acc: List<(Str, Json)>) -> Result<(Json, Int), Str> 
             let grown = concat(acc, [member])
             match next {
                 "," => scanObj(src, skipWs(src, after + 1), grown)
-                "}}" => Ok((JObj(grown), after + 1))
+                // The scan accumulates a `List` of pairs and converts once at
+                // the close brace — `Map.fromList` applies the duplicate-key
+                // rule in one place rather than at every member.
+                "}}" => Ok((JObj(Map.fromList(grown)), after + 1))
                 _   => Err("expected ',' or '}}' in object")
             }
         }
@@ -350,7 +349,7 @@ test "parses objects and jsonGet reaches a field" {
 }
 
 test "whitespace between tokens is ignored" {
-    expect parse(" {{ \"a\" : 1 ,  \"b\" : 2 }} ") == Ok(JObj([("a", JNum(1)), ("b", JNum(2))]))
+    expect parse(" {{ \"a\" : 1 ,  \"b\" : 2 }} ") == Ok(JObj(["a": JNum(1), "b": JNum(2)]))
 }
 
 test "trailing garbage after the document is an error" {
@@ -368,7 +367,13 @@ test "an empty document is an error" {
 }
 
 test "print round-trips through parse" {
-    let doc = JObj([("name", JStr("stitch")), ("count", JNum(3)), ("tags", JArr([JStr("a"), JStr("b")])), ("ok", JBool(true)), ("nil", JNull)])
+    let doc = JObj([
+        "name": JStr("stitch"),
+        "count": JNum(3),
+        "tags": JArr([JStr("a"), JStr("b")]),
+        "ok": JBool(true),
+        "nil": JNull,
+    ])
     expect parse(print(doc)) == Ok(doc)
 }
 

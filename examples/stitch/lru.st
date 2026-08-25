@@ -7,17 +7,25 @@
 // first place, threading the cache explicitly through the recursion
 // instead of hiding it behind a mutable global.
 //
-// `capacity` entries live in `List<Entry>`, most-recently-used first, not
-// `Map<Int, Int>` — the association-list pattern (json.st's entry) again,
-// though here the "index" also needs an *order* (recency), which a `Map`
-// couldn't give for free even if it existed.
+// Entries live in a `Map<Int, Int>`, **least**-recently-used first. The
+// earlier version of this file used `List<Entry>` and said a `Map` "couldn't
+// give the recency order for free even if it existed" — that turned out to be
+// wrong twice over. `Map` preserves insertion order, and re-inserting a key
+// after removing it appends it, so remove-then-insert *is* the recency bump
+// and entry order *is* recency order. Eviction takes the first key.
 
 use List
+use Map
 
-prod Entry(key: Int, value: Int)
-prod Cache(capacity: Int, entries: List<Entry>)
+prod Cache(capacity: Int, entries: Map<Int, Int>)
 
-newCache(capacity: Int) -> Cache = Cache(capacity, [])
+newCache(capacity: Int) -> Cache = Cache(capacity, [:])
+
+// The recency bump: drop the key, re-add it, and it lands at the end as the
+// most-recently-used. Used by both `get` (a read is a recency mutation) and
+// `put` (an overwrite counts as a use).
+touch(entries: Map<Int, Int>, key: Int, value: Int) -> Map<Int, Int> =
+    Map.insert(Map.remove(entries, key), key, value)
 
 prod Hit(value: Int, cache: Cache)
 
@@ -26,23 +34,26 @@ prod Hit(value: Int, cache: Cache)
 // which is exactly why `get` returns a new `Cache` alongside the value
 // instead of just `Maybe<Int>`.
 get(cache: Cache, key: Int) -> Maybe<Hit> =
-    match find(cache.entries, e -> e.key == key) {
+    match Map.get(cache.entries, key) {
         None => None
-        Some(entry) => {
-            let rest = filter(cache.entries, e -> e.key != key)
-            Some(Hit(entry.value, Cache(cache.capacity, concat([entry], rest))))
-        }
+        Some(value) => Some(Hit(value, Cache(cache.capacity, touch(cache.entries, key, value))))
     }
 
-// Overwriting an existing key also counts as "just used" (moves to the
-// front); growing past `capacity` evicts the single least-recently-used
-// entry — the last one, since the list is kept most-recent-first.
+// Overwriting an existing key also counts as "just used" (moves to the end);
+// growing past `capacity` evicts the single least-recently-used entry — the
+// first one, since entry order is recency order.
 put(cache: Cache, key: Int, value: Int) -> Cache = {
-    let grown = concat([Entry(key, value)], filter(cache.entries, e -> e.key != key))
+    let grown = touch(cache.entries, key, value)
     count(grown) > cache.capacity
-        => Cache(cache.capacity, List.removeAt(grown, count(grown) - 1))
+        => Cache(cache.capacity, evictOldest(grown))
         | Cache(cache.capacity, grown)
 }
+
+evictOldest(entries: Map<Int, Int>) -> Map<Int, Int> =
+    match first(Map.keys(entries)) {
+        None => entries
+        Some(oldest) => Map.remove(entries, oldest)
+    }
 
 // --- memoized Fibonacci, cache threaded explicitly ---
 

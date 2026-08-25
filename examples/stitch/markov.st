@@ -14,13 +14,13 @@
 //   exactly what `match` patterns are for; reaching for a named product
 //   here would be the overcorrection.
 //
-// The chain itself is `List<Transition>` — an association list, not
-// `Map<Str, List<Str>>` — for the now-familiar reason (plans/stitch-examples-findings.md,
-// json.st's entry): building a `Map` from a computed, word-frequency-shaped
-// sequence isn't expressible with today's literal-only `Map`.
+// The chain is a `Map<Str, List<Str>>`, built with `Map.update` — a word's
+// first sighting seeds its successor list, later ones append. It was an
+// association list until `Map` became buildable from runtime data.
 
 use Str
 use List
+use Map
 
 // --- tokenizing ---
 
@@ -29,33 +29,28 @@ tokenize(text: Str) -> List<Str> =
 
 // --- the chain ---
 
-prod Transition(word: Str, nexts: List<Str>)
 
 // `nexts` deliberately keeps duplicates rather than deduping into counts: a
 // word that follows `w1` three times out of five appears three times in
 // `nexts`, so picking a uniformly random *index* already reproduces the
 // corpus's own frequency weighting — no separate probability field needed.
-buildChain(words: List<Str>) -> List<Transition> =
+buildChain(words: List<Str>) -> Map<Str, List<Str>> =
     // `zip(words, words-shifted-by-one)`. Reaching for `drop(words, 1)` here
     // first faults: `drop`/`dropWhile`/`take`/`takeWhile` are `Seq`-only
     // (unlike `fold`/`filter`/`map`, which special-case `List` too — see
     // `natives.rs`), and there's no `List -> Seq` conversion native to
     // bridge them. `List.removeAt(words, 0)` is the `List`-native way to
     // say "everything after the first element".
-    fold(zip(words, List.removeAt(words, 0)), [], (acc, pair) ->
-        match pair { (w1, w2) => addTransition(acc, w1, w2) })
-
-addTransition(chain: List<Transition>, from: Str, to: Str) -> List<Transition> =
-    match find(chain, t -> t.word == from) {
-        None => concat(chain, [Transition(from, [to])])
-        Some(_) => map(chain, t -> t.word == from => Transition(from, concat(t.nexts, [to])) | t)
-    }
+    // A word's first sighting seeds its continuation list with that one
+    // successor; every later sighting appends to what is already there.
+    fold(zip(words, List.removeAt(words, 0)), [:], (acc, pair) ->
+        match pair { (w1, w2) => Map.update(acc, w1, [w2], nexts -> concat(nexts, [w2])) })
 
 // `[]` for a word that never appears, *and* for a word that only ever
 // appears last in the corpus (nothing was ever seen following it) — both
 // are "no known continuation," the same answer either way.
-transitionsOf(chain: List<Transition>, word: Str) -> List<Str> =
-    find(chain, t -> t.word == word) |> mapMaybe(t -> t.nexts) |> unwrapOr([])
+transitionsOf(chain: Map<Str, List<Str>>, word: Str) -> List<Str> =
+    Map.get(chain, word) |> unwrapOr([])
 
 // --- a small seeded PRNG ---
 //
@@ -82,10 +77,10 @@ draw(r: Rng, bound: Int) -> Draw = {
 
 // --- generation ---
 
-generate(chain: List<Transition>, start: Str, steps: Int, rng: Rng) -> List<Str> =
+generate(chain: Map<Str, List<Str>>, start: Str, steps: Int, rng: Rng) -> List<Str> =
     genLoop(chain, [start], start, steps, rng)
 
-genLoop(chain: List<Transition>, acc: List<Str>, current: Str, stepsLeft: Int, rng: Rng) -> List<Str> =
+genLoop(chain: Map<Str, List<Str>>, acc: List<Str>, current: Str, stepsLeft: Int, rng: Rng) -> List<Str> =
     stepsLeft <= 0
         => reverse(acc)
         | {
@@ -102,7 +97,7 @@ genLoop(chain: List<Transition>, acc: List<Str>, current: Str, stepsLeft: Int, r
 // The `uses Telemetry` wrapper `run`/interactive use would actually call —
 // `generate` above stays pure so it's cheap to call from tests without
 // worrying about what capability a test needs to hold.
-generateWithTelemetry(chain: List<Transition>, start: Str, steps: Int, rng: Rng) -> List<Str> uses Telemetry {
+generateWithTelemetry(chain: Map<Str, List<Str>>, start: Str, steps: Int, rng: Rng) -> List<Str> uses Telemetry {
     use <- span("markov.generate")
     let result = generate(chain, start, steps, rng)
     emit("markov.generated.tokens", count(result))
@@ -120,12 +115,15 @@ test "tokenize splits on spaces and drops empties from repeated ones" {
 test "buildChain counts every bigram, keeping duplicates as weight" {
     let chain = buildChain(tokenize("the cat sat the cat ran the dog sat"))
     expect chain == [
-        Transition("the", ["cat", "cat", "dog"]),
-        Transition("cat", ["sat", "ran"]),
-        Transition("sat", ["the"]),
-        Transition("ran", ["the"]),
-        Transition("dog", ["sat"]),
+        "the": ["cat", "cat", "dog"],
+        "cat": ["sat", "ran"],
+        "sat": ["the"],
+        "ran": ["the"],
+        "dog": ["sat"],
     ]
+    // `Map` equality is unordered; the `List<Transition>` this replaced pinned
+    // first-seen word order for free, so that half is now explicit.
+    expect Map.keys(chain) == ["the", "cat", "sat", "ran", "dog"]
 }
 
 test "transitionsOf is empty for a word that never appears" {

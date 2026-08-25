@@ -6,38 +6,36 @@
 // a mutual recursion that just works, the same way `sum List<T> =
 // Cons(T, List<T>) | Nil` does.
 //
-// `children` is `List<TrieEdge>`, not `Map<Str, Trie>`, for the batch's by
-// -now-familiar reason (json.st's entry, plans/stitch-examples-findings.md):
-// no native builds a `Map` from a computed sequence of entries. A trie
-// makes the cost of that concrete in a way earlier programs didn't — a
-// 26-way branch is a 26-element linear scan here, where a real `Map` would
-// be the whole point of a trie's fan-out. Filed as a *repeated* data point
-// for that finding, not a new one.
+// `children` is `Map<Str, Trie>` — the shape a trie's fan-out actually is.
+// It was `List<TrieEdge>` (a separate `prod` purely to name a pair) until
+// `Map` became buildable from a computed sequence of entries.
+//
+// **This is a clarity win, not yet a speed one.** `Map` is still an
+// association vector underneath, so a 26-way branch is still a 26-element
+// scan; what changed is that the *code* now says "keyed lookup" instead of
+// open-coding one, so the day the representation becomes a hash or a tree,
+// this file gets faster without being touched.
 
 use Str
+use Map
 
-prod TrieEdge(char: Str, node: Trie)
-prod Trie(children: List<TrieEdge>, isWord: Bool)
+prod Trie(children: Map<Str, Trie>, isWord: Bool)
 
-empty() -> Trie = Trie([], false)
+empty() -> Trie = Trie([:], false)
 
 insert(trie: Trie, word: Str) -> Trie = insertAt(trie, word, 0)
 
+// The missing-child and existing-child cases collapse into one: they differ
+// only in whether the recursion starts from the existing subtrie or a fresh
+// one, which `unwrapOr(empty())` says directly. The `List` version needed two
+// branches because appending and replacing are different list operations.
 insertAt(trie: Trie, word: Str, i: Int) -> Trie =
     i >= Str.length(word)
         => Trie(trie.children, true)
         | {
             let c = Str.slice(word, i, i + 1)
-            match find(trie.children, e -> e.char == c) {
-                None => {
-                    let child = insertAt(empty(), word, i + 1)
-                    Trie(concat(trie.children, [TrieEdge(c, child)]), trie.isWord)
-                }
-                Some(edge) => {
-                    let updatedChild = insertAt(edge.node, word, i + 1)
-                    Trie(map(trie.children, e -> e.char == c => TrieEdge(c, updatedChild) | e), trie.isWord)
-                }
-            }
+            let child = Map.get(trie.children, c) |> unwrapOr(empty())
+            Trie(Map.insert(trie.children, c, insertAt(child, word, i + 1)), trie.isWord)
         }
 
 insertAll(words: List<Str>) -> Trie = fold(words, empty(), (t, w) -> insert(t, w))
@@ -49,9 +47,9 @@ lookupAt(trie: Trie, word: Str, i: Int) -> Bool =
         => trie.isWord
         | {
             let c = Str.slice(word, i, i + 1)
-            match find(trie.children, e -> e.char == c) {
+            match Map.get(trie.children, c) {
                 None => false
-                Some(edge) => lookupAt(edge.node, word, i + 1)
+                Some(child) => lookupAt(child, word, i + 1)
             }
         }
 
@@ -63,9 +61,9 @@ nodeAt(trie: Trie, prefix: Str, i: Int) -> Maybe<Trie> =
         => Some(trie)
         | {
             let c = Str.slice(prefix, i, i + 1)
-            match find(trie.children, e -> e.char == c) {
+            match Map.get(trie.children, c) {
                 None => None
-                Some(edge) => nodeAt(edge.node, prefix, i + 1)
+                Some(child) => nodeAt(child, prefix, i + 1)
             }
         }
 
@@ -73,10 +71,14 @@ hasPrefix(trie: Trie, prefix: Str) -> Bool = isSome(nodeAt(trie, prefix, 0))
 
 // Every complete word reachable from `node`, each spelled out in full by
 // carrying the prefix already walked to reach it.
+// `Map.entries` first because `flatMap` has not been taught about `Map` the
+// way `fold`/`map`/`filter` have — the eager/lazy/keyed split in the stdlib is
+// still not uniform.
 wordsUnder(node: Trie, prefix: Str) -> List<Str> =
     concat(
         node.isWord => [prefix] | [],
-        flatMap(node.children, e -> wordsUnder(e.node, prefix + e.char)),
+        flatMap(Map.entries(node.children), e ->
+            match e { (char, child) => wordsUnder(child, prefix + char) }),
     )
 
 prefixSearch(trie: Trie, prefix: Str) -> List<Str> =

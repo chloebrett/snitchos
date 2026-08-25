@@ -3,9 +3,9 @@
 // per element of a list binding, `.` inside an each-block is the current
 // element.
 //
-// The context is `List<Binding>`, not `Map<Str, Value>` — the batch's
-// standard association-list substitute (json.st's entry) — and `Value`'s
-// two variants are named `VStr`/`VList`, not `Str`/`List`, because those
+// The context is a `Map<Str, Value>` — it was an association list until
+// `Map` became buildable. `Value`'s two variants are named `VStr`/`VList`,
+// not `Str`/`List`, because those
 // names are already taken by the built-in `Str`/`List` *modules* this file
 // also imports; a `sum` variant and a module living in the same namespace
 // would collide.
@@ -34,9 +34,9 @@
 
 use Str
 use List
+use Map
 
 sum Value = VStr(Str) | VList(List<Value>)
-prod Binding(key: Str, value: Value)
 
 sum Segment = Text(Str) | Var(Str) | EachStart(Str) | EachEnd
 
@@ -89,21 +89,21 @@ splitEachLoop(segments: List<Segment>, body: List<Segment>) -> Result<EachSplit,
         Some(seg) => splitEachLoop(List.removeAt(segments, 0), concat([seg], body))
     }
 
-lookupVar(context: List<Binding>, name: Str) -> Result<Str, Str> =
-    match find(context, b -> b.key == name) {
+lookupVar(context: Map<Str, Value>, name: Str) -> Result<Str, Str> =
+    match Map.get(context, name) {
         None => Err("unknown variable: " + name)
-        Some(b) => match b.value { VStr(s) => Ok(s)  VList(_) => Err(name + " is a list, not a value") }
+        Some(v) => match v { VStr(s) => Ok(s)  VList(_) => Err(name + " is a list, not a value") }
     }
 
-lookupList(context: List<Binding>, name: Str) -> Result<List<Value>, Str> =
-    match find(context, b -> b.key == name) {
+lookupList(context: Map<Str, Value>, name: Str) -> Result<List<Value>, Str> =
+    match Map.get(context, name) {
         None => Err("unknown variable: " + name)
-        Some(b) => match b.value { VList(items) => Ok(items)  VStr(_) => Err(name + " is a value, not a list") }
+        Some(v) => match v { VList(items) => Ok(items)  VStr(_) => Err(name + " is a value, not a list") }
     }
 
-render(template: Str, context: List<Binding>) -> Result<Str, Str> = renderSegments(segmentsOf(template), context)
+render(template: Str, context: Map<Str, Value>) -> Result<Str, Str> = renderSegments(segmentsOf(template), context)
 
-renderSegments(segments: List<Segment>, context: List<Binding>) -> Result<Str, Str> =
+renderSegments(segments: List<Segment>, context: Map<Str, Value>) -> Result<Str, Str> =
     match first(segments) {
         None => Ok("")
         Some(Text(t)) => {
@@ -129,7 +129,7 @@ renderEach(body: List<Segment>, items: List<Value>) -> Result<Str, Str> =
     match first(items) {
         None => Ok("")
         Some(item) => {
-            let rendered = renderSegments(body, [Binding(".", item)])?
+            let rendered = renderSegments(body, Map.fromList([(".", item)]))?
             let rest = renderEach(body, List.removeAt(items, 0))?
             Ok(rendered + rest)
         }
@@ -138,37 +138,37 @@ renderEach(body: List<Segment>, items: List<Value>) -> Result<Str, Str> =
 // --- tests ---
 
 test "plain text with no tags renders unchanged" {
-    expect render("hello, world", []) == Ok("hello, world")
+    expect render("hello, world", [:]) == Ok("hello, world")
 }
 
 test "a variable tag interpolates its bound string" {
-    expect render("Hello, {{{{name}}}}!", [Binding("name", VStr("Ada"))]) == Ok("Hello, Ada!")
+    expect render("Hello, {{{{name}}}}!", ["name": VStr("Ada")]) == Ok("Hello, Ada!")
 }
 
 test "an unbound variable is a named error" {
-    match render("Hi {{{{name}}}}", []) {
+    match render("Hi {{{{name}}}}", [:]) {
         Err(_) => expect true
         Ok(_) => expect false
     }
 }
 
 test "an each block repeats its body once per list element" {
-    let ctx = [Binding("items", VList([VStr("a"), VStr("b"), VStr("c")]))]
+    let ctx = ["items": VList([VStr("a"), VStr("b"), VStr("c")])]
     expect render("Items: {{{{#each items}}}}[{{{{.}}}}]{{{{/each}}}}", ctx) == Ok("Items: [a][b][c]")
 }
 
 test "an each block over an empty list renders as nothing" {
-    let ctx = [Binding("items", VList([]))]
+    let ctx = ["items": VList([])]
     expect render("Items: {{{{#each items}}}}[{{{{.}}}}]{{{{/each}}}} done", ctx) == Ok("Items:  done")
 }
 
 test "text and variables can surround an each block" {
-    let ctx = [Binding("who", VStr("Ada")), Binding("nums", VList([VStr("1"), VStr("2")]))]
+    let ctx = ["who": VStr("Ada"), "nums": VList([VStr("1"), VStr("2")])]
     expect render("{{{{who}}}}: {{{{#each nums}}}}({{{{.}}}}){{{{/each}}}}!", ctx) == Ok("Ada: (1)(2)!")
 }
 
 test "an unterminated each block is a named error" {
-    match render("{{{{#each items}}}}[{{{{.}}}}]", [Binding("items", VList([VStr("a")]))]) {
+    match render("{{{{#each items}}}}[{{{{.}}}}]", ["items": VList([VStr("a")])]) {
         Err(_) => expect true
         Ok(_) => expect false
     }
