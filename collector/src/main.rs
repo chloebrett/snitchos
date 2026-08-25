@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use clap::{ArgGroup, Parser};
 use protocol::Frame;
 
-use collector::source::{Source, run_source};
+use collector::source::{Source, SourceSelection, run_source};
 use collector::{SpanExporter, loki, otlp, prom, state};
 
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
@@ -95,7 +95,11 @@ fn main() -> std::io::Result<()> {
         prom::serve(state.clone(), args.prometheus)?;
     }
 
-    let source = Source::resolve(args.replay.clone(), args.udp, PathBuf::from(SOCKET_PATH));
+    let source = Source::resolve(SourceSelection {
+        replay: args.replay.clone(),
+        udp: args.udp,
+        socket: PathBuf::from(SOCKET_PATH),
+    });
     eprintln!("collector: source = {}", source.describe());
     if !args.no_otlp {
         eprintln!("collector: exporting OTLP traces to {}", &args.otlp);

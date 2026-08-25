@@ -30,12 +30,33 @@ pub enum Source {
     Udp(u16),
 }
 
+/// The source flags as the CLI received them, before resolution.
+///
+/// A struct rather than positional parameters because the transports are all
+/// `Option`s of small types: `resolve(replay, udp, socket)` puts two transposable
+/// arguments side by side, and a third lands with `--serial`. Named fields make a
+/// swap a compile error instead of a silently wrong transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSelection {
+    /// `--replay <file>`: a recorded wire stream.
+    pub replay: Option<PathBuf>,
+    /// `--udp <port>`: the `net=` datagram transport.
+    pub udp: Option<u16>,
+    /// The live telemetry socket — the fallback when no source flag is given.
+    pub socket: PathBuf,
+}
+
 impl Source {
     /// Resolve the source from the CLI: `--replay <file>` replays that file,
-    /// else `--udp <port>` listens for datagrams, else the live `socket`. Replay
-    /// wins (offline analysis), then UDP, then the default socket.
+    /// else `--udp <port>` listens for datagrams, else the live `socket`.
+    ///
+    /// **Total by design.** The CLI's `ArgGroup` makes more than one source
+    /// unreachable through the binary, but this is a library function and must be
+    /// defined for every input, so the precedence stays: replay wins (offline
+    /// analysis is the deliberate override), then UDP, then the socket.
     #[must_use]
-    pub fn resolve(replay: Option<PathBuf>, udp: Option<u16>, socket: PathBuf) -> Self {
+    pub fn resolve(selection: SourceSelection) -> Self {
+        let SourceSelection { replay, udp, socket } = selection;
         match (replay, udp) {
             (Some(path), _) => Source::Replay(path),
             (None, Some(port)) => Source::Udp(port),
@@ -166,15 +187,39 @@ mod tests {
     use protocol::SpanId;
     use protocol::stream::OwnedFrame;
 
+    /// A selection naming only the fallback socket. Tests override one field, so
+    /// what a case is *about* is the line that differs from this.
+    fn selection() -> SourceSelection {
+        SourceSelection { replay: None, udp: None, socket: PathBuf::from("/tmp/sock") }
+    }
+
     #[test]
     fn resolve_without_replay_uses_the_socket() {
-        let s = Source::resolve(None, None, PathBuf::from("/tmp/sock"));
+        let s = Source::resolve(selection());
         assert_eq!(s, Source::Socket(PathBuf::from("/tmp/sock")));
     }
 
     #[test]
     fn resolve_with_replay_uses_the_file() {
-        let s = Source::resolve(Some(PathBuf::from("/rec.bin")), None, PathBuf::from("/tmp/sock"));
+        let s = Source::resolve(SourceSelection {
+            replay: Some(PathBuf::from("/rec.bin")),
+            ..selection()
+        });
+        assert_eq!(s, Source::Replay(PathBuf::from("/rec.bin")));
+    }
+
+    /// `resolve` stays **total**: the CLI's `ArgGroup` makes two sources
+    /// unreachable, but a library function must still be defined for the input.
+    /// Replay wins — offline analysis is the deliberate override. Nothing can
+    /// reach this through the binary; it is pinned so the precedence cannot drift
+    /// silently if the group is ever relaxed.
+    #[test]
+    fn resolve_prefers_replay_when_more_than_one_source_is_set() {
+        let s = Source::resolve(SourceSelection {
+            replay: Some(PathBuf::from("/rec.bin")),
+            udp: Some(9000),
+            ..selection()
+        });
         assert_eq!(s, Source::Replay(PathBuf::from("/rec.bin")));
     }
 
@@ -196,7 +241,7 @@ mod tests {
 
     #[test]
     fn resolve_with_udp_uses_the_udp_source() {
-        let s = Source::resolve(None, Some(9000), PathBuf::from("/tmp/sock"));
+        let s = Source::resolve(SourceSelection { udp: Some(9000), ..selection() });
         assert_eq!(s, Source::Udp(9000));
     }
 
