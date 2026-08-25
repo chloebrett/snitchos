@@ -6,6 +6,7 @@
 
 use Str
 use List
+use Map
 
 prod LogEntry(level: Str, message: Str)
 
@@ -32,23 +33,16 @@ parseLog(text: Str) -> List<LogEntry> =
         |> filter(line -> line != "")
         |> flatMap(line -> match parseLine(line) { Some(e) => [e]  None => [] })
 
-prod LevelCount(level: Str, count: Int)
-
-countByLevel(entries: List<LogEntry>) -> List<LevelCount> =
-    fold(entries, [], (acc, e) -> match find(acc, lc -> lc.level == e.level) {
-        None => concat(acc, [LevelCount(e.level, 1)])
-        Some(_) => map(acc, lc -> lc.level == e.level => LevelCount(e.level, lc.count + 1) | lc)
-    })
+// A tally is `Map.update` over a fold: the key's first sighting inserts `1`,
+// every later one adds to what's there. `Map` preserves first-seen order, so
+// the report below reads levels in the order the log introduced them.
+countByLevel(entries: List<LogEntry>) -> Map<Str, Int> =
+    fold(entries, [:], (acc, e) -> Map.update(acc, e.level, 1, $ + 1))
 
 tokenizeWords(msg: Str) -> List<Str> = Str.split(msg, " ") |> filter(w -> w != "")
 
-prod WordCount(word: Str, count: Int)
-
-wordCounts(words: List<Str>) -> List<WordCount> =
-    fold(words, [], (acc, w) -> match find(acc, wc -> wc.word == w) {
-        None => concat(acc, [WordCount(w, 1)])
-        Some(_) => map(acc, wc -> wc.word == w => WordCount(w, wc.count + 1) | wc)
-    })
+wordCounts(words: List<Str>) -> Map<Str, Int> =
+    fold(words, [:], (acc, w) -> Map.update(acc, w, 1, $ + 1))
 
 // The first `n` elements of `xs` — `take`/`toList` want a `Seq`
 // (markov.st's entry: `take` is `Seq`-only), and `sortBy` (used just
@@ -65,8 +59,9 @@ topWords(entries: List<LogEntry>, level: Str, n: Int) -> List<Str> =
         |> filter(e -> e.level == level)
         |> flatMap(e -> tokenizeWords(e.message))
         |> wordCounts
-        |> sortBy(wc -> 0 - wc.count)
-        |> map(wc -> wc.word)
+        |> Map.entries
+        |> sortBy(wc -> match wc { (_, count) => 0 - count })
+        |> map(wc -> match wc { (word, _) => word })
         |> firstN(n)
 
 // --- tests ---
@@ -94,7 +89,12 @@ test "parseLog drops malformed lines and blank lines, keeping the rest in order"
 
 test "countByLevel tallies each level, first-seen order" {
     let entries = parseLog("INFO: a\nERROR: b\nINFO: c\nINFO: d\nERROR: e")
-    expect countByLevel(entries) == [LevelCount("INFO", 3), LevelCount("ERROR", 2)]
+    expect countByLevel(entries) == ["INFO": 3, "ERROR": 2]
+    // `Map` equality is unordered, so the first-seen order this test's name
+    // promises needs saying out loud. The `List<LevelCount>` version asserted
+    // it for free, as a side effect of list equality — dropping to a bare
+    // `Map` comparison would have quietly retired that coverage.
+    expect Map.keys(countByLevel(entries)) == ["INFO", "ERROR"]
 }
 
 test "topWords ranks a level's most frequent words, most frequent first" {

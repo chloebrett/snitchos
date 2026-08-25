@@ -4,13 +4,14 @@
 // change of register from the systems-y/parser-y programs so far
 // (json.st/vm.st/calc.st) and the graph-y ones (graph.st/sched.st).
 //
-// Grouping items by category is another association-list case
-// (`List<CategoryTotal>`, not `Map<Str, Int>`) — see json.st's entry in
-// plans/stitch-examples-findings.md for why. By now (program 8) that's
-// just how you write "group by a computed key" in this language, not a
-// workaround worth re-explaining at length.
+// Grouping items by category is a `Map<Str, Int>` built with `Map.update`.
+// It was an association list (`List<CategoryTotal>` plus a hand-written
+// linear-scan `addToCategory`) until `Map` became buildable — the single
+// biggest finding of the examples batch, and the one this file and
+// logstats.st each independently worked around with the same five lines.
 
 use Str
+use Map
 
 // --- items and strategies ---
 
@@ -61,16 +62,12 @@ lineValue(item: Item, strategy) -> Int = strategy.price(item) * item.quantity
 totalValue(inv: Inventory, strategy) -> Int =
     inv.items |> map(item -> lineValue(item, strategy)) |> total
 
-prod CategoryTotal(category: Str, total: Int)
-
-categoryTotals(inv: Inventory, strategy) -> List<CategoryTotal> =
-    fold(inv.items, [], (acc, item) -> addToCategory(acc, item.category, lineValue(item, strategy)))
-
-addToCategory(acc: List<CategoryTotal>, category: Str, amount: Int) -> List<CategoryTotal> =
-    match find(acc, c -> c.category == category) {
-        None => concat(acc, [CategoryTotal(category, amount)])
-        Some(_) => map(acc, c -> c.category == category => CategoryTotal(category, c.total + amount) | c)
-    }
+// The category's first item seeds its total with that line's value; every
+// later item in the same category adds to it. `Map` keeps first-seen order,
+// so a report lists categories in the order the inventory introduced them.
+categoryTotals(inv: Inventory, strategy) -> Map<Str, Int> =
+    fold(inv.items, [:], (acc, item) ->
+        Map.update(acc, item.category, lineValue(item, strategy), $ + lineValue(item, strategy)))
 
 // One gauge per category (so Grafana shows the inventory's value broken
 // down the way a stock report would), plus the same numbers as a
@@ -79,8 +76,10 @@ addToCategory(acc: List<CategoryTotal>, category: Str, amount: Int) -> List<Cate
 report(inv: Inventory, strategy) -> Str uses Telemetry {
     use <- span("inventory.report")
     let totals = categoryTotals(inv, strategy)
-    each(totals, t -> emit("inventory.category." + t.category + ".value", t.total))
-    totals |> map(t -> t.category + ": $" + toStr(t.total)) |> Str.join("\n")
+    each(totals, t -> match t { (category, amount) =>
+        emit("inventory.category." + category + ".value", amount) })
+    totals |> map(t -> match t { (category, amount) =>
+        category + ": $" + toStr(amount) }) |> Str.join("\n")
 }
 
 // --- tests ---
@@ -130,10 +129,10 @@ test "categoryTotals groups items across categories, preserving first-seen order
         Item("shirt", "apparel", 20, 3),
         Item("bolt", "hardware", 10, 50),
     ])
-    expect categoryTotals(inv, FlatPricing()) == [
-        CategoryTotal("hardware", 200 + 500),
-        CategoryTotal("apparel", 60),
-    ]
+    expect categoryTotals(inv, FlatPricing()) == ["hardware": 200 + 500, "apparel": 60]
+    // Unordered equality above, so first-seen order is asserted separately —
+    // the `List<CategoryTotal>` version got it for free from list equality.
+    expect Map.keys(categoryTotals(inv, FlatPricing())) == ["hardware", "apparel"]
 }
 
 test "different strategies value the same inventory differently" {
