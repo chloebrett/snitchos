@@ -45,6 +45,33 @@ would "build a Map at runtime" even look like: `Map.fromList`? a `builder`?)
 rather than a cheap missing native, so it stays a documented workaround for
 now.
 
+**Update (2026-08-25): the `Map`-construction gap is CLOSED.** The design
+question above was answered — `Map.fromList` *and* the rest of a module:
+`get`/`has`/`insert`/`remove`/`update`/`keys`/`values`/`entries`/`mapValues`,
+plus `fold`/`map`/`filter` taught to accept a `Map` (which lit up
+`count`/`any`/`all`/`find` and the rest of the fold-derived prelude for free).
+Built over eleven TDD increments; plan, decisions and rejected alternatives in
+[stitch-map-you-can-build.md](stitch-map-you-can-build.md), contract summarised
+in [../docs/language-design.md](../docs/language-design.md).
+
+**Every future program should use `Map` directly.** The association-list
+pattern this doc taught — an ad-hoc key/value `prod` plus a hand-written
+linear-scan lookup — is no longer the way to write "group by a computed key".
+`logstats.st` and `inventory.st` have been rewritten against the new API (their
+five-line `fold`/`find`/`map` tally is now
+`fold(xs, [:], (acc, x) -> Map.update(acc, k, 1, $ + 1))`); the other ten
+workaround files are unconverted and still read as they did.
+
+Two things worth carrying forward, both learned the hard way while building it:
+
+- **`Map` equality is unordered.** A test that means to pin first-seen order
+  must assert `Map.keys(m) == [...]`; `m == [k: v, …]` cannot see a reordering.
+  This hid a real contract three separate times during the build, including in
+  the `logstats.st`/`inventory.st` rewrite, where the old `List` equality had
+  been asserting order for free.
+- **`map` over a `Map` yields a `List`; `filter` yields a `Map`.** Projecting
+  loses the key shape; selecting keeps it.
+
 ### 1. json.st
 
 - Lines: 381 (was 399 before the `Str.parseInt`/`toStr` refactor below —

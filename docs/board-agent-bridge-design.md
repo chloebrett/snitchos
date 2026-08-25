@@ -10,9 +10,12 @@ loop on real silicon instead of a human relaying the serial console. This is a d
 bridge + `exec`) and Piece 2's L0 (SBI SRST reboot). Piece 3 — the liveness snapshot
 and kernel watchdog — is deliberately left out of that plan and wants its own; it is
 observability work that stands on its own merits, and nothing in Piece 1 depends on it.
-The prerequisite for both is **Step 10** of
-[../plans/uart-telemetry.md](../plans/uart-telemetry.md) (the collector `--serial`
-source), which is already written and is the last item on B3/M2's critical path.
+The prerequisite for both — **Step 10** of
+[../plans/uart-telemetry.md](../plans/uart-telemetry.md), the collector `--serial`
+source — **landed 2026-08-25** and is gate-green, though not yet run against a board.
+So this plan is unblocked, and step 1 of it shrank: the `cu.*`/`tty.*` refusal it
+specified now exists as `collector::source::call_out_alternative`, to be reused rather
+than rewritten.
 
 The thesis: the same observability that makes SnitchOS worth building — structured
 frames, per-task telemetry — is exactly what an agent needs to iterate on hardware. If
@@ -53,8 +56,13 @@ Most of the hard parts landed with the UART-telemetry work
   [../plans/board-bridge.md](../plans/board-bridge.md) steps 4b/4c/6b. It is small — the
   bridge already has the mechanism, since driving the `=>` prompt is the marker-stop
   example this very document gives.
-- **A source seam.** The collector's `run_source` is explicitly where a serial source
-  slots in.
+- **A serial source (done, 2026-08-25).** No longer just a seam: the collector has
+  `--serial <dev> --baud N`, and `cargo xtask reader` forwards to it. It also carries
+  the two pieces this bridge would otherwise have written itself — `SerialReader`,
+  which stops an idle port reading as end-of-stream, and `call_out_alternative`, which
+  turns the macOS `tty.*` infinite hang into an error naming the `cu.*` path to use.
+  **Caveat: gate-green but never pointed at a board**; the `serialport::open` call is
+  the one line with no test coverage.
 
 What's left is a host-side serial bridge, a way to trigger reboots, and — the interesting
 part — a way to recover from and *observe* hangs.

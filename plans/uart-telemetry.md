@@ -1,21 +1,31 @@
 # Plan: B3 — Telemetry over UART (M2)
 
 **Branch**: `main` (this repo works directly on main — no feature branches)
-**Status**: 🟡 **Steps 0–4, 6, 8 and 9 SHIPPED. Step 10 (collector `--serial`) is the
-last one on the critical path — now split into 10a (prefactor: one source, chosen
-explicitly) and 10b (the serial source itself)**; Step 5b (interactive relay) follows it, and Step 7
-(programming the baud) is deferred as optional headroom — Step 6 measured steady-state
-telemetry at single-digit throughput, so 115200 suffices.
+**Status**: 🟡 **Steps 0–4, 6, 8, 9, 10a and 10b are landed and gate-green — but
+Step 10b is NOT yet verified against the board, so B3 is not done.** The remaining
+work is one hardware run (see 10b), then Step 5b (interactive relay); Step 7
+(programming the baud) is deferred as optional headroom — Step 6 measured
+steady-state telemetry at single-digit throughput, so 115200 suffices.
 **Builds on this**: [board-bridge.md](board-bridge.md) — the *programmatic* half of
 driving the board (`cargo xtask board exec`, reboot) starts where Step 10 finishes.
 **Design**: [docs/uart-telemetry-design.md](../docs/uart-telemetry-design.md)
 **Milestone**: M2 in [plans/visionfive2-port.md](visionfive2-port.md)
 **Write-up**: [post 68 — two promises the hardware never made](../posts/post-68-two-promises-the-hardware-never-made.md)
 
-Verified in-tree 2026-08-06: `UartFrameSink` exists and is host-tested
-(`kernel-obs/src/uart_sink.rs`, 8/8 mutants killed), and the collector has **no** serial
-source yet — `collector/src/source.rs:5` still names it as future work. So Step 9 is
-done and Step 10 is not; the board's frames reach the wire but not yet Grafana.
+Verified in-tree 2026-08-25: `UartFrameSink` is host-tested
+(`kernel-obs/src/uart_sink.rs`, 8/8 mutants killed) and the collector now has its
+serial source — `Source::Serial`, `SerialReader`, `--serial`/`--baud`
+(`collector/src/source.rs`). Gate: `cargo xtask test --no-fail-fast` 2811/2811,
+`cargo xtask itest` and `--scramble` 132/132 each.
+
+**What that does *not* establish.** No byte of this has crossed a real UART. The one
+piece of 10b with no test coverage is the `serialport::open` call itself, and Step
+10's acceptance criterion is *"the board reaches Grafana"* — a claim only hardware
+can settle. Treat the code as landed and the step as open until that run happens.
+(The prior version of this paragraph confidently described in-tree state that had
+since moved; the same failure mode produced the netboot claim corrected in
+[docs/board-agent-bridge-design.md](../docs/board-agent-bridge-design.md). State
+what was checked, and when.)
 
 ## Goal
 
@@ -356,7 +366,7 @@ frames encoded, backpressure drops counted, never blocks.
 **REFACTOR**: assess.
 **Done when**: gate green.
 
-### Step 10a: Prefactor — one source, chosen explicitly
+### Step 10a: Prefactor — one source, chosen explicitly — ✅ DONE
 
 **Split out 2026-08-25, before 10b.** Adding `--serial` to a *precedence* chain makes
 an existing footgun worse: with three live transports, `--udp 9000 --replay boot.bin`
@@ -386,10 +396,36 @@ type system does not.
 **Done when**: two-source invocations are refused, existing tests pass through the new
 shape, gate green, approved.
 
-### Step 10b: Collector `--serial` source
+**Result**: `ArgGroup` over `replay`/`udp`/`serial`; `SourceSelection` carries the
+flags and `resolve` takes it. `describe`/`policy` stayed on `Source` — they describe
+the *resolved* transport, not what the operator asked for.
+
+**Mutation caveat worth keeping.** `resolve`'s only mutant is `replace -> Self with
+Default::default()`, which is **unviable** — `Source` has no `Default`, and
+cargo-mutants does not mutate `match` arms individually. So the mutation pass says
+nothing about whether the precedence tests are effective, and reporting "0 survivors"
+without that would overstate it. Deriving `Default` to make it mutable would be
+contorting production code for the tool; a default `Source` has no meaning.
+
+### Step 10b: Collector `--serial` source — 🟡 CODE LANDED, BOARD-UNVERIFIED
 
 **Acceptance criteria**: `cargo xtask reader --serial <dev> --baud N` decodes the
-board's live stream; the board reaches Grafana.
+board's live stream; the board reaches Grafana. **⏳ The hardware half is
+outstanding** — everything below is in-tree and gate-green, but the criterion above
+is about a board, and no board has been involved.
+
+**What landed**: `Source::Serial(SerialConfig { device, baud })` with `Resync`
+policy and a `describe` naming both; `SerialReader`; `call_out_alternative`;
+`--serial`/`--baud` (the latter `requires = "serial"`, so a stray `--baud` is a
+usage error rather than a silent no-op). `cargo xtask reader` already forwarded
+trailing args, so it needed no change. 111/111 in `collector`; mutants 13 caught,
+3 unviable, 3 timeouts, no survivors.
+
+**What is untested, precisely**: the `serialport::open` call. Everything above it is
+covered by a scripted mock; that one line is glue whose first real exercise is the
+board. Expect the failure modes there to be the ones no unit test can reach — wrong
+device path, a port held by a stray `screen`, a baud mismatch delivering garbage
+rather than silence.
 
 **The real content is the read loop, not the enum variant.** `decode_stream`
 (`protocol/src/stream.rs`) ends the session on *both* of the things a serial port
@@ -417,6 +453,17 @@ config/parse tests only.
 **REFACTOR**: assess.
 **Done when**: gate green, board telemetry in Grafana. *Should be small — step 3
 did the design work.*
+
+**Two findings worth carrying forward:**
+
+- **The portability check that counts is the wasm32 one.** `cargo build -p collector
+  --no-default-features --lib` on the *host* is not the same check as the gate's
+  `--target wasm32-unknown-unknown`, and only the latter would catch a native-only
+  dependency leaking into the core. Both pass; the point is that the weaker one was
+  briefly mistaken for the stronger.
+- **`serialport` is `default-features = false`.** We open a device path the operator
+  named and never enumerate, so the `libudev` backend buys nothing and would add a
+  Linux system dependency for a feature we do not call.
 
 ## Pre-PR Quality Gate
 

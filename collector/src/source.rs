@@ -1,11 +1,15 @@
 //! Where the collector reads its frame stream from.
 //!
 //! `decode_stream` is generic over `R: Read`, so every source is the *same*
-//! decode loop over a different byte producer — the live kernel socket today, a
-//! recorded file (`--replay`) here, a serial line at M2 (Step 10 of
-//! `plans/uart-telemetry.md`). This module is the seam: resolve a [`Source`] from
-//! the CLI, ask it for a `Read` and its decode policy, and hand both to
-//! [`run_source`]. Adding the serial transport is a new variant, not a new loop.
+//! decode loop over a different byte producer — the live kernel socket, a
+//! recorded file (`--replay`), a UDP port (`--udp`), and the board's UART
+//! (`--serial`). This module is the seam: resolve a [`Source`] from the CLI, ask
+//! it for a `Read` and its decode policy, and hand both to [`run_source`].
+//!
+//! The bet held: four transports, one decode loop. Each arrival was a variant and
+//! a `Read` impl, never a second loop. The serial one needed a `SerialReader` on
+//! top, not because the seam leaked but because a physical port expresses "no
+//! bytes yet" in two ways [`decode_stream`] reads as end-of-stream.
 //!
 //! Native only: opening a socket or a file is host I/O the wasm front-end doesn't
 //! do (it feeds an in-memory buffer straight to `decode_stream`).

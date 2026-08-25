@@ -14,7 +14,7 @@ the [`itest-harness`](../itest-harness/README.md) library.
 | `cargo xtask collect [-- args]` | Build + run the host-side collector (OTLP + Loki + Prometheus) |
 | `cargo xtask reader` | Collector in text-only mode (no docker stack needed) |
 | `cargo xtask stack {up,down,logs}` | docker-compose the Tempo + Prometheus + Loki + Grafana stack |
-| `cargo xtask test` | All host-side checks: unit tests + loom model-checks + generated-diagram drift |
+| `cargo xtask test [-- nextest args]` | All host-side checks: unit tests + loom model-checks + generated-diagram drift + doc links + rustdoc. Trailing flags reach the **nextest run only** — `--no-fail-fast` is the useful one, since the default stops at the first failing suite and hides how many others would fail |
 | `cargo xtask itest [...]` | Kernel integration tests in QEMU (integration only). See below. |
 | `cargo xtask baseline <verb>` | Inspect/manage the flake baseline + run history: `show`, `promote`, `discard`, `recover`, `adopt`, `prune`, `export`, `push`. See below. |
 | `cargo xtask clippy [-- args]` | Lint the WHOLE workspace correctly (kernel for riscv, host for host) |

@@ -2,9 +2,10 @@
 
 **Branch**: main (this repo works directly on main; the user commits)
 **Status**: 📐 **NOT STARTED.** Two phases — the host bridge (steps 1–6b, including the
-U-Boot layer that makes netboot zero-touch) and the ESP32 transport (steps 7–9). Blocked on one prerequisite:
-[uart-telemetry.md](uart-telemetry.md) **Step 10** (collector `--serial`), which is
-already written and is the last item on B3/M2's critical path.
+U-Boot layer that makes netboot zero-touch) and the ESP32 transport (steps 7–9).
+**Unblocked 2026-08-25**: its prerequisite, [uart-telemetry.md](uart-telemetry.md)
+**Step 10** (collector `--serial`), has landed and is gate-green — though not yet run
+against a board.
 **Design**: [docs/board-agent-bridge-design.md](../docs/board-agent-bridge-design.md)
 **Milestone**: follows M2 in [visionfive2-port.md](visionfive2-port.md)
 
@@ -74,6 +75,8 @@ hoping it shortens the network-console path should read the addendum in
 | `console=frames` — kernel + userspace console output as `Frame::Log` | shipped (B3 Step 4) |
 | `Frame::Log` → clean stdout rendering | shipped (B3 Step 5, `log_text`) |
 | Source abstraction — `Source::open() -> Box<dyn Read>` | `collector/src/source.rs`; **a serial port is a `Read`** |
+| The `cu.*`/`tty.*` refusal, naming the corrected path | `collector::source::call_out_alternative` — **reuse it, step 1 does not rewrite it** |
+| An idle port not reading as end-of-stream | `collector::source::SerialReader` — the same hazard `exec` faces |
 | Image delivery — `cargo xtask image` → TFTP root, board netboots on reset | shipped |
 | Raw-mode TTY, keystroke injection, restore-on-drop | `snemu/src/interactive.rs` — crib it |
 | SBI ecall wrappers (`set_timer`, `send_ipi`, `hart_start`) | `kernel/src/sbi.rs` — SRST is **not** among them |

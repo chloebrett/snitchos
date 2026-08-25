@@ -332,6 +332,17 @@ Do not design around 115200 by default. **Measure first**, then pick a baud.
 
 ## Decision 5 — the collector side is nearly free
 
+**Built 2026-08-25 (Step 10b), and the prediction mostly held — with one correction
+worth recording.** A serial source *was* a new `R` and a new variant, not a rewrite.
+What the "nearly free" framing missed is that a physical port expresses "no bytes
+yet" in two ways `decode_stream` reads as end-of-stream — it propagates any `Err`
+(and a port with a read timeout returns `TimedOut` during a quiet gap) and treats
+`Ok(0)` as clean EOF. So an idle board would have ended the session. The fix is a
+`Read` adapter (`SerialReader`) that absorbs exactly those two and propagates
+everything else, so a *dead* port never masquerades as a quiet one. Small, but not
+free, and not visible from the seam — the generic-over-`R` design was right and still
+did not imply the transports were interchangeable.
+
 `decode_stream` is already generic over `R: Read`. A serial source is a new
 `R`, not a rewrite:
 
@@ -397,7 +408,9 @@ flashes and a wrong diagnosis in one session).
    on its own by just watching the console come back at the new rate.
 6. **TX ring + THRE interrupt** in the UART driver. The big one.
 7. **`UartFrameSink`** on top of the ring; board brings up.
-8. **Collector `--serial` source**; board into Grafana.
+8. **Collector `--serial` source**; board into Grafana. *(Code landed 2026-08-25 and
+   gate-green; the "board into Grafana" half is outstanding — no board has been
+   attached.)*
 
 Steps 1–4 are host-side. Step 5 is the cheapest possible board increment (one
 observable bit: does the console still print). Steps 6–8 are where the real

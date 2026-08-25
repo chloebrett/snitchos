@@ -375,7 +375,7 @@ and they improve the code. Only `deref_addrof` needs the `#[allow]` guard.
 | Unit (kernel-proc) | `cargo test -p kernel-proc` | Runqueue/preempt/kill, caps, IPC, reaping, ELF + W^X planning |
 | Unit (protocol)    | `cargo test -p protocol --features std` | Frame roundtrips + stream decoder |
 | Unit (collector)   | `cargo test -p collector` | Span state machine, prom/otlp encoding |
-| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the generated-diagram drift check + the doc-link check |
+| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the collector-core wasm32 portability build + the generated-diagram drift check + the doc-link check + rustdoc (`-D warnings`, host and riscv) |
 | Doc links          | `cargo xtask links` | Every relative `.md` link in the repo resolves (also runs inside `xtask test`) |
 | Integration        | `cargo xtask itest` | Boots the kernel **under snemu**, asserts on the decoded wire frame sequence. Deterministic → one run is the gate. `--engine qemu` runs the same scenarios under QEMU (the fidelity escape hatch). |
 
@@ -401,6 +401,15 @@ Terminal.app — to *System Settings → Privacy & Security → Developer Tools*
 app). Verify: `touch <crate>/src/lib.rs && time cargo nextest run -p <crate>` should be
 compile-bound, not stalled. (Diagnosed 2026-07: the tell is a `syspolicyd … Error
 checking with notarization daemon` + `connection_idle @~25s` storm in `log stream`.)
+
+**When the gate is red, re-run it as `cargo xtask test --no-fail-fast`.** nextest stops
+at the first failing suite, so one broken crate — a parallel edit, a mid-refactor
+module — hides how many *others* would have failed, and "the tree is broken" reads the
+same as "one file is mid-edit". Trailing args reach the nextest run only (the loom
+model-check is a plain `cargo test` with a different flag vocabulary). Note the gate is
+more than nextest: a passing `Summary` line with `FAILED` after it means a *later*
+phase failed — portability, doc links, or rustdoc — and a `| tail`-style filter will
+hide which.
 
 **The gate composes explicitly: `cargo xtask test && cargo xtask itest && cargo xtask
 itest --scramble`.** `itest` runs integration *only* — it does not run the host
