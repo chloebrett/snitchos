@@ -73,6 +73,10 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "mapEntries",   arity: 1, func: native_map_entries,   module: Some("Map"),  export_as: Some("entries") },
     NativeFn { name: "mapFromList",  arity: 1, func: native_map_from_list, module: Some("Map"),  export_as: Some("fromList") },
     NativeFn { name: "mapUpdate",    arity: 4, func: native_map_update,    module: Some("Map"),  export_as: Some("update") },
+    // Internal name is `mapMapValues`, not `mapValues` — that one is already
+    // taken by `Map.values` above, and a duplicate would silently overwrite it
+    // (see `every_native_has_a_unique_internal_name`).
+    NativeFn { name: "mapMapValues", arity: 2, func: native_map_map_values, module: Some("Map"), export_as: Some("mapValues") },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -1208,6 +1212,25 @@ fn insert_entry(entries: &mut Vec<(Value, Value)>, key: &Value, value: &Value) {
     }
 }
 
+/// `Map.mapValues(m, f)` — `m` with `f` applied to each value, keys and their
+/// order untouched.
+///
+/// Distinct from `map` over a `Map`, which hands `f` the whole `(key, value)`
+/// entry and returns a `List`. This keeps the `Map` and passes the value alone,
+/// which is what the common transformation actually wants — and it sidesteps the
+/// tuple-arity trap, since a two-parameter lambda is not tuple destructuring.
+fn native_map_map_values(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [map, function] = args else {
+        return Err(RuntimeError::new("mapValues expects (map, function)"));
+    };
+    let mut entries = Vec::new();
+    for (key, value) in expect_map("mapValues", map)? {
+        let mapped = apply_values(function, core::slice::from_ref(value), env)?;
+        entries.push((key.clone(), mapped));
+    }
+    Ok(Value::Map(entries.into()))
+}
+
 /// `Map.update(m, k, default, f)` — `f` applied to `k`'s existing value, or
 /// `default` inserted **raw** if `k` is absent. Persistent; an existing key keeps
 /// its position (via [`insert_entry`], like every other builder here).
@@ -1897,6 +1920,91 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(run_map(r#"Map.get([:], "a") == None"#), Value::Bool(true));
+    }
+
+    #[test]
+    fn map_map_values_transforms_values_and_keeps_the_keys() {
+        assert_eq!(
+            run_map(r#"Map.mapValues(["a": 1, "b": 2], $ * 10) == ["a": 10, "b": 20]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.keys(Map.mapValues(["a": 1, "b": 2], $ * 10)) == ["a", "b"]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.mapValues([:], $ * 10) == [:]"#),
+            Value::Bool(true)
+        );
+    }
+
+    // The reason this exists beside `map`: `f` sees the **value alone**, never a
+    // `(key, value)` tuple. `map` over a `Map` hands `f` the entry, and reading
+    // past it needs `e -> match e { (k, v) => … }` — because `(k, v) -> …` is a
+    // *two-parameter* lambda, not destructuring, and faults with an arity error.
+    // `toStr` discriminates sharply: given the tuple it would render `("a", 1)`.
+    //
+    // Written with an explicit lambda, not `toStr($)`: a placeholder binds to the
+    // *innermost* enclosing call, so `toStr($)` is `toStr(y -> y)` — `toStr`
+    // applied to the identity lambda — and the `Str` that produces then faults as
+    // "cannot call a Str". The design doc's rule ("anything nested → write the
+    // explicit lambda") is load-bearing here, not stylistic.
+    #[test]
+    fn map_map_values_passes_the_value_alone_not_the_entry() {
+        assert_eq!(
+            run_map(r#"Map.mapValues(["a": 1], v -> toStr(v)) == ["a": "1"]"#),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn map_map_values_refuses_a_non_map_receiver() {
+        assert_eq!(
+            run_map_err(r#"Map.mapValues([1, 2, 3], $ + 1)"#),
+            "mapValues expects a Map, got List"
+        );
+    }
+
+    // Every native is registered flat under its internal `name`
+    // (`interp::register`), and `builtin_modules` then looks each module member
+    // up by that same name. So two natives sharing a `name` do not collide
+    // loudly — the second silently overwrites the first in the globals map, and
+    // *both* module members then resolve to the survivor.
+    //
+    // This is a guard, not a TDD cycle: it passes on arrival. It exists because
+    // adding `Map.mapValues` nearly introduced exactly that collision — the
+    // internal name `mapValues` was already taken by `Map.values`.
+    #[test]
+    fn every_native_has_a_unique_internal_name() {
+        let mut seen = alloc::collections::BTreeSet::new();
+        let duplicates: Vec<&str> = crate::natives::NATIVES
+            .iter()
+            .filter(|native| !seen.insert(native.name))
+            .map(|native| native.name)
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "natives share an internal name (the later one silently wins): {duplicates:?}"
+        );
+    }
+
+    // The same hazard one level up: two members of one module exported under the
+    // same name would collide in that module's export table.
+    #[test]
+    fn every_builtin_module_member_has_a_unique_export_name() {
+        let mut seen = alloc::collections::BTreeSet::new();
+        let duplicates: Vec<(&str, &str)> = crate::natives::NATIVES
+            .iter()
+            .filter_map(|native| native.module.map(|module| (module, native)))
+            .filter(|(module, native)| {
+                !seen.insert((*module, native.export_as.unwrap_or(native.name)))
+            })
+            .map(|(module, native)| (module, native.export_as.unwrap_or(native.name)))
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "builtin module members share an export name: {duplicates:?}"
+        );
     }
 
     // The payoff for the whole module. `logstats.st` and `inventory.st` each
