@@ -1,6 +1,9 @@
-import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+// From `vitest/config`, not `vite`: Vitest 4's `test` block is not part of Vite's
+// own config type, and importing the wrong `defineConfig` fails typecheck with a
+// confusing "'test' does not exist in type 'UserConfigExport'".
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

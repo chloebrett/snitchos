@@ -1,5 +1,5 @@
-import { describe as describeStatus, isTerminal, type Status } from "./frames";
 import { describe, expect, it } from "vitest";
+import { describe as describeStatus, isTerminal, type Status } from "./frames";
 
 describe("status", () => {
   it("keeps scheduling while the guest is running", () => {

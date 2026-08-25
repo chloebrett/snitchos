@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* Tailwind v4 is CSS-first: theme values are declared here rather than in a
+   `tailwind.config.js`, which no longer exists. */
+@theme {
+  --color-bg: #0d0f12;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  overflow: hidden;
+}
