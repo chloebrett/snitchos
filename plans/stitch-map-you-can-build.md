@@ -90,13 +90,29 @@ These are the contract. Each is pinned by a test in the step that introduces it.
      preserved.
    The map/filter asymmetry is deliberate and matches Kotlin. It is what makes
    "transform" and "select" read differently at a glance.
-7. **`Map.update(m, k, default, f)` applies `f` to `default` when the key is
-   absent**, giving one algebraic law:
-   `update(m, k, d, f) ≡ insert(m, k, f(unwrapOr(get(m, k), d)))`.
-   *(Elixir's identically-named function inserts `default` raw instead, which
-   would make the tally `Map.update(acc, w, 1, $ + 1)` rather than
-   `Map.update(acc, w, 0, $ + 1)`. Chosen deliberately for the law; flipping it
-   is a one-line change to step 8 if the other reading is preferred.)*
+7. **`Map.update(m, k, default, f)` inserts `default` *raw* when the key is
+   absent**, and `f(existing)` when present:
+   `update(m, k, d, f) ≡ has(m, k) => insert(m, k, f(get(m, k))) | insert(m, k, d)`.
+
+   **Decided 2026-08-25, reversing this plan's first draft.** The draft applied
+   `f` to the default (`insert(m, k, f(unwrapOr(get(m, k), d)))`) for the sake of
+   a single algebraic law, which made the tally read `Map.update(acc, w, 0,
+   $ + 1)` instead of `Map.update(acc, w, 1, $ + 1)`. Two reasons it lost:
+   - **The chosen form is strictly more expressive.** The draft's form is the
+     special case reached by passing `f(d)` as the default here. The reverse does
+     not hold: under the draft, a first-seen value must lie in the image of `f`,
+     so "first-seen is 5, `f` is `$ * 2`" has no `Int` solution. Containment, not
+     taste.
+   - **The name carries the semantics.** `update(map, key, default, fun)` with
+     *this* meaning is what Rust (`entry(k).or_insert(d)`), Haskell
+     (`insertWith`), Kotlin (`merge`) and Elixir (`Map.update/4`) all ship.
+     Clojure's `fnil` is the draft-shaped outlier and is an explicit wrapper, not
+     the default. Same name + same arity + different semantics would be a silent
+     off-by-one for anyone arriving with those priors.
+
+   If the tally's `1, $ + 1` ever reads badly enough to matter, the fix is a
+   separately-named convenience (`Map.tally`, or an `alter`), **not** a weaker
+   `update`.
 
 ## API surface
 
@@ -325,23 +341,27 @@ diverge from the literal's.
 
 ### Step 8: `Map.update` — the operation the corpus was reaching for
 
-**Acceptance criteria**: inserts `f(default)` when the key is absent and
+**Acceptance criteria**: inserts `default` **raw** when the key is absent and
 `f(existing)` when present, keeping position. Concretely the tally is one
 expression:
 
 ```
-fold(["a", "b", "a"], [:], (acc, w) -> Map.update(acc, w, 0, $ + 1))
+fold(["a", "b", "a"], [:], (acc, w) -> Map.update(acc, w, 1, $ + 1))
 ```
 
 …has `count == 2`, `"a"` → 2, `"b"` → 1, and `"a"` first. The law
-`update(m, k, d, f) == insert(m, k, f(unwrapOr(get(m, k), d)))` is asserted
-directly for both the present and absent case.
+`update(m, k, d, f) == has(m, k) => insert(m, k, f(get(m, k))) | insert(m, k, d)`
+is asserted directly for both the present and absent case. **Plus a test pinning
+the case the rejected form could not express** — a first-seen value outside `f`'s
+image, e.g. `Map.update([:], "k", 5, $ * 2)` giving 5 — so the semantic choice is
+visible in the suite rather than only in this plan.
 
-**RED**: exactly that program plus the law.
+**RED**: exactly that program plus the law plus the outside-the-image case.
 **GREEN**: one native over step 5's insert path.
 **MUTATE / KILL MUTANTS**: the absent-key branch is the subtle one — does it
-apply `f` to `default`, or insert `default` raw (the Elixir reading)? The tally's
-`"b"` → 1 assertion is what discriminates; confirm the mutant dies.
+insert `default` raw, or apply `f` to it (the rejected reading)? The tally's
+`"b"` → 1 assertion discriminates, and the outside-the-image test makes the
+difference unmissable; confirm both mutants die.
 **REFACTOR**: assess.
 **Done when**: criteria met, gate green, approved.
 

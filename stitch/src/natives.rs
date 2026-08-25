@@ -71,6 +71,7 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "mapKeys",      arity: 1, func: native_map_keys,      module: Some("Map"),  export_as: Some("keys") },
     NativeFn { name: "mapValues",    arity: 1, func: native_map_values,    module: Some("Map"),  export_as: Some("values") },
     NativeFn { name: "mapEntries",   arity: 1, func: native_map_entries,   module: Some("Map"),  export_as: Some("entries") },
+    NativeFn { name: "mapFromList",  arity: 1, func: native_map_from_list, module: Some("Map"),  export_as: Some("fromList") },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -1188,9 +1189,48 @@ fn native_map_insert(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> 
         return Err(RuntimeError::new("insert expects (map, key, value)"));
     };
     let mut entries = expect_map("insert", map)?.to_vec();
+    insert_entry(&mut entries, key, value);
+    Ok(Value::Map(entries.into()))
+}
+
+/// Put `key -> value` into `entries` under the **map literal's** duplicate rule:
+/// an existing key keeps its position and takes the new value; a new key is
+/// appended (`interp::eval`'s `CoreExprKind::Map` arm).
+///
+/// Shared by `Map.insert` and `Map.fromList` so neither can drift from the other
+/// or from the literal — a three-way agreement that would otherwise rest on
+/// three separate copies of four lines.
+fn insert_entry(entries: &mut Vec<(Value, Value)>, key: &Value, value: &Value) {
     match entries.iter_mut().find(|(candidate, _)| candidate == key) {
         Some(slot) => slot.1 = value.clone(),
         None => entries.push((key.clone(), value.clone())),
+    }
+}
+
+/// `Map.fromList(pairs)` — a `Map` built from a `List` of `(key, value)` tuples.
+///
+/// The entry count comes from the data, which is the thing a map literal cannot
+/// do. Duplicate keys resolve by [`insert_entry`], i.e. exactly as the literal
+/// resolves them.
+fn native_map_from_list(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [list] = args else {
+        return Err(RuntimeError::new("fromList expects (list)"));
+    };
+    let mut entries: Vec<(Value, Value)> = Vec::new();
+    for item in expect_list("fromList", list)? {
+        let Value::Tuple(pair) = item else {
+            return Err(RuntimeError::new(format!(
+                "fromList expects (key, value) tuples, got {}",
+                item.kind()
+            )));
+        };
+        let [key, value] = pair.as_ref() else {
+            return Err(RuntimeError::new(format!(
+                "fromList expects (key, value) tuples, got a {}-element tuple",
+                pair.len()
+            )));
+        };
+        insert_entry(&mut entries, key, value);
     }
     Ok(Value::Map(entries.into()))
 }
@@ -1827,6 +1867,80 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(run_map(r#"Map.get([:], "a") == None"#), Value::Bool(true));
+    }
+
+    // The criterion the whole `Map` module exists for: the entry count comes
+    // from the *data*, not from the source text. So the list under test is built
+    // with `map` — writing it as a literal would test nothing the map literal
+    // could not already do.
+    #[test]
+    fn map_from_list_builds_from_a_runtime_length_list() {
+        assert_eq!(
+            run_map(r#"count(Map.fromList(map([1, 2, 3], n -> (toStr(n), n))))"#),
+            Value::Int(3)
+        );
+        assert_eq!(
+            run_map(
+                r#"Map.get(Map.fromList(map([1, 2, 3], n -> (toStr(n), n))), "2") == Some(2)"#
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(run_map(r#"Map.fromList([]) == [:]"#), Value::Bool(true));
+    }
+
+    #[test]
+    fn map_from_list_round_trips_with_entries() {
+        assert_eq!(
+            run_map(r#"Map.fromList(Map.entries(["a": 1, "b": 2])) == ["a": 1, "b": 2]"#),
+            Value::Bool(true)
+        );
+        // Equality is unordered, so the round-trip is only really a round-trip
+        // if the order survives it too.
+        assert_eq!(
+            run_map(r#"Map.keys(Map.fromList(Map.entries(["a": 1, "b": 2]))) == ["a", "b"]"#),
+            Value::Bool(true)
+        );
+    }
+
+    // Duplicate keys must resolve the way the *literal* resolves them — last
+    // value wins, first position kept — or `fromList` and a literal built from
+    // the same pairs would disagree.
+    #[test]
+    fn map_from_list_follows_the_literals_duplicate_key_rule() {
+        assert_eq!(
+            run_map(r#"Map.fromList([("a", 1), ("b", 2), ("a", 9)]) == ["a": 9, "b": 2]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.keys(Map.fromList([("a", 1), ("b", 2), ("a", 9)])) == ["a", "b"]"#),
+            Value::Bool(true)
+        );
+        // The literal is the reference the rule is taken from — asserted here so
+        // the two cannot drift apart unnoticed.
+        assert_eq!(
+            run_map(r#"["a": 1, "b": 2, "a": 9] == ["a": 9, "b": 2]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.keys(["a": 1, "b": 2, "a": 9]) == ["a", "b"]"#),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn map_from_list_refuses_malformed_input() {
+        assert_eq!(
+            run_map_err(r#"Map.fromList(["a": 1])"#),
+            "fromList expects a List, got Map"
+        );
+        assert_eq!(
+            run_map_err(r#"Map.fromList([1, 2, 3])"#),
+            "fromList expects (key, value) tuples, got Int"
+        );
+        assert_eq!(
+            run_map_err(r#"Map.fromList([("a", 1, 2)])"#),
+            "fromList expects (key, value) tuples, got a 3-element tuple"
+        );
     }
 
     // Two entries, distinct keys — the smallest map whose reversal is visible. A
