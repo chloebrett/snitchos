@@ -2,7 +2,8 @@
 
 **Branch**: `main` (this repo works directly on main — no feature branches)
 **Status**: 🟡 **Steps 0–4, 6, 8 and 9 SHIPPED. Step 10 (collector `--serial`) is the
-last one on the critical path**; Step 5b (interactive relay) follows it, and Step 7
+last one on the critical path — now split into 10a (prefactor: one source, chosen
+explicitly) and 10b (the serial source itself)**; Step 5b (interactive relay) follows it, and Step 7
 (programming the baud) is deferred as optional headroom — Step 6 measured steady-state
 telemetry at single-digit throughput, so 115200 suffices.
 **Builds on this**: [board-bridge.md](board-bridge.md) — the *programmatic* half of
@@ -355,10 +356,59 @@ frames encoded, backpressure drops counted, never blocks.
 **REFACTOR**: assess.
 **Done when**: gate green.
 
-### Step 10: Collector `--serial` source
+### Step 10a: Prefactor — one source, chosen explicitly
+
+**Split out 2026-08-25, before 10b.** Adding `--serial` to a *precedence* chain makes
+an existing footgun worse: with three live transports, `--udp 9000 --replay boot.bin`
+silently ignores one. Cheaper to fix the shape before adding to it than after.
+
+**Acceptance criteria**:
+- `--replay` / `--udp` (and later `--serial`) are **mutually exclusive** — a clap
+  `ArgGroup`; passing two is a usage error naming both, not a silent win.
+- The default socket stays the fallback when no source flag is given.
+- `Source::resolve` takes a **`SourceSelection` config struct**, not positional
+  `Option`s (CLAUDE.md: config structs over long positional parameter lists — the
+  4-arg version would put two transposable `Option`s side by side).
+- Existing `resolve`/`policy`/`describe` behaviour is unchanged through the new shape.
+
+`resolve` stays **total** — the conflict is enforced at the CLI layer, so the library
+function keeps its documented precedence as defence-in-depth rather than returning a
+`Result` the CLI can never trigger. The precedence tests then still pin behaviour the
+type system does not.
+
+**RED**: a `try_parse_from` test asserting `--replay x --udp 9000` is an
+`ArgumentConflict`, plus the existing resolve tables rewritten against
+`SourceSelection`.
+**GREEN**: the `ArgGroup` + the struct.
+**MUTATE**: `cargo xtask mutants -p collector` on `resolve`.
+**KILL MUTANTS**: a mutant that drops the conflict must fail the parse test.
+**REFACTOR**: assess whether `describe`/`policy` want to hang off `SourceSelection`.
+**Done when**: two-source invocations are refused, existing tests pass through the new
+shape, gate green, approved.
+
+### Step 10b: Collector `--serial` source
 
 **Acceptance criteria**: `cargo xtask reader --serial <dev> --baud N` decodes the
 board's live stream; the board reaches Grafana.
+
+**The real content is the read loop, not the enum variant.** `decode_stream`
+(`protocol/src/stream.rs`) ends the session on *both* of the things a serial port
+routinely does — any `Err` propagates, and `Ok(0)` is treated as clean EOF. A port with
+a read timeout returns `TimedOut` during a quiet gap between heartbeats, so a **silent
+board would look like end-of-stream** and the collector would exit mid-session. The
+adapter that absorbs both is the testable core of this step, and it needs no hardware:
+a mock `Read` scripting `bytes → TimedOut → bytes` proves it.
+
+Also here: **refuse a `tty.*` device** with a message naming the `cu.*` alternative.
+On macOS `tty.*` blocks in `open()` until carrier detect that a USB-TTL adapter never
+asserts — an infinite hang, not an error. The collector is the first thing in the repo
+to open a serial port, so the check lands here and
+[board-bridge.md](board-bridge.md) step 1 reuses it rather than reimplementing it.
+
+Policy is `OnDecodeError::Resync` (a physical line is lossy). `--baud` defaults to
+**115200** — the measured choice from Step 6. The wasm core must still build
+(`--no-default-features`); `serialport` goes under the existing `native` feature, which
+is what Step 0 exists to protect.
 **RED**: the source abstraction from step 3 is already tested; add serial-specific
 config/parse tests only.
 **GREEN**: a serial source implementing step 3's abstraction.
