@@ -36,9 +36,23 @@ Most of the hard parts landed with the UART-telemetry work
   no text/binary demux. `console=text` (default) keeps the human log.
 - **A reusable decoder** — `decode_stream` / `try_decode_frame` / `OwnedFrame`, already
   shared by the collector, snemu, and the itest harness.
-- **Image delivery + netboot.** `cargo xtask image --workload X` drops `snitchos.img` in
-  the TFTP root; the board **already netboots the latest image** on reset. So there is no
-  U-Boot scripting to automate — a reset *is* the whole re-flash.
+- **Image delivery.** `cargo xtask image --workload X` drops `snitchos.img` in the TFTP
+  root. ~~The board already netboots the latest image on reset, so there is no U-Boot
+  scripting to automate — a reset *is* the whole re-flash.~~ **Corrected 2026-08-25: that
+  was wrong, and it was load-bearing.** In practice the U-Boot side needs hand-typing,
+  for two independent reasons:
+  1. **`serverip` goes stale.** It names the Mac, whose IP moves whenever its DHCP lease
+     does, and a saved env then points TFTP at nothing.
+  2. **The workload is not in the image.** It rides U-Boot's `bootargs` env var —
+     `cargo xtask image` literally prints `setenv bootargs 'workload=X'` for you to
+     retype, and its own source comments that "switching workload is a retype, not a
+     reflash." So a reset alone does **not** pick up a new workload, which is precisely
+     what the loop below assumes.
+
+  There *is* U-Boot scripting to automate, and it is now
+  [../plans/board-bridge.md](../plans/board-bridge.md) steps 4b/4c/6b. It is small — the
+  bridge already has the mechanism, since driving the `=>` prompt is the marker-stop
+  example this very document gives.
 - **A source seam.** The collector's `run_source` is explicitly where a serial source
   slots in.
 
@@ -183,7 +197,9 @@ Mitigations:
 
 ```
 cargo xtask image --workload X          # fresh img → TFTP root
+  → xtask board: preflight              # tftpd up? image fresh? serverip == this Mac?
   → xtask board: send "reboot" (L0)     # or relay pulse (L2) if wedged
+  → xtask board: set bootargs for X     # workload rides U-Boot env, not the image
   → board netboots the new image
   → xtask board: capture frames until quiescence/marker
   → agent reads {task snapshot, samples_emitted, logs, hang frames}

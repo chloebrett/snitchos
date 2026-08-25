@@ -1,8 +1,8 @@
 # Plan: the board bridge — driving the VisionFive 2 from the host
 
 **Branch**: main (this repo works directly on main; the user commits)
-**Status**: 📐 **NOT STARTED.** Two phases — the host bridge (steps 1–6) and the ESP32
-transport (steps 7–9). Blocked on one prerequisite:
+**Status**: 📐 **NOT STARTED.** Two phases — the host bridge (steps 1–6b, including the
+U-Boot layer that makes netboot zero-touch) and the ESP32 transport (steps 7–9). Blocked on one prerequisite:
 [uart-telemetry.md](uart-telemetry.md) **Step 10** (collector `--serial`), which is
 already written and is the last item on B3/M2's critical path.
 **Design**: [docs/board-agent-bridge-design.md](../docs/board-agent-bridge-design.md)
@@ -122,6 +122,15 @@ Phase 2 has its own, below.
 - [ ] `cargo xtask board reboot` reboots the board via SBI SRST and returns once the
       fresh image is booting; the "task hung"/reboot line is flushed before the reset
       takes effect.
+- [ ] **Netboot is zero-touch**: after one `cargo xtask board provision`, a reset boots
+      the current image with nobody at the U-Boot prompt — and `provision` discovers
+      this Mac's IP rather than hardcoding it, so moving networks is a re-run, not a
+      debugging session.
+- [ ] `cargo xtask board boot --workload X` selects the workload without a human
+      retyping `setenv bootargs`.
+- [ ] A stale `snitchos.img` and a drifted `serverip` are each caught by preflight and
+      reported as themselves, before they become a mysterious TFTP timeout or a
+      phantom regression.
 - [ ] An unattended loop cannot hammer the board: a hard iteration cap and a minimum
       inter-reboot interval, both enforced and both reported when they fire.
 - [ ] The full gate stays green: `cargo xtask test && cargo xtask itest && cargo
@@ -135,11 +144,18 @@ test`); mutation via `cargo xtask mutants`. **Present acceptance criteria and ge
 confirmation before writing any code for each step.**
 
 The ordering is deliberate: steps 1–3 are pure host logic with no board and no
-serial hardware, step 4 is the CLI that assembles them, and only steps 5–6 involve
-the kernel or a physical board. Same host-first discipline as the rest of the port —
-a board round-trip is expensive.
+serial hardware, step 4 is the CLI that assembles them, and only steps 4b onward
+involve the kernel or a physical board. Same host-first discipline as the rest of the
+port — a board round-trip is expensive.
 
-## Phase 1 — the host bridge (steps 1–6)
+Steps **4b, 4c and 6b are the U-Boot layer** — reaching the prompt, provisioning a
+saved environment, and per-run bootargs plus preflight. They exist because the netboot
+loop is *not* zero-touch today, contrary to what the design note claimed until it was
+corrected: `serverip` names a Mac whose IP moves, and the workload rides U-Boot's
+`bootargs` rather than the image. Both are hand-typing today, and hand-typing is what
+this whole plan exists to delete.
+
+## Phase 1 — the host bridge (steps 1–6b)
 
 ---
 
@@ -268,6 +284,75 @@ Requires the permission gate — this writes to physical hardware.
 
 ---
 
+### Step 4b: Reach and drive the U-Boot prompt
+
+**Acceptance criteria**: `cargo xtask board uboot "<command>"` interrupts autoboot,
+lands at the `=>` prompt, runs the command, and returns its output. Failing to reach
+the prompt within the countdown is an error that says *that*, distinct from a board
+that never printed anything.
+
+**Why this is its own step**: it is the one interaction in the whole plan with a hard
+real-time constraint — the autoboot countdown is a couple of seconds, and a keystroke
+sent late means the board boots instead of stopping. Everything after it (steps 4c and
+6b) is ordinary command/response at a prompt.
+
+**⚠ Keep `bootdelay` non-zero, and treat it as the way back in.** Once step 4c saves a
+`bootcmd`, the temptation is `bootdelay=0` for a faster loop. Don't: the countdown is
+the only unprivileged way to interrupt a board whose saved environment is wrong, and
+without it, recovering a bad `bootcmd` needs the boot-mode jumpers. A comfortable
+delay is the cost of always being able to intervene. This also interacts with Phase 2 —
+WiFi jitter eats into a tight window, so set the delay generously enough that the
+network transport can still win the race.
+
+**RED**: the prompt-detection and countdown-race logic is pure, given step 2's
+evaluator — table-test `(arrival sequence, delay budget) → Reached | MissedWindow`
+against a `FakeWallClock`, including a "prompt arrived one tick late" case.
+**GREEN**: the interrupt sequence plus the `uboot` subcommand over step 4's transport.
+**MUTATE**: `cargo xtask mutants` on the window logic.
+**KILL MUTANTS**: a mutant that reports success when the window was missed must fail —
+otherwise every later step silently talks to a booted kernel instead of U-Boot.
+**REFACTOR**: this is step 2's marker stop condition with a deadline; if it is not
+reusing it, find out why before duplicating.
+**Done when**: the command round-trips against the board, gate green, approved.
+
+---
+
+### Step 4c: `cargo xtask board provision` — a saved env that netboots zero-touch
+
+The step that answers "why do I keep typing U-Boot commands."
+
+**Acceptance criteria**: one invocation writes a complete, persistent netboot
+environment and **verifies it by reading it back** — board IP via `dhcp`, `serverip`
+**discovered from this Mac at run time** (`ipconfig getifaddr en0`, already the
+documented incantation in [visionfive2-port.md](visionfive2-port.md)) rather than
+hardcoded, a `bootcmd` that fetches `snitchos.img` and `booti`s it with
+`${fdtcontroladdr}`, a non-zero `bootdelay`, then `saveenv`. After it runs, a bare
+reset boots the current image with no human at the keyboard.
+
+**Discovering `serverip` instead of hardcoding it is the whole point.** The reason the
+env goes stale is that it names a machine whose address moves; re-running `provision`
+after switching networks is a one-liner, whereas a hardcoded value is a bug that
+surfaces as a mysterious TFTP timeout.
+
+**Complementary, and worth doing first because it costs minutes and no code:** give the
+Mac a **DHCP reservation on the router** so its IP stops moving at all. That removes
+the failure *class*; `provision` then handles the residue (a wiped env, a new network,
+a second machine). Prefer eliminating the problem to automating around it — this step
+exists for when you can't.
+
+**RED**: the env-script builder is pure — `(board config) → ordered setenv commands` —
+so golden-test it, plus a read-back verifier that fails when a variable did not stick.
+**GREEN**: the builder, the `provision` subcommand over step 4b.
+**MUTATE**: `cargo xtask mutants`. The verifier is the target.
+**KILL MUTANTS**: a mutant whose verifier passes when `saveenv` silently failed must
+fail a test. "I set it and assumed" is exactly the bug this step is fixing.
+**REFACTOR**: assess whether `provision` and `boot --workload` (step 6b) share an env
+model. They should.
+**Done when**: a wiped environment is restored by one command, a bare reset then
+netboots unattended, gate green, approved.
+
+---
+
 ### Step 5: SBI SRST — the kernel side of reboot
 
 **Acceptance criteria**: a magic console line (exact token decided at CONFIRM)
@@ -327,6 +412,43 @@ back-to-back case and the cap-exhausted case.
 it should be the same value.
 **Done when**: a reboot round-trip works against the board, the guard denies a
 too-fast second reboot, gate green, approved.
+
+---
+
+### Step 6b: per-run bootargs, and a preflight that catches the stale-image class
+
+Two small things that between them make the loop actually zero-touch.
+
+**Acceptance criteria**:
+- `cargo xtask board boot --workload X` sets U-Boot's `bootargs` for this run and boots
+  — **because the workload is not in the image.** It rides `bootargs`, which is why
+  `cargo xtask image` prints `setenv bootargs 'workload=X'` for a human to retype and
+  why a bare reset picks up a fresh *image* but the *old workload*. This is the step
+  that closes that gap.
+- `cargo xtask board preflight` checks, and reports each as itself: the TFTP server is
+  running and serving the expected root; `snitchos.img` there is newer than the last
+  build; U-Boot's saved `serverip` matches this Mac's current IP; the board answers at
+  the prompt.
+
+**Preflight earns its place against a *recorded, repeated* failure.** "A VF2 regression
+is a missed `cargo xtask image` until proven otherwise" is a lesson this project has
+already paid for more than once — output not matching source means a stale artifact.
+Preflight turns that from a debugging session into a line of output, and it adds the
+sibling this analysis surfaced: a `serverip` that no longer names your Mac fails as a
+TFTP timeout, which looks nothing like its cause.
+
+**RED**: each check is a pure predicate over injected inputs — `(tftp root listing,
+build timestamp) → Fresh | Stale{age}`, `(saved serverip, current ip) → Match |
+Drifted{from, to}` — so table-test them; the I/O that gathers the inputs is glue.
+**GREEN**: the predicates, the two subcommands.
+**MUTATE**: `cargo xtask mutants`. The freshness comparison is the target.
+**KILL MUTANTS**: a mutant that reports Fresh for an image older than the build must
+fail. That mutant *is* the bug preflight exists to catch.
+**REFACTOR**: assess folding preflight into `boot` as an on-by-default check with an
+`--no-preflight` escape, rather than a command people forget to run. Leaning yes — a
+check you have to remember is a check that does not fire on the day it matters.
+**Done when**: a deliberately-stale image and a drifted `serverip` are each reported
+correctly, `boot --workload` switches workload with no typing, gate green, approved.
 
 ---
 
