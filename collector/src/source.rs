@@ -140,6 +140,43 @@ struct DatagramReader<D> {
 /// The live UDP reader: a [`DatagramReader`] over a [`UdpSocket`].
 type UdpReader = DatagramReader<UdpSocket>;
 
+/// Makes an idle serial port look like a stream that simply has no bytes *yet*.
+///
+/// [`decode_stream`] ends the session on both of the things an idle port routinely
+/// does: it propagates any `Err` from `read`, and it treats `Ok(0)` as a clean EOF.
+/// A board between heartbeats produces exactly those, so without this adapter the
+/// collector would exit on the first quiet gap and call it end-of-stream.
+///
+/// Absorbing *only* idleness is the point — a genuine failure (the adapter
+/// unplugged, the driver gone) still propagates with its kind intact, so a dead
+/// port never masquerades as a quiet one.
+///
+/// **The port must be opened with a read timeout.** That timeout is what paces this
+/// loop: it turns "no data" into a periodic `TimedOut` rather than a spin. Opened
+/// without one, a port that returns `Ok(0)` immediately would busy-loop here.
+struct SerialReader<R> {
+    port: R,
+}
+
+impl<R> SerialReader<R> {
+    fn new(port: R) -> Self {
+        Self { port }
+    }
+}
+
+impl<R: Read> Read for SerialReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.port.read(out) {
+                // Idle, both spellings: no bytes yet, and the port is still open.
+                Ok(0) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                other => return other,
+            }
+        }
+    }
+}
+
 impl<D> DatagramReader<D> {
     fn new(source: D) -> Self {
         Self { source, buf: Vec::new(), pos: 0 }
@@ -307,6 +344,108 @@ mod tests {
         .expect("decodes across datagrams");
         assert_eq!(got, std::vec![OwnedFrame::from_borrowed(&a), OwnedFrame::from_borrowed(&b)]);
         assert_eq!(summary.resyncs, 0, "clean datagrams need no resync");
+    }
+
+    /// A serial port scripted read-by-read. `Ok(bytes)` delivers them (empty = a
+    /// zero-length read), `Err` is what the driver reported. Running out of steps
+    /// is itself an error: a real port never cleanly "ends", it either keeps being
+    /// quiet or fails, so a test that fell off the end would hang rather than pass.
+    struct MockPort {
+        steps: std::collections::VecDeque<std::io::Result<Vec<u8>>>,
+    }
+
+    fn port_over(steps: Vec<std::io::Result<Vec<u8>>>) -> SerialReader<MockPort> {
+        SerialReader::new(MockPort { steps: steps.into_iter().collect() })
+    }
+
+    impl Read for MockPort {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.steps.pop_front() {
+                Some(Ok(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Some(Err(e)) => Err(e),
+                None => Err(std::io::Error::other("test script exhausted")),
+            }
+        }
+    }
+
+    fn wire_of(frame: &Frame<'_>) -> Vec<u8> {
+        let mut buf = [0u8; 128];
+        protocol::wire_encode(frame, &mut buf).expect("encode").to_vec()
+    }
+
+    /// The failure this whole step exists to prevent: a board is quiet between
+    /// heartbeats, the port's read timeout fires, and the collector treats it as
+    /// end-of-stream and exits mid-session. `decode_stream` propagates any `Err`
+    /// from `read`, so without an adapter absorbing `TimedOut` the session dies on
+    /// the first quiet gap.
+    #[test]
+    fn a_read_timeout_is_not_end_of_stream() {
+        let a = Frame::Hello { timebase_hz: 10_000_000, protocol_version: protocol::PROTOCOL_VERSION };
+        let b = Frame::SpanEnd { id: SpanId(7), t: 42 };
+
+        let mut got = Vec::new();
+        let err = decode_stream(
+            &mut port_over(std::vec![
+                Ok(wire_of(&a)),
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+                Ok(wire_of(&b)),
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            ]),
+            OnDecodeError::Resync,
+            |f| got.push(OwnedFrame::from_borrowed(f)),
+        )
+        .expect_err("the stream ends on the disconnect, not on the timeout");
+
+        assert_eq!(
+            got,
+            std::vec![OwnedFrame::from_borrowed(&a), OwnedFrame::from_borrowed(&b)],
+            "both frames must arrive — the one after the quiet gap is the point"
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    /// Same contract for a zero-length read. `decode_stream` treats `Ok(0)` as a
+    /// clean EOF, which is right for a file and wrong for a port that is merely
+    /// idle — the board has not gone away, it just has nothing to say yet.
+    #[test]
+    fn a_zero_length_read_is_not_end_of_stream() {
+        let a = Frame::Hello { timebase_hz: 10_000_000, protocol_version: protocol::PROTOCOL_VERSION };
+        let b = Frame::SpanEnd { id: SpanId(9), t: 99 };
+
+        let mut got = Vec::new();
+        let _ = decode_stream(
+            &mut port_over(std::vec![
+                Ok(wire_of(&a)),
+                Ok(Vec::new()),
+                Ok(wire_of(&b)),
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            ]),
+            OnDecodeError::Resync,
+            |f| got.push(OwnedFrame::from_borrowed(f)),
+        );
+
+        assert_eq!(
+            got,
+            std::vec![OwnedFrame::from_borrowed(&a), OwnedFrame::from_borrowed(&b)],
+            "an idle read must not end the session"
+        );
+    }
+
+    /// The other half: absorbing *every* error would make an unplugged adapter
+    /// look like an eternally quiet board, which is the same lie in the opposite
+    /// direction. A genuine failure must still surface, with its kind intact.
+    #[test]
+    fn a_disconnected_port_propagates_its_error() {
+        let err = decode_stream(
+            &mut port_over(std::vec![Err(std::io::Error::from(std::io::ErrorKind::NotConnected))]),
+            OnDecodeError::Resync,
+            |_| {},
+        )
+        .expect_err("a disconnect is a failure, not a clean end of stream");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotConnected);
     }
 
     #[test]
