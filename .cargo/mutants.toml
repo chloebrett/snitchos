@@ -56,4 +56,9 @@ exclude_re = [
   # host and can't be mutation-tested there — same situation as the kernel
   # crates and RuntimeTelemetry. Exercised by on-target itests instead.
   "RuntimePlatform",
+  # Equivalent mutant in snemu-wasm's probe: the operand is a
+  # `Vec::with_capacity` argument, and capacity is a performance hint with no
+  # observable effect — the vector is filled by `extend_from_slice` either way,
+  # so `*` and `+` produce byte-identical results.
+  "replace \\* with \\+ in run",
 ]

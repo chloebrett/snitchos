@@ -228,6 +228,34 @@ mod tests {
         assert_eq!(super::hash_diagnostics()[2], super::EXPECTED_HASH_DIAGNOSTICS[2]);
     }
 
+    /// The oracle must be able to *fail*.
+    ///
+    /// [`check_portable`] lives in `src/` rather than in a test module because the
+    /// host test and the wasm32 test in `tests/wasm.rs` compile separately and must
+    /// share one set of expectations — that sharing is what stops the two targets
+    /// drifting apart. The cost is that the oracle is production code, so hollowing
+    /// it out to a no-op would leave every test that calls it passing vacuously.
+    /// Mutation testing found exactly that (`replace check_portable with ()`
+    /// survived). This is the negative control that kills it: a probe with one wrong
+    /// register must be rejected.
+    #[test]
+    #[should_panic(expected = "x2 = 1 << 40")]
+    fn the_oracle_rejects_a_probe_that_disagrees() {
+        let mut wrong = run();
+        wrong.regs[2] = 0xDEAD;
+        check_portable(&wrong);
+    }
+
+    /// And it must notice a *missing* observation, not just a wrong one — the shape
+    /// a silently-empty device buffer would take.
+    #[test]
+    #[should_panic(expected = "MMIO byte write")]
+    fn the_oracle_rejects_a_probe_with_no_uart_output() {
+        let mut wrong = run();
+        wrong.uart.clear();
+        check_portable(&wrong);
+    }
+
     /// Guards the instrument itself: a probe whose observations were all zero, or
     /// whose program never ran, would satisfy a weaker assertion set silently.
     #[test]
