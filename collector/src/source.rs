@@ -233,8 +233,9 @@ impl<R: Read> Read for SerialReader<R> {
         loop {
             match self.port.read(out) {
                 // Idle, both spellings: no bytes yet, and the port is still open.
-                Ok(0) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                // Falling out of the match re-enters the loop, which is the retry.
+                Ok(0) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                 other => return other,
             }
         }
@@ -477,9 +478,14 @@ mod tests {
     }
 
     /// A serial port scripted read-by-read. `Ok(bytes)` delivers them (empty = a
-    /// zero-length read), `Err` is what the driver reported. Running out of steps
-    /// is itself an error: a real port never cleanly "ends", it either keeps being
-    /// quiet or fails, so a test that fell off the end would hang rather than pass.
+    /// zero-length read), `Err` is what the driver reported.
+    ///
+    /// Reading past the end **panics**, deliberately. Every script ends with an
+    /// error the adapter is required to propagate, so falling off the end means the
+    /// adapter absorbed something it should have returned. Panicking turns that
+    /// into a fast, legible failure — returning another error instead would let an
+    /// over-absorbing adapter loop forever, and the suite would hang rather than
+    /// tell you what broke.
     struct MockPort {
         steps: std::collections::VecDeque<std::io::Result<Vec<u8>>>,
     }
@@ -496,7 +502,10 @@ mod tests {
                     Ok(bytes.len())
                 }
                 Some(Err(e)) => Err(e),
-                None => Err(std::io::Error::other("test script exhausted")),
+                None => panic!(
+                    "read past the end of the scripted port — the adapter absorbed an error it \
+                     was required to propagate"
+                ),
             }
         }
     }

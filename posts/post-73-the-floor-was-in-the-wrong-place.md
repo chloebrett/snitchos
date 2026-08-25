@@ -9,7 +9,7 @@ opinions.*
 
 ## Why build the ruler before the thing it measures
 
-[drivel](../plans/drivel.md) has seven increments. The plan's order puts the
+[drivel](../plans/legacy/drivel.md) has seven increments. The plan's order puts the
 real corpus at increment 2 and the eval harness at 3, and I did them the other
 way round, because the corpus is the long pole (Stitch has ~2K lines of itself
 in existence) and the harness is an afternoon. Everything downstream of a ruler

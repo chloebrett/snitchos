@@ -225,6 +225,32 @@ mod cli_tests {
         Args::try_parse_from(["collector", "--replay", "/rec.bin"])
             .expect("--replay alone is a valid source");
         Args::try_parse_from(["collector", "--udp", "9000"]).expect("--udp alone is a valid source");
+        Args::try_parse_from(["collector", "--serial", "/dev/cu.usbserial-1"])
+            .expect("--serial alone is a valid source");
+        Args::try_parse_from(["collector", "--serial", "/dev/cu.usbserial-1", "--baud", "921600"])
+            .expect("--serial with an explicit baud is a valid source");
         Args::try_parse_from(["collector"]).expect("no source flag means the default socket");
+    }
+
+    #[test]
+    fn serial_conflicts_with_the_other_sources() {
+        for other in [["--udp", "9000"], ["--replay", "/rec.bin"]] {
+            let argv = ["collector", "--serial", "/dev/cu.usbserial-1", other[0], other[1]];
+            let Err(err) = Args::try_parse_from(argv) else {
+                panic!("--serial with {} must be refused", other[0]);
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict, "{err}");
+        }
+    }
+
+    /// `--baud` alone is a silent no-op waiting to happen: the operator sets a
+    /// rate, gets the default socket, and sees telemetry that owes nothing to the
+    /// flag they typed. Requiring `--serial` makes the mistake loud.
+    #[test]
+    fn baud_without_serial_is_a_usage_error() {
+        let Err(err) = Args::try_parse_from(["collector", "--baud", "921600"]) else {
+            panic!("--baud without --serial must be refused, not silently ignored");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument, "{err}");
     }
 }
