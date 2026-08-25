@@ -10,6 +10,7 @@
 pub mod budget;
 pub mod cursor;
 pub mod probe;
+pub mod shell;
 pub mod telemetry;
 
 #[cfg(test)]

@@ -27,7 +27,13 @@ use snemu::machine::Machine;
 ///
 /// Every variant carries the instret actually retired by *this* slice — a delta,
 /// not the machine's cumulative count.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` is what lets the `#[wasm_bindgen]` shell hand this to JS without
+/// writing a conversion by hand: a `wasm_bindgen` method cannot return an enum with
+/// payloads, and open-coding the mapping in the shell is exactly the logic the shell
+/// is supposed not to contain. The serialized shape is a contract with the page —
+/// `{"Running":{"instret":N}}` — so the tests below pin it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum Status {
     /// The slice used its whole budget and the guest has more to do.
     Running { instret: u64 },
@@ -235,6 +241,21 @@ mod tests {
             panic!("expected Trapped");
         };
         assert!(!reason.is_empty(), "the fault must name itself");
+    }
+
+    /// The JSON shape is a contract with the page: JS branches on the variant name
+    /// and reads `instret`. Pinned so a rename here cannot silently break the page,
+    /// which has no compiler to notice.
+    #[test]
+    fn the_serialized_shape_is_what_the_page_branches_on() {
+        let json = |s: &Status| serde_json::to_string(s).expect("serializes");
+
+        assert_eq!(json(&Status::Running { instret: 3 }), r#"{"Running":{"instret":3}}"#);
+        assert_eq!(json(&Status::Halted { instret: 4 }), r#"{"Halted":{"instret":4}}"#);
+        assert_eq!(
+            json(&Status::Trapped { instret: 5, reason: "bad".into() }),
+            r#"{"Trapped":{"instret":5,"reason":"bad"}}"#
+        );
     }
 
     /// The accessor the `#[wasm_bindgen]` shell will read, since an enum with fields

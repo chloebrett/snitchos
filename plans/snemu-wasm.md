@@ -447,6 +447,57 @@ silently.
 **REFACTOR**: Assess.
 **Done when**: The wasm target builds; human approves commit.
 
+**Outcome (2026-08-25): done. `snemu-wasm/src/shell.rs`, 90 lines, no logic.**
+
+`Handle::{new, step_budget, drain_uart, drain_frames, instret}`, each a direct call
+into `budget`/`cursor`/`telemetry`.
+
+*The thinness rule is now enforced, not just asserted.* The plan said "assert the
+thinness instead" and that turned out to be literally implementable: two tests scan
+this file's own source and fail if the `#[wasm_bindgen]` layer contains control flow
+(`if`/`match`/`while`/`for`/`loop`/`else`) or arithmetic. A third is a negative
+control — the guard must reject a real violation while tolerating prose *about* one,
+since the module docs discuss the constructs they ban. `map_err` is the one permitted
+exception, documented at the test: error plumbing with no branch of its own, and the
+alternative (`match` on every `Result`) would be strictly more logic in the file that
+should have none.
+
+This matters because of how `~/c/slay` went: its plan said "push the logic down" too,
+and its shipped `WasmSession::send` still grew branching, pile-rendering and
+save-prompt state — all reachable only from a browser. An intention is not a
+mechanism.
+
+*Serialization went into the tested modules, not the shell.* A `#[wasm_bindgen]`
+method cannot return an enum with payloads, and hand-rolling that conversion in the
+shell is exactly the banned logic — so `Status` and `FrameView` derive `Serialize`
+and cross as JSON, with their **shapes pinned by tests** in their own modules
+(`{"Running":{"instret":N}}`, and `null` rather than an omitted key for an unresolved
+name, so the page can tell "not yet known" from "not applicable"). The page has no
+compiler to notice a rename; those tests are the contract.
+
+*The shell is verified on wasm32, where it is the only thing that can be.* Two
+`wasm_bindgen_test`s boot a hand-built ELF, step it, drain `"A"` off the UART, confirm
+the cursor does not re-deliver, and check a bad image returns an error rather than
+panicking (a Rust panic across the wasm boundary aborts the module and takes the page
+with it). Run: `PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH" wasm-pack test
+--node snemu-wasm` → **7 passed**.
+
+*One incidental fix in snemu.* The `virt.dtb` bytes were `include_bytes!`d twice
+(`main.rs` and `dtb.rs`'s tests) with nothing tying the copies together, and a browser
+embedder would have made a third by reaching across a crate boundary on a relative
+path. Now `snemu::dtb::VIRT`, with a test that it parses and describes two harts; both
+former copies point at it. snemu stays 306/306.
+
+*Mutation.* `shell.rs` is excluded in `.cargo/mutants.toml`, with the reason written
+down: it compiles for the host but nothing on the host *calls* it — its only callers
+are the wasm32 tests, which no harness cargo-mutants drives, so every mutant there is
+missed for that reason alone. Precedent is the existing kernel / `RuntimePlatform`
+entries. What makes the exclusion safe rather than a hole is the thinness guard: if a
+decision ever lands in that file the guard fails, and the fix is to move it somewhere
+mutated normally. Crate-wide: **29 mutants, 25 caught, 4 unviable, 0 survivors.**
+
+**REFACTOR**: assessed, declined.
+
 ### Step 6: The page — boot log in a real terminal, live spans, no frozen tab
 
 **Acceptance criteria**: A static page (`web/`, no bundler,

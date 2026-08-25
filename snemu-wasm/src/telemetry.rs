@@ -28,7 +28,12 @@ use std::collections::HashMap;
 /// page to consume. What every view needs is: what kind of thing happened, what it
 /// was called, and when. Anything richer is a later milestone's problem, and
 /// `OwnedFrame` is still there for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` is the page's view of it — see [`Status`](crate::budget::Status) for
+/// why the shell serializes rather than converts by hand. `None` fields become JSON
+/// `null`, which is what lets the page distinguish "no name" from a name it should
+/// render.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FrameView {
     /// The variant name, e.g. `"SpanStart"`. A contract with the page, not an
     /// internal detail — it is what JS branches on.
@@ -318,6 +323,29 @@ mod tests {
         let m = views.iter().find(|v| v.kind == "Metric").expect("a Metric");
         assert_eq!(m.name.as_deref(), Some("snitchos.frames.allocated_total"));
         assert_eq!(m.value, Some(1234));
+    }
+
+    /// The JSON shape the page consumes, pinned for the same reason `Status`'s is.
+    /// Note `null` rather than an omitted key for an unresolved name: the page can
+    /// then tell "not yet known" from "not applicable" without guessing.
+    #[test]
+    fn the_serialized_shape_is_what_the_page_renders() {
+        let view = FrameView {
+            kind: "Metric",
+            name: Some("snitchos.heap.bytes_used".into()),
+            t: Some(9),
+            value: Some(-2),
+        };
+        assert_eq!(
+            serde_json::to_string(&view).expect("serializes"),
+            r#"{"kind":"Metric","name":"snitchos.heap.bytes_used","t":9,"value":-2}"#
+        );
+
+        let bare = FrameView { kind: "SpanEnd", name: None, t: None, value: None };
+        assert_eq!(
+            serde_json::to_string(&bare).expect("serializes"),
+            r#"{"kind":"SpanEnd","name":null,"t":null,"value":null}"#
+        );
     }
 
     /// `FrameView` is what crosses into JS, so its kind label is a contract with the
