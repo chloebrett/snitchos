@@ -3,9 +3,10 @@
 **Status:** ✅ **DONE — all seven increments built, working end to end, and gated.**
 `stitch-kvetch-completes` and `stitch-drivel-completes` are both registered
 (`xtask-itest/src/itest.rs:217-218`). The kernel gap that blocked registration —
-FP context switching — shipped as [floating-point.md](legacy/floating-point.md)
-increment 4b on 2026-07-28. Two non-blocking defects found on the way are still
-open; see "Two defects found on the way" below.
+FP context switching — shipped as [floating-point.md](floating-point.md)
+increment 4b on 2026-07-28. **Nothing outstanding — archived 2026-08-25:** the two
+non-blocking defects found on the way have both since been fixed in
+`RuntimePlatform::count_completion` (see below).
 
 ## Increment log
 
@@ -216,7 +217,7 @@ re-validate what it was sent — so both eventually parse a float literal, and
 `FpEnableDecision::RefuseBusy` permits one FP process at a time. The REPL wins the race,
 the server is killed by an illegal instruction mid-request, and the REPL blocks forever
 in `call` on an endpoint with no receiver. Full evidence and consequences:
-[floating-point.md](legacy/floating-point.md) increment 4b.
+[floating-point.md](floating-point.md) increment 4b.
 
 **The lesson, again, and it is the same one.** The 2026-07-26 conclusion — "a second,
 independent gap: the REPL never reaches the call" — was read off the bisect
@@ -225,15 +226,20 @@ the wedge. The frame stream said otherwise the whole time: `completions_asked` f
 `kvetch.complete` opens on the server's task id, and two `Log` frames name the kill.
 Read the wire before believing the console.
 
-**Two defects found on the way, neither blocking:**
+**Two defects found on the way, neither blocking — both FIXED (`e397d1d`):**
 
-1. `RuntimePlatform::complete` calls `register_counter` on **every** Tab. Metric names
+1. ~~`RuntimePlatform::complete` calls `register_counter` on **every** Tab.~~ Metric names
    are a per-process quota of 16 (`MetricTable::MAX_METRIC_NAMES`) with no dedup, so
    after ~13 Tabs the registration is refused and `Metric::emit` silently no-ops — the
    client half of the round trip disappears from the wire exactly when a long session
-   would want it. Register once, hold the handle (`kvetch::serve` already does this).
-2. The same counter emits a constant `1` rather than a running total, so the wire
-   cannot distinguish one completion from fifty.
+   would want it. **Fixed:** `count_completion` (`stitch/src/platform.rs`) registers
+   through `get_or_insert_with` and holds the handle. Registration is *lazy* rather
+   than in `new`, which the fix records as deliberate: every program running Stitch on
+   target builds a `RuntimePlatform`, most never press Tab, and a name is a quota'd
+   permanently-interned resource.
+2. ~~The same counter emits a constant `1` rather than a running total~~, so the wire
+   cannot distinguish one completion from fifty. **Fixed:** it emits
+   `completions_asked`, an incrementing count.
 
 **Status of the pieces:** the workload, the server, the protocol, the client
 platform method and the scenario body all exist and work. `stitch-kvetch-completes`
@@ -305,9 +311,9 @@ can complete it outright — correct by construction, zero latency. Only then do
 `kvetch` get involved.
 
 Related: [babble.md](babble.md) (the oracle, the server, `kvetch-proto`),
-[../docs/llm-design.md](../docs/llm-design.md) (the four oracle consumers —
-this is *affordances*, the second), [../docs/babble-design.md](../docs/babble-design.md),
-[../docs/stim-design.md](../docs/stim-design.md) (where this goes next, at scale).
+[../docs/llm-design.md](../../docs/llm-design.md) (the four oracle consumers —
+this is *affordances*, the second), [../docs/babble-design.md](../../docs/babble-design.md),
+[../docs/stim-design.md](../../docs/stim-design.md) (where this goes next, at scale).
 
 **Non-goals (explicitly later):** ghost text as you type (needs the
 versioned-buffer protocol, deferred in babble); multi-line completion; UTF-8
@@ -410,7 +416,7 @@ the workload's grant list.
 spawning `kvetch-server` + `fs-server-seeded` + `stitch_repl`, and the platform
 reading each endpoint by its delegated slot. Flag for the manifest design: this
 is exactly the positional-startup-ABI fragility that
-[../docs/manifest-design.md](../docs/manifest-design.md) exists to kill — two
+[../docs/manifest-design.md](../../docs/manifest-design.md) exists to kill — two
 caps in, distinguished only by order.
 
 ## Increment 7 — the itest

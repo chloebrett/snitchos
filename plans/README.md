@@ -20,7 +20,7 @@ the first is work in progress:
 |---|---|---|
 | [In flight](#in-flight) | 16 | Real work, partially done. Only ~8 have moved this month. |
 | [Not started](#not-started) | 6 | Written down, zero code. A plan is cheap; that's deliberate. |
-| [Done bar a detail](#done-bar-a-detail) | 4 | Delivered; something small or deliberate holds back the archive. |
+| [Done bar a detail](#done-bar-a-detail) | 2 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
 
 ## In flight
@@ -71,8 +71,6 @@ Delivered. Each is one small thing from `legacy/`:
 | Plan | What holds it back |
 |---|---|
 | [drivel.md](drivel.md) | The candle comparison — "the honest test" — still outstanding |
-| [repl-completion.md](repl-completion.md) | Two non-blocking defects found on the way; tracked in [../docs/debt-register.md](../docs/debt-register.md) |
-| [babble.md](babble.md) | Complete *for its purpose*; three deferred increments, one of which drivel unblocked |
 | [glitch.md](glitch.md) | v1 complete. **Deliberately unarchived** — [glitch-v2-async-ring.md](glitch-v2-async-ring.md) cites it |
 
 ## Reference, not plans

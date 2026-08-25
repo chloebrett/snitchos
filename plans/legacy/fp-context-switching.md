@@ -201,7 +201,7 @@ Extend it to press Tab **twice**, since one Tab never reproduced the bug.
 `RuntimePlatform::complete` re-registers its counter on every Tab (per-process quota
 is 16, no dedup, so it silently stops counting after ~13) and emits a constant `1`
 rather than a running total.
-**Done when**: full gate green, `plans/repl-completion.md` closed out.
+**Done when**: full gate green, `plans/legacy/repl-completion.md` closed out.
 
 ## Known unknowns
 

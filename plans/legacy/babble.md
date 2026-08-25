@@ -8,9 +8,14 @@ byte-identical on host and target — the four contracts the ladder inherits
 gated.
 (9 **superseded** — `cram-corpus` does Tier-0 generation better than the planned
 `babble gen`: a cached corpus with a host-tested `Manifest` deciding when the
-cache is stale, rather than a naive file-writer; 3 deferred: it is
+cache is stale, rather than a naive file-writer; 3 **re-homed to stim**: it is
 the char-level view, which stim needs and babble does not — babble appends
-whole space-separated tokens, so maximal munch cannot bite it). The oracle
+whole space-separated tokens, so maximal munch cannot bite it. Increment 3 and
+its snapshot-caching are the *stim-time* fix, so they belong to
+[stim-v1.md](../stim-v1.md) / [stim-grammar.md](../stim-grammar.md), not here.)
+
+**Nothing outstanding — archived 2026-08-25.** Every increment is done,
+superseded, or re-homed per the line above. The oracle
 (`stitch/src/oracle.rs`) answers `valid_next` across the grammar; 9 tests
 green. **Mechanism changed from the design doc's "instrument `expect`/`peek`"
 to *trial-by-append*** — append a class's representative lexeme and read
@@ -111,7 +116,7 @@ not link the sampler (and through it the whole Stitch parser) — the same reaso
 - **No seed field, deliberately.** Entropy derives from the server's per-boot
   root plus a request counter, so a client cannot silently diverge snemu from
   hardware; itests pin the boot seed instead
-  ([../docs/randomness-and-entropy.md](../docs/randomness-and-entropy.md)).
+  ([../docs/randomness-and-entropy.md](../../docs/randomness-and-entropy.md)).
 - `max_tokens` because a completion is a *fragment* — see the completeness
   correction above.
 - Malformed input is a `WireError` to reply to, never a panic: unknown tag,
@@ -138,7 +143,7 @@ would not break speculative decoding's *correctness* but would collapse its
 for never generating is **verification**, not capacity — comments are the one
 artifact the parse/typecheck/test stack cannot check, so a confidently wrong
 one passes every gate we have. Full reasoning in
-[../docs/generative-ladder.md](../docs/generative-ladder.md). babble is the one
+[../docs/generative-ladder.md](../../docs/generative-ladder.md). babble is the one
 exception (it has no vocabulary) and may emit them behind a flag, off for
 corpus generation.
 
@@ -206,13 +211,13 @@ far right, and it made the oracle unsound); `expect` had always been
 correct. One snapshot updated — it had pinned the buggy span.
 
 TDD decomposition of
-[../docs/babble-design.md](../docs/babble-design.md): the continuation
+[../docs/babble-design.md](../../docs/babble-design.md): the continuation
 oracle in `stitch`, the seeded biased grammar-walk sampler, the batch CLI
 (Tier-0 corpus hat), and kvetch v0 (the serving hat — babble behind an IPC
 endpoint). Deliverables are the four contracts every later ladder rung
 inherits: oracle API, bias-table format, completion-endpoint protocol v0,
 eval floor. Entropy discipline per
-[../docs/randomness-and-entropy.md](../docs/randomness-and-entropy.md):
+[../docs/randomness-and-entropy.md](../../docs/randomness-and-entropy.md):
 seeds explicit, time never a parent, itests pin.
 
 **Non-goals (explicitly later):** BPE mask-lifting (quip-time, needs a

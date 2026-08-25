@@ -5,7 +5,7 @@
 This plan was a **tracer bullet for the training infrastructure**, not an attempt
 to build a useful model. The deliverable was a working pipe — corpus → frozen
 vocab → training rig → checkpoint → evaluation — proved by drivel *marginally*
-outscoring [babble](babble.md) on one honest metric. A model that is barely
+outscoring [babble](legacy/babble.md) on one honest metric. A model that is barely
 better than no model was a complete success here.
 
 It cleared that bar and kept going: drivel trains on the **real** `.st` corpus against a
@@ -695,7 +695,7 @@ test fixtures, canon); re-running produces byte-identical splits.
 
 **GREEN**: source walker, the validator funnel (parse → type-check → dedup) from
 the bootstrap's Stage 0, augmentation passes, and a machine-readable per-batch
-report. This is [babble.md](babble.md)'s deferred increment 9, unblocked — the
+report. This is [babble.md](legacy/babble.md)'s deferred increment 9, unblocked — the
 summary format is now being built against a real harness rather than guessed at,
 which is exactly why it was deferred.
 

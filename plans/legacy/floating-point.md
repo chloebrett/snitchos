@@ -408,7 +408,7 @@ The earlier run saw a grammar-only menu because it was reading the console *afte
 wedge, where the last completed line is all there is. So: FP was necessary, and was also
 sufficient — via 4b, not via 4. `stitch-kvetch-completes` and `stitch-drivel-completes`
 both sit in `xtask-itest/src/itest.rs:217-218` today. Details in
-[repl-completion.md](../repl-completion.md).
+[repl-completion.md](repl-completion.md).
 
 ## Open questions carried from the design doc
 

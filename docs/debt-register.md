@@ -367,7 +367,7 @@ instret count rather than read off the frame stream or the profile, and the prof
 once actually run, said the opposite. The classifier ("UB the optimiser exploits")
 was then chosen to fit the wrong symptom, and it made the work look like a hunt for
 unsound code when a diff of two disassemblies would have closed it. Read the wire
-before believing the summary — the same lesson `plans/repl-completion.md` records
+before believing the summary — the same lesson `plans/legacy/repl-completion.md` records
 for the FP wedge, arrived at independently.
 
 ## Deferred placeholders (Tier 3)

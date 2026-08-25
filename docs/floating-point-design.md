@@ -22,7 +22,7 @@ failing scenario. The original debug was blind because the scenario was
 so every floating-point instruction traps as illegal (`scause=2`) — and the
 `UnknownException` arm panics the kernel regardless of privilege. Typing
 `1.5 + 1.5` at the Stitch REPL takes down the machine. Found 2026-07-26 while
-building REPL completion; see [../plans/repl-completion.md](../plans/repl-completion.md)
+building REPL completion; see [../plans/repl-completion.md](../plans/legacy/repl-completion.md)
 for the bisect.
 
 Related: [vf2-audio-design.md](vf2-audio-design.md) (why the *kernel* is
