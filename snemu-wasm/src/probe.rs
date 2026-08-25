@@ -82,6 +82,37 @@ pub struct Probe {
     pub fault: Option<String>,
 }
 
+/// Which of snemu's optional accelerators to switch on.
+///
+/// They are all off in `Hart::new`, and each is documented as "a pure speedup proven
+/// by the on↔off A/B" — the plain interpreter is the oracle. [`Speedups::OFF`] is
+/// that oracle; [`Speedups::ON`] is what the browser runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Speedups {
+    /// Tier-1 decode cache.
+    pub fetch_cache: bool,
+    /// Tier-2 block JIT (Backend A — portable, so the browser gets it too).
+    pub block_jit: bool,
+    /// Software TLB over Sv39 translation.
+    pub tlb: bool,
+}
+
+impl Speedups {
+    /// The interpreter oracle: every accelerator off, as `Hart::new` leaves them.
+    pub const OFF: Self = Self { fetch_cache: false, block_jit: false, tlb: false };
+    /// What the browser build enables.
+    pub const ON: Self = Self { fetch_cache: true, block_jit: true, tlb: true };
+
+    /// Apply to a machine. Straight-line by design: this is the one place the
+    /// browser's accelerator choice is written down, so it is worth being able to
+    /// read it in a single glance.
+    pub fn apply(self, machine: &mut Machine) {
+        machine.set_fetch_cache(self.fetch_cache);
+        machine.set_block_jit(self.block_jit);
+        machine.set_tlb(self.tlb);
+    }
+}
+
 /// Run [`PROGRAM`] for [`BUDGET`] instructions and report the result.
 ///
 /// Deterministic by construction: no clock, no entropy, no host I/O. snemu's
@@ -89,7 +120,14 @@ pub struct Probe {
 /// for free.
 #[must_use]
 pub fn run() -> Probe {
+    run_with(Speedups::OFF)
+}
+
+/// [`run`], with a chosen accelerator configuration.
+#[must_use]
+pub fn run_with(speedups: Speedups) -> Probe {
     let mut machine = Machine::new(Memory::new(64 * 1024), 1);
+    speedups.apply(&mut machine);
 
     let mut image = Vec::with_capacity(PROGRAM.len() * 4);
     for word in PROGRAM {
@@ -195,7 +233,7 @@ pub const EXPECTED_HASH_DIAGNOSTICS: [u64; 3] =
 
 #[cfg(test)]
 mod tests {
-    use super::{Probe, check_portable, run};
+    use super::{Probe, check_portable, run, run_with};
 
     /// The 64-bit reference. This is the run that defines "correct"; the wasm test
     /// in `tests/wasm.rs` asserts the identical expectations.
@@ -226,6 +264,44 @@ mod tests {
     #[test]
     fn hashing_raw_bytes_via_write_is_target_independent() {
         assert_eq!(super::hash_diagnostics()[2], super::EXPECTED_HASH_DIAGNOSTICS[2]);
+    }
+
+    /// **The claim the browser build is about to rely on.**
+    ///
+    /// Every accelerator's doc says it is "a pure speedup proven by the on↔off A/B".
+    /// Turning them on in the browser makes that claim load-bearing for a page whose
+    /// determinism is an advertised property, so it is checked here rather than
+    /// taken on trust: same registers, same UART bytes, same retired instret, same
+    /// whole-machine hash, with them off and on.
+    ///
+    /// A failure here means an accelerator is not transparent, and the honest
+    /// response is to turn it off, not to relax the assertion.
+    #[test]
+    fn the_speedups_change_nothing_but_speed() {
+        let oracle = run_with(super::Speedups::OFF);
+        let fast = run_with(super::Speedups::ON);
+
+        assert_eq!(fast.regs, oracle.regs, "registers diverged");
+        assert_eq!(fast.uart, oracle.uart, "device output diverged");
+        assert_eq!(fast.instret, oracle.instret, "retired instruction count diverged");
+        assert_eq!(fast.state_hash, oracle.state_hash, "machine state diverged");
+        assert_eq!(fast.fault, oracle.fault, "one configuration faulted and the other did not");
+    }
+
+    /// Each accelerator alone, so a failure names which one is not transparent
+    /// rather than only that the combination is not.
+    #[test]
+    fn each_speedup_is_independently_transparent() {
+        let oracle = run_with(super::Speedups::OFF);
+        for (label, cfg) in [
+            ("fetch cache", super::Speedups { fetch_cache: true, ..super::Speedups::OFF }),
+            ("block jit", super::Speedups { block_jit: true, ..super::Speedups::OFF }),
+            ("tlb", super::Speedups { tlb: true, ..super::Speedups::OFF }),
+        ] {
+            let got = run_with(cfg);
+            assert_eq!(got.state_hash, oracle.state_hash, "{label} changed machine state");
+            assert_eq!(got.instret, oracle.instret, "{label} changed retired instret");
+        }
     }
 
     /// The oracle must be able to *fail*.

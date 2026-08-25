@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
+    "measure": "MEASURE=1 playwright test --grep @measurement",
     "check": "biome check .",
     "fix": "biome check --write ."
   },

@@ -7,11 +7,15 @@ import { defineConfig, devices } from "@playwright/test";
 /// `wasm-pack test --node` — they are claims about a real browser.
 export default defineConfig({
   testDir: "./e2e",
-  // `idle-cost` is a standing *measurement* of a known, unfixed problem (the tab
-  // pins a core — see the spec), so it is red by design. Excluding it keeps the
-  // acceptance suite's green meaningful; run it directly with
-  // `yarn playwright test idle-cost`.
-  testIgnore: ["**/idle-cost.spec.ts"],
+  // `@measurement` specs are standing measurements of known, unfixed problems, so
+  // they are red by design and excluded from the default run — an acceptance suite
+  // whose green includes a known failure is not saying anything.
+  //
+  // Conditional, because a config `grepInvert` composes with a CLI `--grep` as AND:
+  // leaving it set unconditionally means `--grep @measurement` matches nothing, which
+  // is exactly the "documented command does not work" trap this replaced. `yarn
+  // measure` sets MEASURE=1 to lift it.
+  ...(process.env.MEASURE ? {} : { grepInvert: /@measurement/ }),
 
   // Booting a kernel in an interpreter in wasm is not a 5-second operation, and CI
   // machines are slower than this one.

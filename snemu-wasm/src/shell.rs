@@ -46,9 +46,14 @@ impl Handle {
     /// If the image is not a loadable RV64 ELF.
     #[wasm_bindgen(constructor)]
     pub fn new(elf: &[u8], ram_bytes: usize) -> Result<Handle, JsError> {
-        let machine =
+        let mut machine =
             snemu::loader::load_machine(elf, ram_bytes, Some(snemu::dtb::VIRT), 2, false)
                 .map_err(|e| JsError::new(&format!("{e:?}")))?;
+        // snemu leaves its accelerators off by default (the plain interpreter is the
+        // differential oracle). A browser pays emulation cost on top of the guest's
+        // own work, so it wants all of them — and `probe::the_speedups_change_nothing
+        // _but_speed` is the standing check that they stay transparent.
+        crate::probe::Speedups::ON.apply(&mut machine);
         Ok(Handle {
             machine,
             uart: Cursor::new(),

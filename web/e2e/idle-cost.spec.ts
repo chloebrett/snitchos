@@ -17,7 +17,7 @@ import { expect, test } from "@playwright/test";
 const BOOT_TIMEOUT = 90_000;
 const WINDOW_MS = 4000;
 
-test("reports what an open tab costs once the guest has booted", async ({ page }) => {
+test("reports what an open tab costs once the guest has booted @measurement", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("console")).toContainText(/heartbeat/i, {
     timeout: BOOT_TIMEOUT,
@@ -63,8 +63,8 @@ test("reports what an open tab costs once the guest has booted", async ({ page }
   // green tick; a red test is the honest record until wall-clock pacing lands, and
   // it is what will confirm the fix.
   //
-  // Excluded from the default e2e run (see playwright.config.ts) so it does not mask
-  // real regressions in the acceptance suite; run it directly:
-  //   yarn playwright test idle-cost
+  // Tagged `@measurement` and excluded from the default e2e run (see
+  // playwright.config.ts) so it does not mask real regressions; run it with
+  //   yarn measure
   expect(busyFraction).toBeLessThan(0.9);
 });
