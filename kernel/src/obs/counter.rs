@@ -108,6 +108,12 @@ static COUNTERS: &[&DeferredCounter] = &[
     &crate::ramfb::INIT_REFUSED,
     // audio
     &crate::pwmdac::SAMPLES_EMITTED,
+    // Omitted until 2026-08-25, which made `snitchos.audio.xruns_total` a counter
+    // nothing ever drained: it could increment forever and never reach the wire. The
+    // gap survived because the *frame* (`AudioXRun`, emitted separately by
+    // `drain_pending_xruns`) did work, so the under-run path looked observable from
+    // the wire — and because nothing had ever provoked an under-run to look at.
+    &crate::pwmdac::XRUNS,
 ];
 
 /// Intern every registered counter's name. Call once at boot, before the

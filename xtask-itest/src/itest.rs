@@ -209,6 +209,7 @@ catalog! {
     cpu "heap-oom"                        scenarios::heap_oom                       [heap, oom]    {"heap-oom"};
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"cooperative"};
     cpu "glitch-beep-plays"               scenarios::glitch_beep_plays              [audio]         {"glitch-beep"};
+    cpu "glitch-starve-underruns"         scenarios::glitch_starve_underruns        [audio]         {"glitch-starve"};
     cpu "kvetch-babble-serves"            scenarios::kvetch_babble_serves           [kvetch]        {"kvetch-babble"};
     cpu "fp-survives-context-switch"      scenarios::fp_survives_context_switch     [fp, sched]     {"fp-churn"};
     // Opt-in: one drivel completion is 4-8B guest instructions (~90s under snemu),

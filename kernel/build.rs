@@ -56,6 +56,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("fs-client", "SNITCHOS_FS_CLIENT_ELF"),
     ("glitch-server", "SNITCHOS_GLITCH_SERVER_ELF"),
     ("beep", "SNITCHOS_BEEP_ELF"),
+    ("starve", "SNITCHOS_STARVE_ELF"),
     ("satisfier", "SNITCHOS_SATISFIER_ELF"),
     ("spawn-image-demo", "SNITCHOS_SPAWN_IMAGE_DEMO_ELF"),
     ("notify_waiter", "SNITCHOS_NOTIFY_WAITER_ELF"),

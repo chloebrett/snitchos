@@ -13,7 +13,8 @@
 use glitch_core::{next_chunk_len, plan_play};
 use glitch_proto::{Play, Reply};
 use snitchos_user::{
-    AUDIO_ENQUEUE_MAX, Endpoint, Metric, audio_enqueue, delegated_handle, register_counter, reply,
+    AUDIO_ENQUEUE_MAX, Endpoint, Metric, audio_enqueue_streaming, delegated_handle,
+    register_counter, reply,
     tracer, yield_now,
 };
 
@@ -66,7 +67,7 @@ pub fn serve() -> ! {
 /// Synthesize `req` and feed it into the async DAC ring, ≤[`AUDIO_ENQUEUE_MAX`] samples
 /// per `AudioEnqueue`. Non-blocking with back-pressure: each call reports how many
 /// samples the ring accepted; unaccepted samples stay buffered and are re-offered, and
-/// when the ring is full ([`audio_enqueue`] accepts 0) glitch [`yield_now`]s so the
+/// when the ring is full ([`audio_enqueue_streaming`] accepts 0) glitch [`yield_now`]s so the
 /// timer drain can make room. `Err` if the frequency is unsynthesizable, or the kernel
 /// refused (we don't hold the `AudioSink`, or a bad range).
 fn emit(sink: usize, req: Play) -> Result<(), ()> {
@@ -80,10 +81,20 @@ fn emit(sink: usize, req: Play) -> Result<(), ()> {
             n += 1;
         }
         if n == 0 {
-            return Ok(()); // synthesis exhausted and everything accepted
+            // Synthesis is spent and the ring took everything, so close the stream: an
+            // empty `Final` batch, which enqueues nothing and simply tells the drain
+            // that the coming silence ends the play rather than being a missed
+            // deadline. Sent here — right after a successful enqueue, while the ring
+            // still holds most of a batch — so the close comfortably precedes the ring
+            // running dry and cannot itself provoke a spurious under-run.
+            audio_enqueue_streaming(sink, &[], false).map_err(|_| ())?;
+            return Ok(());
         }
         let offer = next_chunk_len(n, AUDIO_ENQUEUE_MAX);
-        let accepted = audio_enqueue(sink, &buf[..offer]).map_err(|_| ())?;
+        // `more = true`: glitch is a real-time producer with samples still to deliver,
+        // so a ring that runs dry before the next batch is a genuine missed feed
+        // deadline. This is what arms the `XRun` observable for an ordinary play.
+        let accepted = audio_enqueue_streaming(sink, &buf[..offer], true).map_err(|_| ())?;
         if accepted == 0 {
             yield_now(); // ring full — let the drain catch up before re-offering
             continue;

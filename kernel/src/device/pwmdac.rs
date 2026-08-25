@@ -20,7 +20,7 @@ use kernel_devices::pwmdac::{
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use kernel_devices::iomux::{self, FieldWrite};
-use kernel_devices::samplering::{DrainOutcome, SampleRing};
+use kernel_devices::samplering::{DrainOutcome, SampleRing, StreamHint};
 use kernel_devices::syscrg::{self, Op};
 
 use crate::obs::counter::DeferredCounter;
@@ -62,7 +62,13 @@ fn audio_period_ticks() -> u64 {
 /// than offered when the ring is near full — back-pressure). Non-blocking: it never
 /// paces or touches MMIO, unlike [`play_samples`]. On the first enqueue of a stream it
 /// brings the DAC up and turns on this hart's audio feed; the timer drain does the rest.
-pub fn enqueue(samples: &[i16]) -> usize {
+///
+/// `hint` is the producer's claim about what follows this batch, and it is what arms
+/// the under-run observable: [`StreamHint::More`] says a dry ring is a missed deadline,
+/// [`StreamHint::Final`] says it is the end of the play. Stored *before* the samples go
+/// in, so the drain can never see a filled ring whose stream state predates it.
+pub fn enqueue(samples: &[i16], hint: StreamHint) -> usize {
+    AUDIO_ACTIVE.store(hint.keeps_stream_active(), Ordering::Relaxed);
     let accepted = AUDIO_RING.lock().push_slice(samples);
     if accepted > 0 && !AUDIO_FEEDING.swap(true, Ordering::Relaxed) {
         ensure_up();

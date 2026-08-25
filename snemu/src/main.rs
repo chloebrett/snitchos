@@ -18,9 +18,9 @@ const DEFAULT_MAX_STEPS: u64 = 50_000_000;
 /// secondary unconditionally, so the DTB and machine must offer two.
 const HART_COUNT: usize = 2;
 
-/// Device tree the guest sees, dumped from QEMU's `virt` machine:
-/// `qemu-system-riscv64 -machine virt,dumpdtb=snemu/virt.dtb -smp 2 -m 128M`.
-const DTB: &[u8] = include_bytes!("../virt.dtb");
+/// Device tree the guest sees. Owned by the lib (`snemu::dtb::VIRT`) so the CLI and
+/// the browser shim cannot drift onto different copies.
+const DTB: &[u8] = snemu::dtb::VIRT;
 
 /// Run a `SnitchOS` kernel ELF under the snemu RV64GC emulator.
 #[derive(Parser)]

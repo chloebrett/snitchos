@@ -8,6 +8,17 @@
 //! block. We add one `FDT_PROP` to the existing `/chosen` node and, if needed,
 //! append its name to the strings block, then fix the header's sizes/offsets.
 
+/// The device tree the guest sees, dumped from QEMU's `virt` machine:
+/// `qemu-system-riscv64 -machine virt,dumpdtb=snemu/virt.dtb -smp 2 -m 128M`.
+///
+/// Two harts, because the kernel is `MAX_HARTS = 2` and brings up its secondary
+/// unconditionally — so the DTB and the machine must offer two.
+///
+/// Exported from the lib rather than embedded per-binary so every embedder shares
+/// one copy: the `snemu` CLI, this module's tests, and the browser shim, which would
+/// otherwise have to `include_bytes!` across a crate boundary by relative path.
+pub const VIRT: &[u8] = include_bytes!("../virt.dtb");
+
 const FDT_MAGIC: u32 = 0xd00d_feed;
 const FDT_BEGIN_NODE: u32 = 1;
 const FDT_END_NODE: u32 = 2;
@@ -216,7 +227,19 @@ mod tests {
     use super::*;
 
     /// The `-smp 2` QEMU `virt` device tree snemu ships.
-    const DTB: &[u8] = include_bytes!("../virt.dtb");
+    const DTB: &[u8] = VIRT;
+
+    /// The lib exposes the device tree, so every embedder shares one copy.
+    ///
+    /// Before this, the bytes were `include_bytes!`d separately by `main.rs` and by
+    /// this test module, with nothing tying the two together — and a browser embedder
+    /// would have made a third, reaching across a crate boundary by relative path.
+    #[test]
+    fn the_shipped_device_tree_is_public_and_describes_two_harts() {
+        let fdt = fdt::Fdt::new(VIRT).expect("the exported DTB parses");
+        assert_eq!(fdt.cpus().count(), 2, "the kernel brings up a secondary unconditionally");
+        assert_eq!(VIRT, DTB, "and it is the same file this module tests against");
+    }
 
     #[test]
     fn injected_bootargs_parse_back_via_the_fdt_reader() {

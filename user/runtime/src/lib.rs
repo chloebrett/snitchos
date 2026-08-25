@@ -611,11 +611,35 @@ pub const AUDIO_ENQUEUE_MAX: usize = AUDIO_WRITE_MAX;
 /// and let the drain catch up). `Err(Denied)` if the kernel refused (no `AudioSink`, or
 /// an over-long / bad range). Offer at most [`AUDIO_ENQUEUE_MAX`] per call.
 pub fn audio_enqueue(sink: usize, samples: &[i16]) -> Result<usize, Denied> {
-    // SAFETY: `ecall`; the kernel validates the `AudioSink` cap at a0 and the
-    // `(ptr, count)` range, copies the samples out, and returns the accepted count in
-    // a0 — `usize::MAX` if refused.
+    audio_enqueue_streaming(sink, samples, false)
+}
+
+/// [`audio_enqueue`], stating whether **more samples are coming**.
+///
+/// This is what arms the kernel's under-run (`XRun`) observable. `more = true` claims
+/// the stream stays open, so a ring that runs dry before the next batch is a *missed
+/// feed deadline* and the kernel counts it; `more = false` says this batch ends the
+/// play, and the ensuing silence is expected.
+///
+/// Only the producer knows which — emptiness alone cannot tell "done" from "late" —
+/// so a real-time client must say. [`audio_enqueue`] passes `false`, which is exactly
+/// what it did before the flag existed.
+///
+/// # Errors
+/// `Err(Denied)` if the kernel refused: no `AudioSink` cap, or a bad range.
+pub fn audio_enqueue_streaming(
+    sink: usize,
+    samples: &[i16],
+    more: bool,
+) -> Result<usize, Denied> {
+    // SAFETY: `ecall`; the kernel validates the `AudioSink` cap at a0, the
+    // `(ptr, count)` range and the a3 stream hint, copies the samples out, and returns
+    // the accepted count in a0 — `usize::MAX` if refused.
     let ret = unsafe {
-        ecall(Syscall::AudioEnqueue, [sink, samples.as_ptr() as usize, samples.len(), 0, 0, 0, 0])
+        ecall(
+            Syscall::AudioEnqueue,
+            [sink, samples.as_ptr() as usize, samples.len(), usize::from(more), 0, 0, 0],
+        )
     }[0];
     if ret == usize::MAX { Err(Denied) } else { Ok(ret) }
 }

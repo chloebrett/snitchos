@@ -238,6 +238,9 @@ pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"))
 pub static GLITCH_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_GLITCH_SERVER_ELF"));
 /// `workload=glitch-beep`: the beep client (holds `SEND` on the glitch endpoint).
 pub static BEEP_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BEEP_ELF"));
+/// `workload=glitch-starve`: the under-run probe (holds the `AudioSink`, abandons its
+/// stream on purpose).
+pub static STARVE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_STARVE_ELF"));
 pub static VIEWER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_VIEWER_ELF"));
 pub static VIEW_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_VIEW_DEMO_ELF"));
 pub static SHELL_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SHELL_ELF"));
@@ -540,6 +543,14 @@ pub static GLITCH_SERVER: ProgramSpec =
 
 /// `workload=glitch-beep`: the beep client (`SEND` on the glitch endpoint).
 pub static BEEP: ProgramSpec = ipc_user(BEEP_ELF, Rights::SEND.bits());
+
+/// `workload=glitch-starve`: the under-run probe. Takes the **same** `IpcAudio` launch
+/// as [`GLITCH_SERVER`] so it holds the `AudioSink` at `delegated_handle(1)` — it feeds
+/// the DAC directly and abandons the stream, which is the fault the `XRun` counts. The
+/// endpoint rides along unused (the launch path grants both); the probe is about the
+/// feed deadline, not the cap graph.
+pub static STARVE: ProgramSpec =
+    ProgramSpec { elf: STARVE_ELF, launch: Launch::IpcAudio { rights_bits: Rights::RECV.bits() } };
 
 /// `workload=stitch-fs`: the FS server seeded from the build-time fs-image
 /// (`RECV | MINT`). Same serve loop as [`FS_SERVER`] but its `RamFs` starts
@@ -1058,6 +1069,13 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
             ProgramSpawn { name: "glitch_server", program: &GLITCH_SERVER, priority: Priority::Normal },
             ProgramSpawn { name: "beep", program: &BEEP, priority: Priority::Normal },
         ],
+    }),
+    // glitch v2 under-run probe: one program, holding the DAC directly. No server and
+    // no client — the fault under test is a missed *feed deadline*, so adding an IPC
+    // round trip would only add ways for the scenario to fail for unrelated reasons.
+    (WorkloadKind::GlitchStarve, UserLayout {
+        needs_endpoint: true,
+        programs: &[ProgramSpawn { name: "starve", program: &STARVE, priority: Priority::Normal }],
     }),
 ];
 

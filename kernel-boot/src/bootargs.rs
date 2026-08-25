@@ -151,6 +151,18 @@ workloads! {
         /// cap-gated `AudioWrite` → `WDATA` path, re-casting the in-kernel Tier-0
         /// beep as a client of a disciplined server. See `plans/glitch.md`.
         GlitchBeep,
+        /// `glitch` v2 under-run probe: a `starve` program holding the `AudioSink`
+        /// enqueues one short batch declaring **more samples are coming**, then never
+        /// feeds again. The ring drains within milliseconds and every audio deadline
+        /// after that is a genuine missed feed — so `snitchos.audio.xruns_total`
+        /// climbs and `AudioXRun` frames reach the wire.
+        ///
+        /// This exists because the `XRun` observable was *wired but dormant* until the
+        /// stream-active signal landed: nothing set it, so an empty ring always read as
+        /// idle silence and the fault path could not fire at all. A real-time
+        /// observable nobody has watched fail is indistinguishable from a healthy
+        /// system. `itest-workloads` only. See `plans/glitch-v2-async-ring.md`.
+        GlitchStarve,
         /// Userspace heap-growth probe: runs the `heap-grow` program, which
         /// allocates far past the runtime's per-region map size — forcing the
         /// `talc` allocator to `map_anon` more frames from the kernel on demand.
@@ -776,6 +788,11 @@ mod tests {
     #[test]
     fn selects_glitch_beep() {
         assert_eq!(select("workload=glitch-beep"), Some(WorkloadKind::GlitchBeep));
+    }
+
+    #[test]
+    fn selects_glitch_starve() {
+        assert_eq!(select("workload=glitch-starve"), Some(WorkloadKind::GlitchStarve));
     }
 
     #[test]

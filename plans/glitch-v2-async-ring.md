@@ -6,11 +6,24 @@
 `WDATA` — with `samples_emitted` coming off the timer drain, not a blocking syscall.
 Verified: the async feed + behavior-preserving wheel swap pass the full itest suite
 **plain + `--scramble`**, perturbing zero scenarios (latest: **130/130** — the count
-grew as concurrent FP work added scenarios). **Not yet shipped (6–9):** mixing, init-delegated AudioSink, snemu PCM
-capture, and the acceptance itests — which is where the **XRun observable actually
-fires** (it is *wired but dormant* today: `AUDIO_ACTIVE` is never set true, so the drain
-treats an empty ring as `Idle`, not `Underrun` — see Increment 5's shipped note and
-Increment 9). Depends on glitch v1 (shipped; [glitch.md](glitch.md)).
+grew as concurrent FP work added scenarios). **The XRun observable is ARMED and proven firing (2026-08-25)** — Increment 9's
+prerequisite, landed ahead of the rest of it. `AudioEnqueue` now carries a
+`StreamHint` in `a3` (`kernel_devices::samplering`, host-tested; `Final` = 0 keeps
+every pre-existing caller's behaviour exactly), `glitch` declares `more = true` while
+feeding and closes with an empty `Final` batch, and the new `workload=glitch-starve`
+probe abandons a declared stream on purpose so the fault path executes. Scenario
+`glitch-starve-underruns` asserts the counter **and** the `AudioXRun` frame.
+
+> **Arming it found a second, independent dormancy.** `XRUNS` — its own doc comment
+> calls it "the marquee real-time observable" — was never in `counter::COUNTERS`, so
+> nothing drained it: it could increment forever and never reach the wire. That
+> survived because the *frame* path worked, which made the under-run look observable
+> from outside, and because nothing had ever provoked an under-run to check. Two
+> independent breaks in one observable, neither visible without a negative control.
+
+**Not yet shipped (6–9):** mixing, init-delegated AudioSink, snemu PCM capture, and
+the remaining two acceptance itests (byte-exact waveform; concurrent IPC during a
+play). Depends on glitch v1 (shipped; [glitch.md](glitch.md)).
 
 This is the "A" milestone: it turns the DAC from a *syscall that blocks for the whole
 play* into a *ring the kernel drains on a timer*, which is the enabler under
@@ -323,12 +336,15 @@ host tests + mutation green. (A live native window remains optional, for ears on
 
 ## Increment 9 — acceptance itests — ⏳ NOT STARTED (where the XRun *fires*)
 
-**Prerequisite unique to this increment:** underrun detection is dormant today
-(`AUDIO_ACTIVE` ships `false`; Increment 5 note). The `glitch-xrun` scenario must
-**turn it on** — mark the stream active so an empty ring reports `Underrun`, not `Idle`.
-Simplest: a stream-active signal the under-feeding workload/`glitch` sets (e.g. an
-`AudioEnqueue` "begin/continue vs end" convention, or a tiny control path). Design this
-alongside the scenario — it's the missing half of the XRun observable.
+**Prerequisite — ✅ DONE 2026-08-25, ahead of the rest of this increment.** The
+stream-active signal shipped as `StreamHint` on `AudioEnqueue`'s `a3`
+(`Final` = 0 = today's behaviour, `More` = 1 = a dry ring is a missed deadline), with
+an unrecognised value **refused** rather than coerced — rounding "any nonzero" to
+`More` would let a caller arm the real-time fault path by passing garbage. `glitch`
+declares `more = true` while feeding and closes with an empty `Final` batch, sent right
+after a successful enqueue while the ring still holds most of a batch, so the close
+cannot itself provoke a spurious under-run. Proven by `glitch-starve-underruns`
+(`workload=glitch-starve`), which asserts the counter and the `AudioXRun` frame.
 
 **Acceptance:** three deterministic snemu scenarios, each asserting on the **captured
 waveform** (Increment 8) plus the counter floor:

@@ -13,6 +13,7 @@
 //!
 //! See `plans/glitch.md` and `plans/glitch-v2-async-ring.md`.
 
+use kernel_devices::samplering::StreamHint;
 use kernel_mem::mmu::MAX_USER_STR_LEN;
 use kernel_proc::cap::{authorize_audio, Handle};
 use protocol::RefusalReason;
@@ -102,6 +103,13 @@ pub(super) fn handle_audio_enqueue(frame: &mut TrapFrame) {
         super::refuse(frame, sc, RefusalReason::BadUserRange);
         return;
     }
+    // `a3` is the producer's stream hint, and it arms the under-run observable — so an
+    // unrecognised value is refused rather than coerced. Rounding "any nonzero" to
+    // `More` would let a caller turn on the real-time fault path by accident.
+    let Some(hint) = StreamHint::from_arg(frame.a3 as usize) else {
+        super::refuse(frame, sc, RefusalReason::BadUserRange);
+        return;
+    };
     let byte_len = count * 2;
     let mut buf = [0u8; MAX_SAMPLES * 2];
     let Some(bytes) = crate::user::copy_from_user(frame.a1 as usize, byte_len, &mut buf) else {
@@ -112,5 +120,5 @@ pub(super) fn handle_audio_enqueue(frame: &mut TrapFrame) {
     for (slot, chunk) in samples.iter_mut().zip(bytes.chunks_exact(2)) {
         *slot = i16::from_le_bytes([chunk[0], chunk[1]]);
     }
-    frame.a0 = crate::pwmdac::enqueue(&samples[..count]) as u64;
+    frame.a0 = crate::pwmdac::enqueue(&samples[..count], hint) as u64;
 }

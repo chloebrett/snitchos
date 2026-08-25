@@ -1,7 +1,20 @@
 # Exclude kernel crates from mutation — they target RISC-V (no_std) and
 # cannot be compiled or tested on the host. Use `cargo xtask mutants`
 # (which passes -p collector -p protocol) rather than bare `cargo mutants`.
-exclude_globs = ["kernel/**"]
+#
+# `snemu-wasm/src/shell.rs` is the `#[wasm_bindgen]` boundary. It compiles for the
+# host, but nothing on the host *calls* it: its only callers are the `wasm32` tests
+# in `snemu-wasm/tests/wasm.rs`, which run under `wasm-pack test --node` and not in
+# any harness cargo-mutants drives. Every mutant there is reported missed for that
+# reason alone, which is noise rather than signal — the same situation as the kernel
+# crates and stitch's `RuntimePlatform` below.
+#
+# What makes this safe rather than a hole: the shell is *required* to hold no logic,
+# and that requirement is enforced by tests, not by intent. See
+# `shell::tests::the_bindgen_layer_contains_no_control_flow` — if a decision ever
+# lands in this file the guard fails, and the fix is to move it into `budget`,
+# `cursor` or `telemetry`, all of which are mutated normally.
+exclude_globs = ["kernel/**", "snemu-wasm/src/shell.rs"]
 
 # The warned_no_hello flag gates a one-shot stderr warning; testing it
 # would require capturing stderr. Not worth the complexity.

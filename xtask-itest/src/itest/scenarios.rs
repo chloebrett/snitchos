@@ -1379,6 +1379,67 @@ fn kvetch_checksum(bytes: &[u8]) -> i64 {
 /// kernel counter — so one forward pass sets a flag for each and completes when both
 /// are seen. Under snemu the synthetic PWMDAC accepts the writes; `--audio-out` is
 /// the by-ear proof.
+/// The under-run observable, watched *failing* — the negative control for `XRun`.
+///
+/// `workload=glitch-starve` primes the DAC ring with a few milliseconds of samples,
+/// declares more are coming, then abandons the stream. Every audio deadline after the
+/// ring drains is a genuine missed feed, so `snitchos.audio.xruns_total` must climb.
+///
+/// **Why this scenario is the point of the increment.** Until the stream-active signal
+/// landed, `AUDIO_ACTIVE` was never set true by anything: an empty ring always decoded
+/// as idle silence, so the under-run branch was live code with no reachable path. The
+/// counter, the frame and the metric all existed and none of them could ever move. A
+/// real-time observable nobody has watched fail is indistinguishable from a healthy
+/// system — so the assertion that matters is not "audio plays", it is "audio *fails*
+/// and says so".
+///
+/// Asserts the `AudioXRun` frame too, not just the metric: the counter is the running
+/// total the heartbeat drains, while the frame carries the per-heartbeat delta, and
+/// they travel by different paths (`counter::drain_all` vs `drain_pending_xruns`).
+/// Only the frame proves the IRQ-detected fault got out of IRQ context.
+pub fn glitch_starve_underruns(h: &mut View) -> Result<(), String> {
+    let seen_primed = core::cell::Cell::new(false);
+    let seen_xrun_metric = core::cell::Cell::new(false);
+    let seen_xrun_frame = core::cell::Cell::new(false);
+    h.wait_for(SEC * 30, |f, strings| {
+        match f {
+            OwnedFrame::Metric { name_id, value, .. } if *value >= 1 => {
+                match strings.get(name_id).map(String::as_str) {
+                    Some("snitchos.starve.primed_total") => seen_primed.set(true),
+                    Some("snitchos.audio.xruns_total") => seen_xrun_metric.set(true),
+                    _ => {}
+                }
+            }
+            OwnedFrame::AudioXRun { .. } => seen_xrun_frame.set(true),
+            _ => {}
+        }
+        seen_primed.get() && seen_xrun_metric.get() && seen_xrun_frame.get()
+    })
+    .ok_or_else(|| {
+        // Name which of the three arrived. "Nothing happened" is the least useful
+        // thing a real-time test can say, and the three have genuinely different
+        // causes: no prime means the cap or the syscall was refused, no metric means
+        // the drain never saw an active stream, and metric-without-frame means the
+        // fault was counted but never escaped IRQ context.
+        format!(
+            "glitch-starve did not reach all three signals within 30s \
+             (primed={}, xruns_total={}, AudioXRun frame={}). \
+             No `primed_total`: the probe never got its AudioSink (not at \
+             delegated_handle(1)) or AudioEnqueue refused the a3 stream hint. \
+             Primed but no `xruns_total`: the stream-active signal is not reaching the \
+             drain — AUDIO_ACTIVE is still false, so an empty ring decodes as Idle and \
+             the under-run path stays unreachable, which is exactly the dormancy this \
+             scenario exists to prevent regressing. \
+             Metric but no frame: `drain_pending_xruns` is not emitting from the \
+             heartbeat.",
+            seen_primed.get(),
+            seen_xrun_metric.get(),
+            seen_xrun_frame.get()
+        )
+    })?;
+    Ok(())
+}
+
 pub fn glitch_beep_plays(h: &mut View) -> Result<(), String> {
     let seen_plays = core::cell::Cell::new(false);
     let seen_samples = core::cell::Cell::new(false);

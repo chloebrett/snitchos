@@ -589,6 +589,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::BadgeHandout
             | WorkloadKind::Fs
             | WorkloadKind::GlitchBeep
+            | WorkloadKind::GlitchStarve
             | WorkloadKind::ViewDemo
             | WorkloadKind::Shell
             | WorkloadKind::FrameOom
@@ -710,6 +711,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::BadgeHandout
                     | WorkloadKind::Fs
                     | WorkloadKind::GlitchBeep
+                    | WorkloadKind::GlitchStarve
                     // smp4 places its own workers on every secondary (below);
                     // it doesn't want the single-hart demo probe on hart 1.
                     | WorkloadKind::Smp4

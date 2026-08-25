@@ -20,6 +20,48 @@
 //!
 //! See `plans/glitch-v2-async-ring.md`.
 
+/// What the producer says about the batch it is enqueuing — the signal that arms the
+/// under-run observable.
+///
+/// Emptiness alone cannot distinguish "the producer is done" from "the producer is
+/// late", and only the producer knows which. `AudioEnqueue` carries this in `a3`, and
+/// the kernel stores [`keeps_stream_active`](StreamHint::keeps_stream_active) for the
+/// drain to read.
+///
+/// **`Final` is zero on purpose.** It is both the natural default and exactly the
+/// behaviour that existed before the hint did, so every caller predating it keeps
+/// working unchanged — the same additive discipline as the runtime-workload registry.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum StreamHint {
+    /// This batch completes the stream (or stands alone). Once it drains, silence is
+    /// expected, not a fault.
+    Final,
+    /// More samples are coming. Until the producer says otherwise, a dry ring means a
+    /// missed feed deadline.
+    More,
+}
+
+impl StreamHint {
+    /// Decode the syscall's raw `a3`. `None` for anything unrecognised — the caller
+    /// refuses rather than coercing, so a stray value cannot arm the real-time fault
+    /// path by accident.
+    #[must_use]
+    pub fn from_arg(arg: usize) -> Option<StreamHint> {
+        match arg {
+            0 => Some(StreamHint::Final),
+            1 => Some(StreamHint::More),
+            _ => None,
+        }
+    }
+
+    /// Whether a stream remains open after this batch — the `active` input to
+    /// [`drain_tick`](SampleRing::drain_tick).
+    #[must_use]
+    pub fn keeps_stream_active(self) -> bool {
+        matches!(self, StreamHint::More)
+    }
+}
+
 /// What one drain tick did. The drain feeds exactly one sample per audio deadline
 /// (the resolved multiplex-`mtimecmp` cadence): a non-empty ring yields the sample to
 /// write, an empty ring splits on whether a stream is *active* — an active stream
@@ -130,6 +172,34 @@ impl<const N: usize> Default for SampleRing<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The producer's own words decide whether silence is a fault — and `0` must keep
+    /// meaning what it meant before the hint existed.
+    ///
+    /// Every `AudioEnqueue` caller that predates this passes `a3 = 0`. If that came to
+    /// mean "streaming", each ordinary play would end in a spurious under-run and the
+    /// feed would never idle back off — the observable would be useless the day it was
+    /// armed.
+    #[test]
+    fn a_final_batch_leaves_a_dry_ring_idle_but_a_streaming_one_underruns() {
+        let mut r = SampleRing::<4>::new();
+        assert_eq!(r.push_slice(&[7]), 1);
+
+        assert_eq!(r.drain_tick(StreamHint::Final.keeps_stream_active()), DrainOutcome::Fed(7));
+        assert_eq!(r.drain_tick(StreamHint::Final.keeps_stream_active()), DrainOutcome::Idle);
+        assert_eq!(r.drain_tick(StreamHint::More.keeps_stream_active()), DrainOutcome::Underrun);
+    }
+
+    /// A hint the kernel does not recognise is refused, never rounded to a meaning.
+    /// Coercing "any nonzero" to *streaming* would let a caller arm the real-time
+    /// fault path by passing garbage.
+    #[test]
+    fn an_unrecognised_stream_hint_decodes_to_nothing() {
+        assert_eq!(StreamHint::from_arg(0), Some(StreamHint::Final));
+        assert_eq!(StreamHint::from_arg(1), Some(StreamHint::More));
+        assert_eq!(StreamHint::from_arg(2), None);
+        assert_eq!(StreamHint::from_arg(usize::MAX), None);
+    }
 
     #[test]
     fn a_fresh_ring_is_empty() {

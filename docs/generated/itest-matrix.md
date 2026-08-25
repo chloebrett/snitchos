@@ -37,6 +37,7 @@
 | fs-workload | fs | wfi | userspace, ipc |
 | fs-write-read | fs | wfi | userspace, ipc |
 | glitch-beep-plays | glitch-beep | cpu | audio |
+| glitch-starve-underruns | glitch-starve | cpu | audio |
 | heap-grows-on-demand | heap-grow | wfi | userspace |
 | heap-oom | heap-oom | cpu | heap, oom |
 | supervisor-detects-and-kills-a-hung-service | hung-detect | cpu | userspace |

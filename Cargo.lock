@@ -1784,6 +1784,8 @@ name = "snemu-wasm"
 version = "0.0.1"
 dependencies = [
  "protocol",
+ "serde",
+ "serde_json",
  "snemu",
  "wasm-bindgen",
  "wasm-bindgen-test",

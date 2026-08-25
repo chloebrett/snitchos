@@ -231,13 +231,15 @@ pub fn train<G: Gemm + Sync>(
 ) -> Model {
     let model_config = config.rung.config();
     let mut weights = pseudo_random_weights(model_config.param_count(vocab), config.seed);
+    // No `learning_rate` here on purpose: the loop calls `set_learning_rate`
+    // with `learning_rate_at(step)` before every `step()`, so any value passed
+    // in would be overwritten before it was ever used. Setting it anyway would
+    // give the schedule two apparent sources of truth, only one of which is
+    // real. Surfaced by a surviving mutant that no test could have killed,
+    // because deleting the line changes nothing.
     let mut optimizer = AdamW::new(
         weights.len(),
-        AdamWConfig {
-            learning_rate: config.learning_rate,
-            weight_decay: config.weight_decay,
-            ..AdamWConfig::default()
-        },
+        AdamWConfig { weight_decay: config.weight_decay, ..AdamWConfig::default() },
     );
 
     let started = Instant::now();
@@ -639,6 +641,44 @@ mod tests {
             score(&model, &tokens, config, &NaiveGemm),
             reported[0].expect("the first report carries a held-out loss"),
             "the scorer must be the trainer's own held-out pass, bit for bit"
+        );
+    }
+
+    /// `weight_decay` is a real parameter and must reach the optimizer.
+    ///
+    /// Nothing else exercises it: there is no `--weight-decay` flag, every
+    /// config in the suite takes the default, and `AdamWConfig`'s own default
+    /// happens to be the same 0.01 — so dropping it from the optimizer's
+    /// construction changed nothing observable and a surviving mutant sat there
+    /// looking equivalent. It is not equivalent, only unexercised, which is a
+    /// gap rather than a fact about the code.
+    ///
+    /// `warmup_steps: 1` because the default 100-step warmup holds the learning
+    /// rate at zero for both steps of a `tiny` run, and decoupled weight decay
+    /// scales with the learning rate — so at warmup the two runs really would
+    /// be identical, for a reason that has nothing to do with plumbing.
+    #[test]
+    fn the_configured_weight_decay_reaches_the_optimizer() {
+        let tokens: Vec<u16> = (0..64u16).map(|token| token % 16).collect();
+        let base = TrainingConfig { warmup_steps: 1, ..tiny(0) };
+
+        let trained_with = |weight_decay| {
+            train(
+                &tokens,
+                &[],
+                16,
+                TrainingConfig { weight_decay, ..base },
+                &NaiveGemm,
+                |_| {},
+            )
+            .weights()
+            .to_vec()
+        };
+
+        assert_ne!(
+            trained_with(0.01),
+            trained_with(0.5),
+            "changing weight_decay must change the trained weights"
         );
     }
 
