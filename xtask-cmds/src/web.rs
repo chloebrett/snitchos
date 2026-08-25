@@ -264,25 +264,76 @@ fn e2e() -> ExitCode {
     }
 }
 
-/// Run a yarn script in `web/`, reporting the failure the way a first-time reader
-/// needs rather than as a bare non-zero exit.
+/// Whether a `yarn --version` string is a Yarn this project can use.
 ///
-/// Yarn 4 is pinned by `packageManager` and resolved through corepack. The usual way
-/// this fails is a stale global Yarn Classic shadowing corepack's shim, which is
-/// silent — it ignores `packageManager` *and* `.yarnrc.yml` and produces a v1
-/// lockfile — so the hint names it.
+/// **This exists because the wrong Yarn does not fail — it succeeds differently.**
+/// Yarn Classic (1.x) ignores `packageManager`, ignores `.yarnrc.yml` (so
+/// `nodeLinker` never applies), rewrites `yarn.lock` into the v1 format, and then
+/// runs the build perfectly well. Nothing errors; the reproducibility guarantees
+/// simply stop holding. It has silently rewritten this project's lockfile twice.
+///
+/// The trap is ordinary rather than exotic: `corepack enable` installs its shims
+/// into the *active* Node's bin directory, so a machine whose default Node predates
+/// the one you enabled corepack under still resolves a global
+/// `/usr/local/bin/yarn` first.
+///
+/// Unparseable output is treated as unsupported. A Yarn that cannot say what it is
+/// has not earned the benefit of the doubt.
+#[must_use]
+pub fn is_supported_yarn(version: &str) -> bool {
+    version
+        .trim()
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 2)
+}
+
+/// `yarn --version` as reported in `web/`, or `None` if it could not be run.
+fn yarn_version() -> Option<String> {
+    let out = Command::new("yarn")
+        .arg("--version")
+        .current_dir(workspace_root().join(WEB_DIR))
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Refuse to run if the `yarn` on `PATH` is one that would quietly do the wrong
+/// thing. Returns `true` when it is safe to proceed.
+fn yarn_is_usable() -> bool {
+    let Some(version) = yarn_version() else {
+        eprintln!(
+            "web: could not run `yarn`.\n\
+             web: needs Node >= 22 with corepack enabled (`corepack enable`)."
+        );
+        return false;
+    };
+    if is_supported_yarn(&version) {
+        return true;
+    }
+    eprintln!(
+        "web: `yarn --version` reports {version}, but this project pins Yarn 4 via \
+         `packageManager`.\n\
+         web: refusing to continue — Yarn Classic does not fail here, it succeeds \
+         differently: it ignores `packageManager` and `.yarnrc.yml`, and rewrites \
+         yarn.lock into the v1 format.\n\
+         web: fix with `corepack enable` under Node >= 22, and remove or shadow any \
+         global yarn (`which -a yarn`)."
+    );
+    false
+}
+
+/// Run a yarn script in `web/`, refusing outright if the wrong Yarn is on `PATH`.
 fn yarn(args: &[&str]) -> bool {
+    if !yarn_is_usable() {
+        return false;
+    }
     match Command::new("yarn").args(args).current_dir(workspace_root().join(WEB_DIR)).status() {
         Ok(s) if s.success() => true,
         Ok(_) => false,
         Err(e) => {
-            eprintln!(
-                "web: running `yarn {}`: {e}\n\
-                 web: needs Node >= 22 and corepack (`corepack enable`). If `yarn \
-                 --version` reports 1.x, a global Yarn Classic is shadowing corepack's \
-                 shim — that build would silently ignore the pinned Yarn 4.",
-                args.join(" ")
-            );
+            eprintln!("web: running `yarn {}`: {e}", args.join(" "));
             false
         }
     }
@@ -291,6 +342,31 @@ fn yarn(args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{fingerprint, manifest_json};
+
+    /// Yarn 4 and anything newer is what the project pins.
+    #[test]
+    fn a_modern_yarn_is_accepted() {
+        assert!(super::is_supported_yarn("4.18.0"));
+        assert!(super::is_supported_yarn("2.4.3"));
+        assert!(super::is_supported_yarn("5.0.0"));
+        assert!(super::is_supported_yarn("  4.18.0\n"), "trailing newline from stdout");
+    }
+
+    /// Yarn Classic is the case this guard exists for. It has rewritten this
+    /// project's lockfile twice without erroring once.
+    #[test]
+    fn yarn_classic_is_refused() {
+        assert!(!super::is_supported_yarn("1.22.18"));
+        assert!(!super::is_supported_yarn("1.0.0"));
+    }
+
+    /// A version string that cannot be parsed gets no benefit of the doubt.
+    #[test]
+    fn unparseable_output_is_refused() {
+        assert!(!super::is_supported_yarn(""));
+        assert!(!super::is_supported_yarn("not a version"));
+        assert!(!super::is_supported_yarn("v4.18.0"), "a leading v is not what yarn prints");
+    }
 
     /// With everything installed the tests must actually run. This is the direction
     /// that matters: the opposite mistake — a policy that always skips — turns the

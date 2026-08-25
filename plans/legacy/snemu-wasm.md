@@ -3,7 +3,7 @@
 **Branch**: main (project works directly on main; the user commits)
 **Status**: Active
 
-Companion to [docs/snemu-wasm-design.md](../docs/snemu-wasm-design.md), which carries
+Companion to [docs/snemu-wasm-design.md](../../docs/snemu-wasm-design.md), which carries
 the rationale and the decisions. This plan is the increments.
 
 The premise, verified live rather than assumed: **`cargo build -p snemu --lib --target
@@ -35,8 +35,15 @@ wall-clock pacing.
   going through unchanged (`~/c/slay/www/main.js` does exactly this); and the guest's
   emoji-width assumption may disagree with xterm.js's, which we cannot fix from the
   host side because the guest already laid the frame out.
-- **Wall-clock pacing.** Named in [docs/scaling-down-snitchos.md](../docs/scaling-down-snitchos.md);
+- **Wall-clock pacing.** Named in [docs/scaling-down-snitchos.md](../../docs/scaling-down-snitchos.md);
   irrelevant to a page that boots, prints, and stops. Milestone 4.
+  **Measured 2026-08-25, and it is worse than "milestone 4" implies: an open tab
+  burns 100.0% of one core, indefinitely, at 11 MIPS of guest throughput.** Not
+  marginal, and not only while booting — the kernel heartbeats forever, so the guest
+  never idles into cheapness. `web/e2e/idle-cost.spec.ts` is the measurement, left
+  **deliberately red** and excluded from the default suite: relaxing its threshold to
+  match the bug would convert the only evidence of it into a green tick. This is now
+  a prerequisite for showing the page to anyone, not a later nicety.
 - **Backend B / any JIT in the browser.** wasm gets Backend A by construction.
 - ~~**A bundler, React, or `viz/` convergence.**~~ **Reversed 2026-08-25.** The
   original reasoning — `wasm-pack --target web` emits an ES module a `<script>` can
@@ -322,7 +329,7 @@ operator set misses.
 **Acceptance criteria**: A pure function turns a bounded stepping run's outcome into a
 status the JS side can branch on — `Running`, `Halted`, `Trapped(reason)` — with the
 instret retired. The budget is denominated in **guest instret, not host step-calls**;
-[snemu-08](../posts/snemu-08-zero-to-a-hundred-in-two-seconds-flat.md) records exactly
+[snemu-08](../../posts/snemu-08-zero-to-a-hundred-in-two-seconds-flat.md) records exactly
 this unit confusion costing real debugging time ("sixty million steps scanned two
 hundred and forty-five million guest instructions"). Do not repeat it.
 **RED**: Tests that a run hitting its budget reports `Running` with the instret spent;
@@ -587,7 +594,14 @@ four criteria assertions, and two are worth more than they look:
   earlier tests' elements.
 - **A stale global Yarn Classic on `PATH` shadows corepack's shim**, and the failure
   is silent: v1 ignores `packageManager` *and* `.yarnrc.yml`, then writes a v1
-  lockfile. `cargo xtask web`'s error path names this specific case.
+  lockfile — and the build still succeeds, so nothing looks wrong. It corrupted this
+  project's lockfile **twice**, the second time after `corepack enable`, because
+  corepack installs its shims into the *active* Node's bin directory and a machine
+  whose default Node is older still resolves the global `yarn` first.
+  A hint was not enough for a failure mode that never errors: `cargo xtask web` now
+  **refuses to run** unless `yarn --version` reports 2.x or newer
+  (`is_supported_yarn`, with tests including Classic and unparseable output).
+  Verified by running it under the shadowing PATH and watching it decline.
 
 #### Artifacts are generated, never committed
 

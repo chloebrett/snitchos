@@ -8,7 +8,7 @@ line falls.*
 Status: **DESIGN** (2026-07-17). Companion to [snemu-design.md](snemu-design.md)
 (the emulator itself, BUILT) and [framebuffer-design.md](framebuffer-design.md)
 (which chose ramfb *for* this path). Implementation plan:
-[plans/snemu-wasm.md](../plans/snemu-wasm.md).
+[plans/legacy/snemu-wasm.md](../plans/legacy/snemu-wasm.md) (complete — milestone 1 shipped 2026-08-25).
 
 ## The finding that reframes the work
 
