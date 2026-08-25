@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use protocol::Frame;
 
 use collector::source::{Source, run_source};
@@ -24,6 +24,10 @@ const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
 /// `--prometheus`'s port); disable with `--no-prometheus`.
 #[derive(Parser)]
 #[command(about, version)]
+// Exactly one source, or none (the default socket). Silent precedence between
+// transports would let `--replay x --udp 9000` discard one without saying so; the
+// group makes that a usage error naming both. `--serial` joins this list in Step 10b.
+#[command(group(ArgGroup::new("source").multiple(false).args(["replay", "udp"])))]
 struct Args {
     /// Print decoded frames to stdout in addition to other outputs.
     #[arg(long)]
@@ -167,3 +171,39 @@ fn print_frame(frame: &Frame<'_>, pretty: bool) {
 }
 
 // Stream-decoding tests moved with the impl to `protocol::stream`.
+
+/// The collector reads from exactly **one** source, and says so when asked for two.
+///
+/// Before `--serial` joins them (Step 10b of `plans/uart-telemetry.md`), resolving
+/// three live transports by silent precedence is a footgun: `--replay boot.bin --udp
+/// 9000` would quietly pick one and discard the other, and the operator's first clue
+/// would be telemetry arriving from somewhere they did not ask for. A usage error
+/// naming both flags is the honest answer.
+#[cfg(test)]
+mod cli_tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn two_sources_at_once_is_a_usage_error() {
+        let Err(err) = Args::try_parse_from(["collector", "--replay", "/rec.bin", "--udp", "9000"])
+        else {
+            panic!("--replay with --udp must be refused, not silently resolved by precedence");
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "wrong error kind — the operator needs to be told the flags conflict: {err}"
+        );
+    }
+
+    #[test]
+    fn each_source_alone_still_parses() {
+        // The conflict must not over-fire. Absence of any source flag is also valid:
+        // that is the live socket, the default.
+        Args::try_parse_from(["collector", "--replay", "/rec.bin"])
+            .expect("--replay alone is a valid source");
+        Args::try_parse_from(["collector", "--udp", "9000"]).expect("--udp alone is a valid source");
+        Args::try_parse_from(["collector"]).expect("no source flag means the default socket");
+    }
+}
