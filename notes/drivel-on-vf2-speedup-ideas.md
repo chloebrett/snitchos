@@ -297,7 +297,7 @@ Semantically identical — `(A ∪ B).is_empty() ⟺ A.is_empty() && B.is_empty(
 byte-exact itest should be unmoved. Expected win: large but order-dependent. `ALL` is
 in discriminant order, which the REPL work already found "front-loads literals (good
 for openers) and keyword operators (bad for continuations)"
-([../plans/repl-completion.md](../plans/repl-completion.md)). Two cheap refinements:
+([../plans/repl-completion.md](../plans/legacy/repl-completion.md)). Two cheap refinements:
 
 - **Ask the drawn token's own class first.** `extends_legally` knows which byte
   sequence it is testing; if that piece lexes to a class, probe it before the walk.
@@ -327,7 +327,7 @@ differs. `Probes::new` lexes the prefix (`oracle.rs:486`) and is rebuilt inside 
 ### 2d. The deeper shape: cost is quadratic in completion length
 
 Every probe parses the **whole** prefix, so per-token cost grows with the prefix and
-a completion is `O(n²)`. [../plans/drivel.md](../plans/drivel.md) already measured
+a completion is `O(n²)`. [../plans/drivel.md](../plans/legacy/drivel.md) already measured
 this on the host at corpus scale — *"~138 s for 8,318 decisions — ~17 ms each … it
 will not scale"* — and names the fix: incremental parsing, or scoring per top-level
 item rather than per file. At a 256-byte REPL buffer this is survivable; it is the
@@ -660,7 +660,7 @@ exactly this. So multi-hart inference is a kernel milestone wearing a model hat.
 ### 4d. int8 is bigger than the plan thinks
 
 The stated target is ballad-class, ~4× less bandwidth, no FP at all. But
-[../plans/drivel.md](../plans/drivel.md)'s own hedge — *"keep the forward pass generic
+[../plans/drivel.md](../plans/legacy/drivel.md)'s own hedge — *"keep the forward pass generic
 over a `Weights` accessor rather than indexing `&[f32]` directly, so int8 arrives as a
 second impl rather than a rewrite"* — **was not honoured**. There is no `Weights`
 trait; `Gemm::sgemm` takes `&[f32]`, `Model::weights()` hands out `&[f32]`, and the

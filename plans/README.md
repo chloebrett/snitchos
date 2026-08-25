@@ -18,9 +18,9 @@ the first is work in progress:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| [In flight](#in-flight) | 16 | Real work, partially done. Only ~8 have moved this month. |
+| [In flight](#in-flight) | 17 | Real work, partially done. Only ~9 have moved this month. |
 | [Not started](#not-started) | 6 | Written down, zero code. A plan is cheap; that's deliberate. |
-| [Done bar a detail](#done-bar-a-detail) | 2 | Delivered; something small or deliberate holds back the archive. |
+| [Done bar a detail](#done-bar-a-detail) | 1 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
 
 ## In flight
@@ -35,6 +35,7 @@ Recently active — the board/network cluster is the current front:
 | [board-bridge.md](board-bridge.md) | Letting an agent drive the real board | Not started; **starts where uart-telemetry step 10 finishes** |
 | [snemu-wasm.md](snemu-wasm.md) | snemu in a browser tab | 1 of 8 criteria (the wasm build agrees with native). Effectively not begun |
 | [stitch-map-you-can-build.md](stitch-map-you-can-build.md) | A `Map` built from runtime data | 8 criteria open; work in flight in `stitch/src/natives.rs` |
+| [kvetch-next-measurements.md](kvetch-next-measurements.md) | What the ladder's nats actually buy | 7 steps, none done. Answers the batch11 gap: a 0.43-nat gain showed **no** perceivable output difference |
 | [stitch-native-tests.md](stitch-native-tests.md) | `test "…" { expect … }` in Stitch | **8 of 9 done.** Increment 9 only: tests never run on target |
 | [glitch-v2-async-ring.md](glitch-v2-async-ring.md) | The async audio RT ring | Increments 1–5 shipped and live end to end. **6–9 remain** — mixing, init-delegated AudioSink, snemu PCM capture, acceptance itests (which is where the dormant XRun observable finally fires) |
 
@@ -70,7 +71,6 @@ Delivered. Each is one small thing from `legacy/`:
 
 | Plan | What holds it back |
 |---|---|
-| [drivel.md](drivel.md) | The candle comparison — "the honest test" — still outstanding |
 | [glitch.md](glitch.md) | v1 complete. **Deliberately unarchived** — [glitch-v2-async-ring.md](glitch-v2-async-ring.md) cites it |
 
 ## Reference, not plans

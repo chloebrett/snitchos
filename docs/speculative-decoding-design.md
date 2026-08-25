@@ -9,7 +9,7 @@ mechanisms that sit underneath it.
 
 Related: [llm-design.md](llm-design.md) (the oracle's four consumers, the VF2
 performance envelope), [babble-design.md](babble-design.md) (the drafter),
-[../plans/drivel.md](../plans/drivel.md) (where the measurement lands).
+[../plans/drivel.md](../plans/legacy/drivel.md) (where the measurement lands).
 
 ---
 

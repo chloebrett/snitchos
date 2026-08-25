@@ -6,7 +6,7 @@
 //! through drift. "babble is rung 0 of the same ladder" stops being a claim in a
 //! doc and becomes a compiled one.
 //!
-//! **The gate metric is held-out masked NLL** (`plans/drivel.md`). At each
+//! **The gate metric is held-out masked NLL** (`plans/legacy/drivel.md`). At each
 //! position of a held-out program the oracle names the legal token classes; a
 //! rung is a distribution over exactly that set; the score is the mean negative
 //! log-likelihood of the class a human actually wrote. Exact, apples-to-apples,

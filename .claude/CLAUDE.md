@@ -243,7 +243,7 @@ cram/         Host-side trainer, hand-written — no ML framework. Backward pass
               AdamW, training loop, and the fast `Gemm` backends (`BlockedGemm`,
               `AccelerateGemm` over Apple AMX). Every backward op is checked
               against finite differences rather than against another
-              implementation; see plans/drivel.md.
+              implementation; see plans/legacy/drivel.md.
 cram-eval/    Host-only. How every rung is scored: the `Predictor` trait (one
               scoring path from babble upward, so rows cannot drift apart),
               held-out masked NLL — **the gate metric** — the held-out loader,

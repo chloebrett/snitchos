@@ -106,7 +106,7 @@ bootstrap table this shortcuts), [stage-0-validator-funnel.md](../stage-0-valida
 (the complete Stage 0 — this borrows its funnel and skips its measurement
 suite), [../docs/llm-design.md](../../docs/llm-design.md) (corpus tiers, the
 diversity axes), [babble.md](babble.md) (Tier-0, the null baseline),
-[drivel.md](../drivel.md) (the rung that consumes the output).
+[drivel.md](drivel.md) (the rung that consumes the output).
 
 ---
 

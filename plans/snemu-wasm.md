@@ -384,6 +384,52 @@ resolves its name through an earlier `StringRegister`.
 **REFACTOR**: Assess.
 **Done when**: All criteria met, mutation report reviewed, human approves commit.
 
+**Outcome (2026-08-25): done. `snemu-wasm/src/telemetry.rs`, 16 tests, no survivors.**
+
+`Decoder` (holds the incomplete tail + the intern table) and `FrameView` (a flat
+projection: kind, resolved name, timestamp, metric value).
+
+Less new machinery than expected, because `protocol::stream::try_decode_frame` already
+exists *for this caller* — its doc says so outright: "a caller holding a **growing
+in-memory** buffer … advancing an offset by the returned count". Worth knowing before
+writing a decoder: the incremental primitive was already there, and corrupt-chunk
+resync came free with it.
+
+Design notes worth keeping:
+
+- **Tests encode through `protocol::wire_encode`**, the same call the kernel makes,
+  rather than hand-rolled byte fixtures. A fixture can encode a fiction; a
+  round-trip through the real encoder cannot.
+- **`FrameView.name` is `Option`, never a stand-in.** An unregistered `StringId`
+  resolves to `None` so the page can distinguish "unnamed" from "not yet known" —
+  rendering the id as if it were a name would be a lie the page cannot detect.
+- **`FrameView` is deliberately lossy.** Twenty-odd wire variants each with a bespoke
+  JS shape is a lot of surface for a boot-log page; `OwnedFrame` remains for whatever
+  milestone 2+ needs.
+
+*Mutation report.* First run on the module: **1 missed, 1 timeout**.
+
+- The timeout was `offset += consumed` → `*=`, which pins the offset at zero and spins
+  `Decoder::push` forever. **A real infinite-loop hazard in production code**, the
+  same class step 3 hit. Same fix: the loop is now `for _ in 0..pending.len()`, which
+  restates its own invariant (every iteration consumes ≥1 byte — a decoded frame
+  includes its terminator, a rejected chunk skips through one), so a correct run never
+  reaches the bound.
+- The miss was the `StringRegister` arm in `FrameView::of`, which resolves a frame's
+  name from its own payload. Deleting it changed nothing *inside* `Decoder::push`,
+  because the table is populated before projection — the masking is the tell that
+  `FrameView::of`'s standalone contract was untested. Fixed with a test that projects
+  a `StringRegister` against a deliberately empty lookup.
+
+Second run: crate-wide **29 mutants, 25 caught, 4 unviable, 0 survivors, 0 timeouts**.
+
+**That is now twice that the `loop` → bounded-`for` change came out of a mutation
+timeout.** Treat it as the pattern rather than two coincidences: any loop in this crate
+whose termination depends on arithmetic being right should state its bound
+structurally, because the failure mode is a frozen tab rather than a stack trace.
+
+**REFACTOR**: assessed, declined.
+
 ### Step 5: The `#[wasm_bindgen]` shell
 
 **Acceptance criteria**: A `Handle` exposes `new(elf: &[u8], ram_bytes: usize)`,

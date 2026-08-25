@@ -1,7 +1,7 @@
 # The grammar mask: turning a token model into a class distribution
 
 **Status:** 📐 **DESIGN — not started.** The missing piece between
-[`cram-eval`](../plans/drivel.md)'s harness and its purpose: today `--eval` can
+[`cram-eval`](../plans/legacy/drivel.md)'s harness and its purpose: today `--eval` can
 print a checkpoint's parse rate but refuses to print its masked-NLL row, because
 no `Predictor` exists for a trained rung.
 

@@ -6,7 +6,7 @@ of the document for the cost of two `cram` runs.
 
 This is the reinforcement-learning / reasoning-data branch of the model ladder.
 Background: [llm-design.md](llm-design.md) (the arc, the rungs, the provenance
-paper), [../plans/drivel.md](../plans/drivel.md) (rung 1, trained, 91% parse),
+paper), [../plans/drivel.md](../plans/legacy/drivel.md) (rung 1, trained, 91% parse),
 [language-design.md](language-design.md) (Stitch itself).
 
 ---

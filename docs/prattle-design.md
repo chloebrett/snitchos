@@ -17,7 +17,7 @@ Related: [generative-ladder.md](generative-ladder.md) (the comments decision
 this branches off — input-only, loss-masked, uniform across rungs),
 [llm-design.md](llm-design.md) (corpus tiers, verification stack, provenance),
 [stim-design.md](stim-design.md) (where captions surface),
-[../plans/drivel.md](../plans/drivel.md) (the training rig prattle reuses).
+[../plans/drivel.md](../plans/legacy/drivel.md) (the training rig prattle reuses).
 
 ---
 

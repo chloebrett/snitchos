@@ -78,7 +78,7 @@ than when it was written. Two specific hooks:
 Related: [../docs/generative-ladder.md](../docs/generative-ladder.md) (the
 bootstrap table, the per-batch report spec, the canon stratum),
 [../docs/llm-design.md](../docs/llm-design.md) (corpus tiers),
-[babble.md](legacy/babble.md) (Tier-0, the null baseline), [drivel.md](drivel.md)
+[babble.md](legacy/babble.md) (Tier-0, the null baseline), [drivel.md](legacy/drivel.md)
 (the rung that consumes what this produces).
 
 **Everything downstream is blocked on this.** The canon in volume (#2) and the

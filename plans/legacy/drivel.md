@@ -1,18 +1,18 @@
 # drivel — the 1M model (TDD plan)
 
 **Status:** ✅ **DELIVERED — the pipe works end to end, and then some.** Rung 1 of the
-[generative ladder](../docs/generative-ladder.md): the first rung with weights.
+[generative ladder](../../docs/generative-ladder.md): the first rung with weights.
 This plan was a **tracer bullet for the training infrastructure**, not an attempt
 to build a useful model. The deliverable was a working pipe — corpus → frozen
 vocab → training rig → checkpoint → evaluation — proved by drivel *marginally*
-outscoring [babble](legacy/babble.md) on one honest metric. A model that is barely
+outscoring [babble](babble.md) on one honest metric. A model that is barely
 better than no model was a complete success here.
 
 It cleared that bar and kept going: drivel trains on the **real** `.st` corpus against a
 frozen 2048 vocab and a frozen 116-program held-out set, and **answers Tab at the
 on-target Stitch prompt**, byte-identical through the emulator, with a vocab-fingerprint
-provenance check and a KV cache ([post 80](../posts/post-80-the-control-passed-twice.md);
-plan archived at [legacy/kvetch-drivel-on-target.md](legacy/kvetch-drivel-on-target.md)).
+provenance check and a KV cache ([post 80](../../posts/post-80-the-control-passed-twice.md);
+plan archived at [legacy/kvetch-drivel-on-target.md](kvetch-drivel-on-target.md)).
 Best checkpoint to date is `drivel-D-b9b10b11` at **2.5309** held-out NLL — deliberately
 *not* promoted to the embedded checkpoint, since `drivel-b9b10-30k` is committed,
 itest-asserted byte-exact and embedded in a booting guest.
@@ -21,16 +21,21 @@ itest-asserted byte-exact and embedded in a booting guest.
 > has largely stopped paying** — +55.7% more corpus bought 0.025 nats against +47%
 > buying 0.111 one batch earlier, a 4.6× collapse in marginal return. The four-batch
 > "volume beats purity" doctrine has hit its knee and has no written successor. See
-> [../notes/batch11-training-findings.md](../notes/batch11-training-findings.md).
+> [../notes/batch11-training-findings.md](../../notes/batch11-training-findings.md).
+
+**Nothing outstanding — archived 2026-08-25.** The two unbuilt items were resolved as
+decisions rather than work: the candle comparison is **retired** (every motive it
+served is gone; see below), and shape distance plus the deferred generation metrics
+are **re-homed** to [kvetch-next-measurements.md](../kvetch-next-measurements.md).
 
 *(The two `**Status: COMPLETE**` markers further down mark individual sections — the
 evaluation harness and the training command — and predate this header.)*
 
-Related: [../docs/llm-design.md](../docs/llm-design.md) (runner, corpus tiers,
-the four oracle consumers), [../docs/generative-ladder.md](../docs/generative-ladder.md)
+Related: [../docs/llm-design.md](../../docs/llm-design.md) (runner, corpus tiers,
+the four oracle consumers), [../docs/generative-ladder.md](../../docs/generative-ladder.md)
 (the rung ladder, vocab freeze law, checkpoint manifest, bootstrap gates),
-[../docs/babble-design.md](../docs/babble-design.md) (the rung-0 baseline),
-[../docs/randomness-and-entropy.md](../docs/randomness-and-entropy.md) (seed
+[../docs/babble-design.md](../../docs/babble-design.md) (the rung-0 baseline),
+[../docs/randomness-and-entropy.md](../../docs/randomness-and-entropy.md) (seed
 discipline — applies to training-data shuffling and sampling alike).
 
 **Independent of babble increments 11–13** (seed derivation, `user/kvetch`, the
@@ -88,7 +93,7 @@ suspicion:
    no lines with training, and alpha-normalized MinHash dedup enforces it.
 2. **Semantics-preserving augmentation** (alpha-renaming, reordering, extract/
    inline) is a validator-checked 2–4× multiplier and is exactly what
-   [llm-design](../docs/llm-design.md) Tier-0 prescribes. Augmented variants of a
+   [llm-design](../../docs/llm-design.md) Tier-0 prescribes. Augmented variants of a
    *training* program must never leak into held-out.
 3. **Heavy repetition** of the real corpus in the mix (the ladder doc's canon
    up-weighting). ≤4 epochs is the published knee; beyond that, expect nothing.
@@ -397,16 +402,20 @@ parsing or scoring per top-level item rather than per file.
   needs the class → vocab-token mask, and a real train/held-out split, which is
   increment 2's. The `--eval` output says so rather than printing a number that
   looks comparable and is not. The mask has its own design —
-  [../docs/grammar-mask-design.md](../docs/grammar-mask-design.md) — because the
+  [../docs/grammar-mask-design.md](../../docs/grammar-mask-design.md) — because the
   conversion from a token distribution to a class distribution is where a
   plausible-but-meaningless number would hide, and because constrained decoding
   wants the same table.
 - **FIM match**: an empty cell, not a deferred metric — see the ladder doc's
   matrix section. FIM is a training-time objective and no rung has been trained
   with it, so there is nothing to measure rather than something skipped.
-- **Shape distance**: not built. The harness prints parse rate with samples
-  beside it; shape statistics against the real corpus are worth having and are
-  not on the gate's path.
+- **Shape distance**: not built, and **re-homed 2026-08-25** to
+  [kvetch-next-measurements.md](../kvetch-next-measurements.md) Step 4, along with the
+  deferred generation metrics above. That plan exists for exactly this gap — free
+  generation parse rate "has now failed four times to resolve checkpoints half a nat
+  apart" — and its scoring ladder starts cheaper than shape distance, at exact-token
+  agreement. The harness prints parse rate with samples beside it; shape statistics
+  against the real corpus were never on the gate's path here.
 
 ## Order of execution (not the increment numbering)
 
@@ -453,7 +462,7 @@ one can win.
 
 This is the same category error as *loss is not comparable across corpora* one
 axis over, and it belongs in the
-[ladder-is-a-matrix](../docs/generative-ladder.md) reading of a checkpoint: the
+[ladder-is-a-matrix](../../docs/generative-ladder.md) reading of a checkpoint: the
 vocab is a variant column, not a free parameter.
 
 Two ways out, and the batch9/batch10 experiment used the first:
@@ -481,7 +490,7 @@ and on-target serving cannot drift.
 **(b) A rung is a config plus a checkpoint, never a crate.** drivel, quip,
 cliché, ballad and saga differ *only* in hyperparameters over one frozen vocab
 and one architecture. This is precisely the
-[runtime-workload](../docs/runtime-workload-selection-design.md) pattern already
+[runtime-workload](../../docs/runtime-workload-selection-design.md) pattern already
 in the kernel: one registry, selected by name, purely additive — adding a rung is
 a `Rung` variant and a checkpoint, not a build variant and not a new crate. There
 is no `drivel-model`; there is `kvetch-model` with `Rung::Drivel`.
@@ -489,7 +498,7 @@ is no `drivel-model`; there is `kvetch-model` with `Rung::Drivel`.
 ### Naming: **kvetch** infers, **cram** trains
 
 `kvetch` is the model subsystem and the on-target inference engine (already
-reserved in [llm-design](../docs/llm-design.md)). **`cram`** is the host-side
+reserved in [llm-design](../../docs/llm-design.md)). **`cram`** is the host-side
 pipeline that produces what kvetch serves — corpus, vocab, training, export.
 
 The name is the plan's thesis in four letters: at this rung we are stuffing a
@@ -635,10 +644,31 @@ training at 50–70% of these figures, so drivel ~15–25 min and ballad ~5–7 
 blocked-NEON backend and was stale by an order of magnitude — as was the ~1
 TFLOP/s guess that replaced it, in the other direction. DIY reaches saga.
 
-**The candle comparison is still outstanding** and remains the honest test of the
-parity claim: AMX at 1–2.5 TFLOP/s against an M1 Max GPU whose fp32 peak is
-~10 TFLOP/s. Plausibly within the 1.5× bar, plausibly not; unmeasured either way,
-and it needs a network fetch to add the dependency.
+**The candle comparison is RETIRED, not outstanding (2026-08-25).** It would have
+tested the parity claim — AMX at 1–2.5 TFLOP/s against an M1 Max GPU whose fp32 peak
+is ~10 TFLOP/s — and it is being dropped rather than deferred, because every motive
+it served is gone and the measurement it could cheaply produce would not answer it:
+
+- **Correctness** was its original job, and gradient checking replaced it — a
+  *stronger* check, per the paragraph below, because it validates against the
+  mathematical definition rather than another implementation's choices.
+- **Capacity** was its second job, via the "DIY dies at cliché" exit criterion —
+  retired one paragraph above: DIY reaches saga.
+- **Relevance**: above quip, compute is not the binding constraint, and batch11 then
+  measured that corpus volume has largely stopped paying too. The live question moved
+  to whether the nats buy anything at all — see
+  [kvetch-next-measurements.md](../kvetch-next-measurements.md).
+- **The seam defeats the measurement.** `Gemm::sgemm` takes host slices in and a host
+  slice out, so *any* backend behind it copies to the device and back per call. That
+  is what makes candle a cheap swap-in — and it is exactly why a candle column in
+  `bench-gemm` would measure per-matmul transfer rather than training throughput,
+  worst of all at drivel's own 128×128 shapes. Answering the real claim needs the
+  forward *and backward* resident on-device, i.e. rebuilding in candle the very pass
+  this project exists to have hand-written.
+
+Cheap middle path, if a second opinion on the hand-written GEMM is ever wanted: add
+`CandleGemm` as a fourth voice in `assert_agrees` (~1–2 hours; the trait is one
+method and `bench-gemm.rs` is 72 lines) and simply not quote its throughput.
 
 **Above quip, compute is not the binding constraint anyway** — the real Stitch
 corpus those rungs need does not exist yet. Training cost stops being the thing
@@ -695,7 +725,7 @@ test fixtures, canon); re-running produces byte-identical splits.
 
 **GREEN**: source walker, the validator funnel (parse → type-check → dedup) from
 the bootstrap's Stage 0, augmentation passes, and a machine-readable per-batch
-report. This is [babble.md](legacy/babble.md)'s deferred increment 9, unblocked — the
+report. This is [babble.md](babble.md)'s deferred increment 9, unblocked — the
 summary format is now being built against a real harness rather than guessed at,
 which is exactly why it was deferred.
 

@@ -371,7 +371,7 @@ pub fn score<G: Gemm + Sync>(
 ///
 /// **Unconstrained** — no oracle mask. That is the whole point of the
 /// grammar-learnability probe: masked output parses by construction and would
-/// measure nothing about the model. See `plans/drivel.md`.
+/// measure nothing about the model. See `plans/legacy/drivel.md`.
 ///
 /// Sampled rather than greedy, because greedy decoding yields exactly one
 /// program however many times you run it, and `parse%` needs a distribution.

@@ -57,7 +57,7 @@ report plausible, similar-looking numbers that were never comparable — and the
 bias favours the arm whose vocab fits the eval set. Fix the vocab across a
 comparison (`--vocab-file`, as the batch9/batch10 arms did) or report
 bits-per-byte, which is denominator-independent. Rationale in
-[drivel.md](../plans/drivel.md).
+[drivel.md](../plans/legacy/drivel.md).
 
 **Most cells are empty, and some are uninhabitable.** babble emits no comments,
 so *(babble-corpus × input-only)* and *(babble-corpus × full)* do not exist.
@@ -267,7 +267,7 @@ rewrite. Four reasons it is more than a joke:
   the generate→validate pipeline as a rejection rule at no cost.
 - *(Considered and rejected: initialising from the existing 30M TinyStories
   checkpoint. The ladder is built from scratch in candle — see
-  [../plans/drivel.md](../plans/drivel.md) — so inheriting that architecture is
+  [../plans/drivel.md](../plans/legacy/drivel.md) — so inheriting that architecture is
   not wanted. The register idea stands on its own; it does not need the
   transfer, and the vocabulary therefore carries no freeze-time urgency beyond
   covering whichever register the corpus adopts.)*
