@@ -7,6 +7,7 @@
 //! [`snemu::machine::Machine`], driving `step()` in a loop. The browser plays the
 //! identical role.
 
+pub mod cursor;
 pub mod probe;
 
 #[cfg(test)]

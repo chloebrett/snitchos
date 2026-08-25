@@ -535,13 +535,18 @@ quip:
 
 | checkpoint | held-out | as sampled | complete items |
 |---|---|---|---|
+| `drivel-all-30k` *(n=20)* | 2.688 | 25% | 25% |
+| `drivel-B-b9b10` *(n=20)* | 2.5584 | 15% | 25% |
 | `drivel-D-b9b10b11` | 2.5309 | **34%** | 35% |
 | `quip-D-b9b10b11-s1` | 2.3244 | 27% | **38%** |
+| `quip-D-60k-s1` | **2.2571** | 32% | 36% |
 
-The two parse measures **disagree on the winner**, and both gaps are ~1σ or less at
-n=100 (se ≈ 4.5pp). So 0.207 nats — 23% lower perplexity, six times what the whole of
-batch11 bought — produces **no resolvable difference in parse rate**, and no obvious
-difference by eye either. quip's samples read marginally more fluently
+**Across the entire range this project has produced — 2.688 → 2.257, a 0.43-nat / 35%
+perplexity improvement — parse rate shows no trend at all.** The three n=100 rows go
+34% → 27% → 32% as loss improves monotonically; the best checkpoint scores *below* the
+worst of them on as-sampled. All differences are ~1σ (se ≈ 4.7pp), the two parse
+measures disagree on the winner, and no comparison is resolvable. Nor is any of it
+visible by eye. quip's samples read marginally more fluently
 (`computeAnglishment`, `trigaction` against drivel's `Peries`, `Handar`) and its code
 blocks are structurally cleaner, but the character is identical: correct shape,
 nonsense semantics. Nothing crossed a threshold.
@@ -573,8 +578,42 @@ constructs that overrun the 96-token budget. If so the sampling window is now to
 short to evaluate quip fairly and this comparison is mildly biased against it. Raising
 `--samples` will not fix that; raising the sample *length* would.
 
-This is the third time in this study that eyeballing samples failed to track the gate
+quip@60k's best sample is the most syntactically sophisticated line any rung here has
+produced — a fully annotated signature with generics, an arrow type and a lambda body:
+
+```
+isSipVol(state: ElevatorState, categories: List<Board>, w: Window) -> Bool =
+    any(steps, p -> p.base == h)
+```
+
+and it is still semantically empty: the parameters go unused, `steps` and `h` are
+undefined, the name means nothing. Its seed-2 "parse" is comments only.
+
+This is the fourth time in this study that reading samples failed to track the gate
 metric — see also the drivel three-way above, where the ranking came out backwards.
+
+### What that implies, and how to tell which
+
+0.43 nats of measured improvement, no perceivable change in output. Two readings, with
+very different consequences:
+
+- **Threshold not reached.** Every rung here is in "correct shape, no meaning"
+  territory; semantic coherence appears further up the ladder. Loss tracks real
+  progress toward it, invisibly. → climb to cliché.
+- **The metric and the product have drifted apart.** Held-out NLL over free text is
+  dominated by the ~46% of tokens that are English comments — which a 3M model cannot
+  model and which do not matter for Tab completion. The nats may be going into prose.
+
+**These are cheaply distinguishable, with no retraining:** score the existing
+checkpoints' held-out NLL on *comment-stripped* held-out text. If quip's advantage over
+drivel survives on code-only text, the metric is sound and we are pre-threshold. If it
+shrinks, a large share of the 0.43 nats bought English.
+
+Either way the standing gap is that **nothing measures the actual task.** Free-generation
+parse rate is not Tab completion. The eval this needs is prefix-shaped: take a held-out
+program, cut it, ask for the continuation, and score whether it matches, parses, or
+typechecks in context. Until that exists, "is the model better *for what it is for*"
+is unmeasured.
 
 ### quip at 60k — converged, and the noise is not what I said it was
 

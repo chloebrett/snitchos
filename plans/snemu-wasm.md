@@ -247,6 +247,9 @@ plus the `wasm-bindgen` CLI, and the local Node 16 is too old (the toolchain emi
 `externref`; Node 24 works). Run it by hand for now:
 `PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH" wasm-pack test --node snemu-wasm`.
 Wiring it into the gate needs a decision about that toolchain dependency.
+**Decided 2026-08-11: later.** It stays a manual check for now rather than putting a
+Node version floor on `cargo xtask test`; revisit once the page exists and the wasm
+side is carrying real logic.
 
 ### Step 2: A pure drain cursor over cumulative device output
 
@@ -264,6 +267,35 @@ drains equals the buffer.
 matters.
 **REFACTOR**: Assess only if it adds value.
 **Done when**: All criteria met, mutation report reviewed, human approves commit.
+
+**Outcome (2026-08-11): done. 7 tests, no survivors.**
+
+`Cursor { consumed: usize }` with `drain<'a>(&mut self, buf: &'a [u8]) -> &'a [u8]`,
+in `snemu-wasm/src/cursor.rs`. One design point the plan did not anticipate: `drain`
+is **total**, because a *shrinking* buffer is reachable by design rather than
+paranoia. The page is meant to grow a control that reboots into a different
+`workload=`, and a new `Machine` starts with an empty output buffer; `&buf[consumed..]`
+from a stale offset would panic, and a panic inside a `requestAnimationFrame` callback
+is a dead tab. So it clamps and re-syncs, and a test names that scenario.
+
+*Mutation report.* `cargo mutants -p snemu-wasm --file "**/cursor.rs"` found **3
+mutants, 3 caught** — but all three were whole-body return replacements
+(`Vec::leak(vec![0])` and friends). It generated nothing for the interesting boundary,
+because it does not mutate arbitrary method calls like `.min()`. The automated score
+was therefore not evidence about the thing the plan flagged, so the three that matter
+were applied by hand and each confirmed killed:
+
+| mutation | outcome |
+|---|---|
+| `.min()` → `.max()` | killed by 4 tests, incl. the shrink case |
+| `self.consumed = buf.len()` → `= start` | killed by 4 tests |
+| `consumed.saturating_sub(1)` (the off-by-one) | killed by 4 tests |
+
+Worth carrying into steps 3–5: a green `cargo mutants` run on a small pure type here
+is weak evidence on its own. Read the mutant *list*, and hand-apply what the tool's
+operator set misses.
+
+**REFACTOR**: assessed, declined — the body is three lines and the clamp is the point.
 
 ### Step 3: A pure step-budget outcome type
 
@@ -360,10 +392,14 @@ commit.
   So: prefer a `cargo xtask web` verb that builds and stages both, and — whichever way
   the commit-or-generate call goes — **the page must show the kernel build's
   fingerprint**, which is why that is now an acceptance criterion rather than a nicety.
+  **Decided 2026-08-11: `cargo xtask web` it is** — build and stage the kernel ELF and
+  the wasm module next to the page, with the fingerprint displayed. Not committed
+  artifacts.
 - **Should the page drive `workload=` selection?** `dtb.rs` already patches bootargs in
   a firmware role, so a `<select>` that reboots into `workload=smp` is nearly free and
   is a genuinely good demo. Tempting scope creep; decide explicitly rather than
-  drifting into it.
+  drifting into it. (Step 2 already paid part of its cost: `Cursor::drain` is total so
+  that swapping in a fresh `Machine` cannot panic the rAF loop.)
 - ~~**Is `snemu` missing from `run_clippy`'s `-p` list deliberate?**~~ Settled: it was
   an oversight, and all three gate lists are metadata-derived now. `snemu-wasm` needs no
   clippy-list edit — only the `MUTANT_CRATES` entry noted in the quality gate below.

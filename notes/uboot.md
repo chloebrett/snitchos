@@ -20,6 +20,30 @@ Bisect with a reset while attached: **seeing the SPL/OpenSBI banner means the ca
 port are good and the fault is ours.** Until you have that banner, nothing about the
 kernel is implicated — U-Boot runs before `booti`.
 
+Host side, first — the board fetches *from your Mac*, so something has to be serving.
+From the repo root (where `cargo xtask image` drops `snitchos.img`):
+
+```
+sudo dnsmasq --enable-tftp --tftp-root="$(pwd)" --port=0 --no-daemon --log-queries
+```
+
+`--port=0` switches dnsmasq's DNS half off, so it is TFTP-only and won't fight anything
+already on 53. `--no-daemon --log-queries` keeps it in the foreground logging every
+request — a fetch that never arrives is then visible on the host instead of merely
+absent on the board.
+
+**`ICMP destination unreachable (port unreachable)` means the network is fine and the
+server isn't running.** The host *replied*; that reply is itself proof it's reachable
+and has nothing bound to UDP 69, so the board, the cable and `serverip` are all
+exonerated. A silent `Request timeout` with no ICMP is the opposite fault — wrong
+`serverip`, wrong subnet, no route. Confirm the address with `ipconfig getifaddr en0`;
+a Mac on a VPN can hold several `192.168.x` addresses and only the one on the board's
+subnet works.
+
+macOS's built-in `tftpd` is the other option, but it serves `/private/tftpboot` and
+nothing else — the image has to be copied there every build, which is why this note
+uses dnsmasq.
+
 U-Boot, from fresh:
 ```
 dhcp
