@@ -4,8 +4,15 @@
 agent (or a human at a REPL) drive the physical VisionFive 2: build an image, boot it,
 send input, read back *structured* output, decide, and repeat — closing the iteration
 loop on real silicon instead of a human relaying the serial console. This is a design
-(the shape and the rationale); the TDD-decomposed increments become a
-`plans/board-agent-bridge*.md` plan later.
+(the shape and the rationale).
+
+**Plan:** [../plans/board-bridge.md](../plans/board-bridge.md) decomposes Piece 1 (the
+bridge + `exec`) and Piece 2's L0 (SBI SRST reboot). Piece 3 — the liveness snapshot
+and kernel watchdog — is deliberately left out of that plan and wants its own; it is
+observability work that stands on its own merits, and nothing in Piece 1 depends on it.
+The prerequisite for both is **Step 10** of
+[../plans/uart-telemetry.md](../plans/uart-telemetry.md) (the collector `--serial`
+source), which is already written and is the last item on B3/M2's critical path.
 
 The thesis: the same observability that makes SnitchOS worth building — structured
 frames, per-task telemetry — is exactly what an agent needs to iterate on hardware. If

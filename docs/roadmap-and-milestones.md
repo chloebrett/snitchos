@@ -88,6 +88,8 @@ Stay RV64GC — the decisive lever is **not** porting to aarch64. HAL device-cla
 ## Networking — smoltcp over virtio-net / dwmac
 The IP stack reuses cleanly (smoltcp, no_std); a raw-TCP "network REPL" is the cheap interaction path; multiplayer rides this. (No SSH — it overshoots into std+tokio.)
 
+**Getting off the cable — the agreed ladder (2026-08-25).** "Drive the board over a network" and "the board speaks IP" are different goals with wildly different costs, so they are sequenced rather than conflated: **(1)** the host bridge — `cargo xtask board exec`, all host-side ([../plans/board-bridge.md](../plans/board-bridge.md) Phase 1); **(2)** an **ESP32 as the UART transport**, which untethers the laptop with *no kernel code at all* (Phase 2) and doubles as the de-risking exercise for the arcade's ESP32+Bluepad32 controller bridge; **(3)** the JH7110 GMAC driver ([../plans/vf2-gmac-driver.md](../plans/vf2-gmac-driver.md)), which is where the milestone and all the hardware risk actually live. Steps 1→2 share code; 2→3 shares only tooling — the ESP32 makes the GMAC's bring-up loop far cheaper but retires none of its work.
+
 ## WASM — SnitchOS in a browser tab
 The portability payoff: the unmodified kernel in a wasm RISC-V emulator (ports the *guarantees*) and/or the portable upper half compiled to `wasm32` (ports the *experience*); shared sessions over a relay. "Click → SnitchOS boots in your tab," and the portfolio-homepage showpiece.
 

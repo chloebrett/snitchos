@@ -476,8 +476,15 @@ impl WorkloadKind {
 }
 
 /// Where the kernel's human log output goes, selected by the `console=` bootarg.
-/// Orthogonal to [`WorkloadKind`] — a board boots e.g. `workload=stitch-repl
-/// console=frames`. See `docs/uart-telemetry-design.md` Decision 4.
+/// Orthogonal to [`WorkloadKind`] in the parser — any pairing is accepted, e.g.
+/// `workload=init console=frames` for a headless board on one cable.
+///
+/// Orthogonal is not *independent*, though: pairing [`Frames`](Self::Frames) with a
+/// [console-owning workload](WorkloadKind::owns_console) is legal and almost never
+/// what you want. See that variant's note. An interactive board session is
+/// `console=text`; `owns_console` is what keeps it quiet, not the mode.
+///
+/// See `docs/uart-telemetry-design.md` Decision 4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConsoleMode {
     /// Human-readable text on the UART — the default. A dumb terminal (`screen`)
@@ -487,6 +494,12 @@ pub enum ConsoleMode {
     /// Every post-init kernel log line becomes a `Frame::Log` on the telemetry
     /// wire, which the collector renders. One content type on the wire — the
     /// board's one-cable telemetry mode.
+    ///
+    /// **Takes userspace output with it.** `ConsoleWrite` reuses the kernel's
+    /// `print!` path (`kernel/src/syscall/console.rs`), so this diverts a REPL's
+    /// prompt and results to the wire too — on a dumb terminal that is
+    /// indistinguishable from a dead board. Correct when the collector is
+    /// reading; wrong for a `screen` session.
     Frames,
 }
 

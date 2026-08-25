@@ -6,8 +6,17 @@
 > serial line. It builds on the UART work in
 > [uart-telemetry-design.md](uart-telemetry-design.md) — same wire *payload*,
 > a different envelope — and it is the transport a real production node would
-> actually use. There is **no network code in the tree today**; this is
-> greenfield.
+> actually use.
+>
+> **Status update (2026-08-25):** this note was written greenfield, and the
+> "no network code in the tree today" it opened with is no longer true — PRs 1–7
+> of [../plans/network-telemetry.md](../plans/network-telemetry.md) shipped the
+> packet layer, the sink, the `net=` bootarg, the virtio-net driver, the snemu
+> device model, a gated itest and the collector's `--udp` source. What remains
+> unbuilt is the **JH7110 GMAC driver**
+> ([../plans/vf2-gmac-driver.md](../plans/vf2-gmac-driver.md)) and, still
+> deliberately out of scope, the inbound path — scoped in the addendum below.
+> The decisions below are as-designed and were not revised after the build.
 
 ## What this is actually about
 
@@ -175,11 +184,16 @@ M2 (B3) puts telemetry on a UART; M2.5 puts it on UDP. These are **not** an
 either/or — they are two `FrameSink` impls selected at boot, and UDP reuses B3's
 framing/resync work wholesale:
 
-- **What UDP dissolves that UART couldn't:** the throughput ceiling (B3 measured
-  ~60 KB/s of telemetry against a 115200 UART's 11.5 KB/s — a 5× overrun forcing
-  sampling) and the single-cable console-ownership problem (B3 Decision 4). GbE
-  has ~200× headroom; the constraint moves entirely off bandwidth and onto
-  driver correctness.
+- **What UDP dissolves that UART couldn't:** the throughput ceiling and the
+  single-cable console-ownership problem (B3 Decision 4). **Corrected 2026-08-25:**
+  this bullet originally cited "~60 KB/s, a 5× overrun forcing sampling". B3 Step 6
+  later measured steady-state properly (two-point delta, boot transient excluded)
+  and found `init` **≈ 5.5 KB/s** and `demo` **≈ 2.7 KB/s** against 115200's
+  ~11.5 KB/s — the ~60 KB/s was boot-transient-dominated, and there is **no
+  overrun**. The ceiling is real but it binds on *growth*, not today: `init`
+  already uses about half the line, so more tasks, denser spans, or the console
+  sharing the wire eat the remaining headroom. GbE moves the constraint off
+  bandwidth entirely and onto driver correctness.
 - **What UDP keeps from UART:** the wire payload (Decision 2), the `FrameSink`
   seam, the drop-and-count discipline, the "no wait-on-collector; reset is the
   sync point" model (a board can't block on a host consumer regardless of
@@ -225,9 +239,10 @@ kernel-boot alongside the existing bootarg arms.
 
 ## Throughput — a non-issue, which is the point
 
-The VF2's GMAC is Gigabit; even 100 Mbit is ~12 MB/s. Against B3's measured ~60
-KB/s of telemetry that is ~0.5% utilisation. The 5× overrun that forced sampling
-on a 115200 UART simply does not appear. This is *why* Ethernet supersedes the
+The VF2's GMAC is Gigabit; even 100 Mbit is ~12 MB/s. Against B3 Step 6's measured
+steady-state telemetry (`init` ≈ 5.5 KB/s) that is ~**0.05%** utilisation — three
+orders of magnitude of headroom. The ~50%-of-the-line the same stream costs on a
+115200 UART, which leaves no room for telemetry to grow, simply does not appear. This is *why* Ethernet supersedes the
 UART cable question: bandwidth stops being a design constraint and the only hard
 problem left is driving the NIC correctly.
 
@@ -236,7 +251,8 @@ problem left is driving the NIC correctly.
 In: egress UDP telemetry to **one static neighbour**, batched COBS frames,
 header checksums, drop-and-count. Out, deliberately:
 
-- inbound / RX command path (actor-model future, an authority boundary)
+- inbound / RX command path (actor-model future, an authority boundary) — still
+  out, but **scoped as a gap list in the addendum below**
 - TCP, DHCP, ARP, ICMP/ping, IP fragmentation, IPv6
 - multiple neighbours / routing
 - checksum offload, interrupt coalescing tuning, and other NIC niceties
@@ -253,6 +269,114 @@ Each exclusion is a place the design can grow later without reshaping the trait.
   the board's reality.
 - `kernel-devices::virtio` — the virtqueue layer virtio-net reuses; no change,
   just a second consumer beside virtio-console.
+
+## Addendum (2026-08-25) — the inbound path (RX), scoped
+
+The exclusion list above is still the design. This section exists because a
+concrete goal — *"drive the VisionFive 2 over a network: type at it, read its
+console, read its telemetry"* — turns exclusion #1 from a deferral into a work
+item, and a one-line deferral is not a scope. Nothing here is adopted; this is
+the gap list a future plan would cost out, recorded while the reasoning is fresh.
+
+### First: the *output* half is already done, and it is easy to miss
+
+Two shipped features compose into something neither of them advertises.
+`console=frames` (B3/M2) routes every post-init kernel `println!` **and** every
+userspace `ConsoleWrite` — userspace stdout goes through `print!`, see
+`kernel/src/syscall/console.rs` — into `Frame::Log`, which
+`kernel/src/device/console.rs::emit_console_frame` hands to `tracing::emit_log`,
+which writes to **whichever `FrameSink` is installed**. Under `net=` that sink is
+`UdpFrameSink`.
+
+So `net=… console=frames` already carries the guest's console output over UDP
+today, on QEMU and snemu, with no new code. The console half of "control it over
+a network" is not missing — **only the inbound half is.** Anyone scoping this
+work should confirm that composition first rather than budgeting for it.
+
+### The gap list
+
+Each item names where it would land, so the eventual plan starts from evidence
+rather than a blank page.
+
+1. **`NetDevice` is send-only.** `kernel-net/src/lib.rs` — the trait is
+   `fn send(&mut self, frame: &[u8]) -> Result<(), TxFull>` and its doc comment
+   says "Egress-only: the telemetry stack never receives." Adding `recv` reshapes
+   the one trait Decision 3 calls "the whole architectural bet", so it deserves a
+   deliberate choice: extend `NetDevice`, or add a peer `NetReceive` trait that
+   only the console path requires. The latter keeps the telemetry stack honest
+   about never receiving.
+2. **The virtio-net RX queue is configured but never serviced.**
+   `kernel/src/device/virtio_net.rs` sets up `RX_QUEUE` **solely** so the device
+   reaches `DRIVER_OK` — it is never filled with buffers and never drained, and
+   its comment says so ("We never receive (telemetry is egress-only)"). This is
+   the smallest real increment available and it is host-testable in
+   `kernel-devices` over the existing `MmioTransport` mock, exactly as the TX side
+   was.
+3. **No delivery mechanism.** TX is a blocking poll until the device drains. RX
+   needs either a NIC interrupt through the PLIC or a heartbeat-tick poll. The
+   UART's `drain_rx` (timer handler, hart 0, ~every tick) is the working precedent
+   for the polled shape, and the cheaper of the two.
+4. **No inbound demux.** Nothing in the tree parses an inbound anything: is this
+   datagram for our port, is the payload console input, what is its framing.
+5. **Console injection is cheap — and the ring is already multi-producer.** This
+   is the one item that is *easier* than it looks. `CONSOLE_RX`
+   (`kernel/src/device/console.rs`) is a `Mutex<ConsoleRing<256>>` whose comment
+   states that concurrent drainers serialize on the lock and "multi-producer is
+   safe". A network producer pushes into the same ring and `ConsoleRead` cannot
+   tell the difference. **The constraint to carry forward:** that mutex is safe in
+   the timer handler only because every holder runs with `sstatus.SIE == 0` and
+   neither allocates nor emits telemetry under it. A network RX path must obey the
+   same discipline or it reintroduces exactly the re-entrancy deadlock the
+   allocator and IRQ paths already learned to avoid.
+6. **Authority — the genuinely open one.** The console is ambient today:
+   `ConsoleRead`/`ConsoleWrite` need no capability (`kernel/src/trap/user.rs`).
+   Ambient-on-a-cable and ambient-on-a-LAN are different propositions — the second
+   means anyone on the segment types at whatever owns the console. This is the
+   item this OS should have an opinion about, and it is why the original exclusion
+   tagged the RX path "an authority boundary" rather than "unimplemented". Sketch
+   of the options, cheapest first: a shared secret in the input datagram; input
+   delivered to a *capability-held* endpoint rather than the ambient ring; or full
+   inbound-as-IPC (the actor-model direction, where a process is reachable as a
+   network endpoint).
+7. **Reliability — the first place Decision 1 actually costs something.** TCP was
+   excluded on the grounds that retransmit/ordering is the opposite of what
+   telemetry wants, and for egress that is right. For input it inverts: a dropped
+   datagram is a dropped keystroke and a reordered one is a scrambled command.
+   Either add sequence numbers + ack/retransmit **on the input channel only**
+   (leaving egress untouched), or state explicitly that this is a trusted LAN and
+   losses are acceptable. Note that open question 1 above (datagram sequence
+   numbers) is the same machinery viewed from the other direction.
+8. **`Frame::Log` is the wrong shape for a prompt.** It is line-oriented and
+   truncated at `LOG_LINE_MAX = 256` (`kernel/src/device/console.rs`). Fine for a
+   log; awkward for an interactive prompt, and wrong for anything doing cursor
+   control — the Stitch REPL's Tab completion and the eventual `stim` editor both
+   want bytes, not lines. A raw console-bytes frame variant is probably the
+   answer, and it is a wire-format change, so it wants deciding before rather than
+   after.
+9. **No emulator path to develop against.** snemu models the NIC TX-only
+   (`service_tx` / `net_tx_output`); a deterministic RX itest needs **host→guest
+   datagram injection**, which does not exist. And there is no fallback: QEMU
+   parity was deferred (`xtask-qemu` never passes `-device virtio-net-device`), so
+   the UDP path is snemu-only. Whichever is built first becomes the development
+   environment for all of the above — and per the port's host-first discipline,
+   one of them must exist before the board is involved.
+10. **ARP, inbound direction.** Still dodgeable: the host reaches the board with a
+    static `arp -s` entry, so no responder is needed for the first light. The
+    board *answering* ARP would need RX plus a responder plus a live PHY — worth
+    knowing it is a later nicety, not a prerequisite.
+
+### Sequencing, honestly
+
+On QEMU/snemu, items 1–9 are reachable today. On the VisionFive 2 **none of this
+is reachable at all** until the GMAC driver exists — see
+[../plans/vf2-gmac-driver.md](../plans/vf2-gmac-driver.md) — which is weeks of
+work and where all the hardware risk lives.
+
+If the actual goal is "control my board from my desk" rather than "the board
+speaks IP", the serial bridge reaches it far sooner and with no kernel network
+code at all: [board-agent-bridge-design.md](board-agent-bridge-design.md) and
+[../plans/board-bridge.md](../plans/board-bridge.md). That is not a workaround —
+it is also the development loop the GMAC bring-up itself would be built with.
 
 ## Open questions
 

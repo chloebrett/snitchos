@@ -314,6 +314,59 @@ nothing.
 **REFACTOR**: Assess.
 **Done when**: All criteria met, mutation report reviewed, human approves commit.
 
+**Outcome (2026-08-25): done. `snemu-wasm/src/budget.rs`, 12 tests, no survivors.**
+
+`Status::{Running, Halted, Trapped}` each carrying the instret **this slice** retired,
+`Budget` (limit + anchor), and `run(&mut Machine, limit) -> Status`.
+
+Three things the step's design notes did not anticipate, all confirmed in snemu's
+source rather than assumed:
+
+- **A step can retire *zero* instructions.** With every hart parked on `wfi` and no
+  armed timer, `step_round` returns `Ok(())` having moved nothing — the idle
+  fast-forward at `machine.rs:234` is guarded by `if let Some(deadline)`, and the
+  comment there notes such a hart can only be woken by an IPI, which cannot arrive
+  while every hart idles. So it is terminal, and a naive `while spent < budget`
+  spins forever. That is the `Halted` variant, and the reason this module exists.
+- **`instret()` is cumulative over the machine's life**, so a budget must anchor and
+  compare a *delta*. Comparing the raw counter against a per-frame limit would report
+  the budget exhausted before the guest moved, on every frame after the first. Same
+  absolute-vs-delta trap `Cursor` exists to avoid on the output buffers.
+- **`limit` is a floor, not a ceiling.** A step is atomic, so a slice overshoots by
+  whatever the last step retired.
+
+*Mutation report.* First run: **2 missed, 4 timeouts** — and reading the list mattered
+more than the score, exactly as step 2 warned. The timeouts were mutants that stop the
+budget ever exhausting, so `run` span and the harness hung; cargo-mutants scores a hang
+as "caught", but a test that hangs instead of failing is a weak kill, and a hang *is*
+the browser-freeze failure mode. Two fixes:
+
+1. `run`'s loop is now `for _ in 0..limit` rather than `loop`. The cap is not
+   defensive padding — it restates the loop's own invariant (every iteration retires
+   ≥1 instret or returns `Halted`), so correct code never reaches it. It makes "cannot
+   spin" a property of the *shape* instead of the arithmetic being right, which is
+   worth more here than usual: inside a `requestAnimationFrame` callback an infinite
+   loop is not an interruptible hang, it is a tab you have to kill.
+2. A test that pins **instret, not step-calls** — the step's headline warning, which
+   had no test. Measured through public API: with `set_block_jit(true)` a compiled
+   block retires **5** instructions in one `step()`, so a step-counting implementation
+   overruns ~5x and the test catches it.
+
+Second run: **8 caught, 0 missed, 0 timeouts**, and the suite went 2m → 16s because
+nothing hangs any more.
+
+*It also found a hole in step 1b.* Crate-wide mutants flagged `replace check_portable
+with ()` as surviving: the probe's oracle lives in `src/` (deliberately — the host and
+wasm32 tests compile separately and must share one set of expectations), so hollowing
+it to a no-op left every caller passing vacuously. Fixed with two negative controls
+that assert the oracle *rejects* a wrong probe. This is the "a control that cannot
+discriminate" lesson and "verify the instrument" in one: an oracle nothing tests is an oracle that cannot
+discriminate. Crate-wide now **19 mutants, 17 caught, 2 unviable, 0 survivors**, with
+one documented equivalent mutant (`with_capacity`'s argument — capacity is a
+performance hint) registered in `.cargo/mutants.toml` per project convention.
+
+**REFACTOR**: assessed, declined.
+
 ### Step 4: Decode telemetry frames to a JS-shaped value
 
 **Acceptance criteria**: Raw `virtio_tx_output()` bytes decode through

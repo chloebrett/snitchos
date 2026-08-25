@@ -20,6 +20,12 @@ below the MTU so batch-overflow never flushes), and the `virtio_mmio` DEDUP —
 `virtio_net.rs`'s `read_reg`/`write_reg`/`transmit` mirror the console driver and can't
 be shared while each device owns its own `static mut` queues.
 
+**The inbound (RX) path stays out of scope** — but it is now *scoped* rather than
+one-line-deferred: see the addendum in
+[docs/network-telemetry-design.md](../docs/network-telemetry-design.md) for the gap
+list, including the fact that console *output* over UDP already works today via
+`net=… console=frames` (no new code) and that only the inbound half is missing.
+
 ## Goal
 
 Stream the `Frame` telemetry to the collector over UDP, proven end-to-end on
@@ -294,11 +300,11 @@ clock/delay in the JH7110 syscon), YT8531 specifics. Multi-week; the only step
 with real hardware risk. **Everything above the `NetDevice` trait is already
 proven by PRs 1–7, so this is a driver swap, not a rewrite.**
 
-This does **not** get TDD-decomposed here — it is its own project. When PR 7
-lands, write `plans/vf2-gmac-driver.md` and scope it against the open questions
-in the design note (RX ring necessity, PHY specifics) plus the JH7110 TRM. Left
-as a single placeholder step deliberately: per the planning skill, don't write
-steps you can't yet size.
+This does **not** get TDD-decomposed here — it is its own project. **That plan now
+exists: [vf2-gmac-driver.md](vf2-gmac-driver.md)**, scoped against the design note's
+open questions (RX ring necessity, PHY specifics) plus the JH7110 TRM. It opens with a
+reconnaissance phase rather than steps, for the same reason this section stayed a
+placeholder: per the planning skill, don't write steps you can't yet size.
 
 ---
 

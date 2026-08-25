@@ -5,6 +5,8 @@
 last one on the critical path**; Step 5b (interactive relay) follows it, and Step 7
 (programming the baud) is deferred as optional headroom — Step 6 measured steady-state
 telemetry at single-digit throughput, so 115200 suffices.
+**Builds on this**: [board-bridge.md](board-bridge.md) — the *programmatic* half of
+driving the board (`cargo xtask board exec`, reboot) starts where Step 10 finishes.
 **Design**: [docs/uart-telemetry-design.md](../docs/uart-telemetry-design.md)
 **Milestone**: M2 in [plans/visionfive2-port.md](visionfive2-port.md)
 **Write-up**: [post 68 — two promises the hardware never made](../posts/post-68-two-promises-the-hardware-never-made.md)
@@ -231,6 +233,11 @@ Deferred here because it needs the bidirectional serial wire (Step 10) and
 `ConsoleWrite`→frames routing. Raw-mode stdin → serial TX; the Stitch REPL usable
 through `reader` on the board. The down-payment on the dashboards-plus-terminal end
 state — not a workaround for losing `screen`.
+
+This is the **human** surface: a terminal a person types at. Its sibling is the
+**programmatic** one — `cargo xtask board exec "<text>"`, capture-until-a-stop-
+condition, structured frames back — planned in [board-bridge.md](board-bridge.md).
+They share the serial handle and nothing else; either can land first.
 
 ### Step 6: Measure real telemetry throughput — ✅ DONE
 
