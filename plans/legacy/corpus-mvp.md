@@ -13,13 +13,13 @@ The pipeline it was a tracer bullet for now runs unattended for 15-hour batches.
 **Where it lives:** `cram-gen` (the harness crate — `Model` trait, extraction, the
 correction guard, recipes, prompt), `stitch/src/gate.rs` (the gate), and
 `xtask-cram/src/generate.rs` (the driver, behind `cargo xtask cram --gen`). The
-`sift` name was never taken; see [stage-0-validator-funnel.md](stage-0-validator-funnel.md).
+`sift` name was never taken; see [stage-0-validator-funnel.md](../stage-0-validator-funnel.md).
 
 ## Increment status, checked against the tree 2026-08-06
 
 | # | increment | status |
 |---|---|---|
-| 0 | the spike | ✅ done — [corpus-mvp-spike.md](corpus-mvp-spike.md) carries the findings, which are cited throughout `cram-gen` |
+| 0 | the spike | ✅ done — [corpus-mvp-spike.md](../corpus-mvp-spike.md) carries the findings, which are cited throughout `cram-gen` |
 | 1 | the gate, as a library function | ✅ done — `stitch/src/gate.rs`, and it goes **further** than scoped (see below) |
 | 2 | candidate extraction | ✅ done — `extract`, plus `<think>`-block stripping the plan didn't anticipate |
 | 3 | the recipe tuple | ✅ done — `cram-gen/src/recipe.rs` + frozen per-batch sheets |
@@ -34,7 +34,7 @@ correction guard, recipes, prompt), `stitch/src/gate.rs` (the gate), and
 
 - **The gate runs the candidate's own tests.** This plan explicitly *skipped* the
   run/test stage ("execution adds failure modes for little MVP value"). It is built
-  anyway, because [stitch-native-tests.md](stitch-native-tests.md) landed `test`/`expect`
+  anyway, because [stitch-native-tests.md](../stitch-native-tests.md) landed `test`/`expect`
   in the meantime, so `Outcome` is `Parse | Type | Tests | Ok` — the full Stage-0 funnel,
   not the MVP's two-stage cut.
 - **A recipe sheet is frozen once a batch has been generated from it.** Not in this plan
@@ -43,7 +43,7 @@ correction guard, recipes, prompt), `stitch/src/gate.rs` (the gate), and
 - **Corrections are captured as labelled pairs** — what the model wanted beside what the
   language allowed — which the plan hoped Increment 7 might eventually produce. The
   guard produces them today, and they are the repair-trace material
-  [../docs/kvetch-rl-design.md](../docs/kvetch-rl-design.md) §5 expected to have to
+  [../docs/kvetch-rl-design.md](../../docs/kvetch-rl-design.md) §5 expected to have to
   manufacture.
 
 ### Where it diverged, deliberately
@@ -63,7 +63,7 @@ correction guard, recipes, prompt), `stitch/src/gate.rs` (the gate), and
 - **Type-failures and parse-failures are all kept.** The plan proposed keeping
   type-failures as a logged stratum and warned "do not train drivel on non-parsing text".
   Measurement overruled the warning: dropping parse-dead candidates **cost 0.37 nats**.
-  Everything is kept and trained on. See [../notes/batch9-findings.md](../notes/batch9-findings.md).
+  Everything is kept and trained on. See [../notes/batch9-findings.md](../../notes/batch9-findings.md).
 
 ### Increment 7 — constrained decoding, demoted
 
@@ -85,21 +85,28 @@ a few thousand. Worth having written down; not worth doing now.
 
 - **No dedup at all** — not exact, not near. Increment 6 asked for exact dedup and got
   none; the near-duplicate question belongs to
-  [stage-0-validator-funnel.md](stage-0-validator-funnel.md)'s unbuilt MinHash increment.
+  [stage-0-validator-funnel.md](../stage-0-validator-funnel.md)'s unbuilt MinHash increment.
   Given batch11's finding that domain axes collapse to ~8 structural archetypes, this is
   the gap most likely to matter.
 - **No model-response cache**, so re-running the gate or the extractor over a batch costs
   generation time. The `.raw.md` files saved beside each candidate are a partial
-  substitute nobody has built a re-scoring path over.
-- **The abandon-path byte-cap leak** — the unguarded finishing completion never learned
-  about `max_bytes`, so ~15 files per batch escape the cap. Ten-line fix, still open.
+  substitute nobody has built a re-scoring path over. Carried to debt **#21**
+  ([../../docs/debt-register.md](../../docs/debt-register.md)).
+- ~~**The abandon-path byte-cap leak**~~ — **FIXED 2026-08-25.** The unguarded finishing
+  completion never consulted `max_bytes`, so ~15 files per batch escaped the cap.
+  "Unguarded" meant the *correction* guard was off, not the length cap; because that path
+  is the one that produces a *finished* program, the exemption was aimed at exactly the
+  candidates most likely to be trained on. `run_once_capped` now bounds that completion
+  too and sets `overlong` on it. Three tests pin it — the cap fires, it does not
+  over-fire on a short finished program, and a program exactly at the cap is allowed
+  (`max_bytes` is a limit, not a threshold). All 9 mutants on the change caught.
 
-Related: [../docs/generative-ladder.md](../docs/generative-ladder.md) (the full
-bootstrap table this shortcuts), [stage-0-validator-funnel.md](stage-0-validator-funnel.md)
+Related: [../docs/generative-ladder.md](../../docs/generative-ladder.md) (the full
+bootstrap table this shortcuts), [stage-0-validator-funnel.md](../stage-0-validator-funnel.md)
 (the complete Stage 0 — this borrows its funnel and skips its measurement
-suite), [../docs/llm-design.md](../docs/llm-design.md) (corpus tiers, the
-diversity axes), [babble.md](babble.md) (Tier-0, the null baseline),
-[drivel.md](drivel.md) (the rung that consumes the output).
+suite), [../docs/llm-design.md](../../docs/llm-design.md) (corpus tiers, the
+diversity axes), [babble.md](../babble.md) (Tier-0, the null baseline),
+[drivel.md](../drivel.md) (the rung that consumes the output).
 
 ---
 
@@ -109,7 +116,7 @@ Point a ~4B local open model at hand-written real Stitch, feed it recipe tuples,
 and let it run until **~500k validated tokens** exist. Then train drivel on that
 and compare against the babble-trained drivel.
 
-**The exemplar source is [stitch-examples-corpus.md](legacy/stitch-examples-corpus.md)'s
+**The exemplar source is [stitch-examples-corpus.md](stitch-examples-corpus.md)'s
 30 programs** (~100+ lines each, native `test` blocks, hand-polished) — that plan
 already names this one as its consumer. 1 of 30 exists today (`json.st`), so
 exemplar quality and count both improve underneath this plan as it proceeds; the
@@ -171,7 +178,7 @@ Increment 6, not a prerequisite.
 
 ## Increment 0 — the spike, before any harness
 
-**Full plan: [corpus-mvp-spike.md](corpus-mvp-spike.md)** — setup, the eight
+**Full plan: [corpus-mvp-spike.md](../corpus-mvp-spike.md)** — setup, the eight
 recipes, the record sheet, and pre-registered decision rules. Summary below.
 
 **Twenty prompts per model, run by hand, across two or three sizes (4B / 8B /
@@ -380,7 +387,7 @@ Extract the canon chain into something callable.
   the type gate *can* fail, and this inherits that hazard.
 - The verdict must carry the diagnostic text, not just the discriminant. That
   text is the raw material for repair traces later
-  ([../docs/kvetch-rl-design.md](../docs/kvetch-rl-design.md) §5) and costs
+  ([../docs/kvetch-rl-design.md](../../docs/kvetch-rl-design.md) §5) and costs
   nothing to keep now.
 
 **Salvage, don't discard — the gate has three exits, not two.**
@@ -422,14 +429,14 @@ Model output → program text.
 ### 3. The recipe tuple
 
 `domain × 2–3 required constructs × size bucket × shape × 3 must-use words`,
-per [../docs/llm-design.md](../docs/llm-design.md).
+per [../docs/llm-design.md](../../docs/llm-design.md).
 
 - **RED**: same seed yields the same recipe sequence; the axes cross before
   repeating; must-use words are drawn from the real corpus's identifier
   distribution, not babble's 571.
 - Keep it a plain data struct. The report keys on it.
 
-**Axis values live in [corpus-recipe-axes.md](corpus-recipe-axes.md)** — 100
+**Axis values live in [corpus-recipe-axes.md](../corpus-recipe-axes.md)** — 100
 domains, each with a distinguishing clause and one sampled crossing, plus the
 construct / size / shape value lists. Split out to keep this plan readable; the
 crossing *rules* stay here, the *values* live there.
@@ -441,7 +448,7 @@ stops a weak model defaulting to the same records-plus-filter program for every
 domain. Clause-writing is one-off and amortised over the whole run, not paid per
 generation.
 
-**Constructs** come from [../docs/language-design.md](../docs/language-design.md):
+**Constructs** come from [../docs/language-design.md](../../docs/language-design.md):
 `prod`, `sum`, `contract` + `on`, `uses` capabilities, `Result` with `?`,
 `Maybe`, `|>`, `use <-`, placeholders, recursion over `List`/`Map`.
 
@@ -652,7 +659,7 @@ guard against high-effort babble.
 - **The mask does not stop repetition loops.** Comments are grammatically legal
   everywhere, so a candidate can spiral into repeated commentary while remaining
   perfectly valid — observed on the very first hand-run candidate
-  ([corpus-mvp-spike.md](corpus-mvp-spike.md) Findings 001). A repetition penalty,
+  ([corpus-mvp-spike.md](../corpus-mvp-spike.md) Findings 001). A repetition penalty,
   a `max_tokens` cap and the Increment 5 loop detector are needed *regardless* of
   this increment; do not let the mask's parse guarantee imply a termination
   guarantee.
@@ -719,9 +726,9 @@ The principled version, once there is output worth analysing.
 held-out masked NLL against the uniform-over-legal floor of 2.742 and babble's 5.395.
 The original bar — "a model that is barely better than no model is a complete success
 here" — was cleared so thoroughly that the interesting question moved on twice: first to
-which corpus properties pay ([../notes/batch10-training-findings.md](../notes/batch10-training-findings.md)),
+which corpus properties pay ([../notes/batch10-training-findings.md](../../notes/batch10-training-findings.md)),
 then to the fact that **volume has largely stopped paying**
-([../notes/batch11-training-findings.md](../notes/batch11-training-findings.md)).
+([../notes/batch11-training-findings.md](../../notes/batch11-training-findings.md)).
 
 *Original text:*
 
@@ -743,7 +750,7 @@ is volume and quality. If it fails, the funnel says where.
 - **More Tier-0 volume.** Cheapest lever, already spent: babble's lexicon
   saturates at 571 identifiers and that ceiling survived a 33× data increase.
 - **The repair axis** — deferred to whenever the RL branch earns it
-  ([../docs/kvetch-rl-design.md](../docs/kvetch-rl-design.md)). Recipe axes are
+  ([../docs/kvetch-rl-design.md](../../docs/kvetch-rl-design.md)). Recipe axes are
   additive, so nothing is lost by waiting, and a later axis draws its must-use
   words from a better identifier distribution than today's 20k.
 - **License check before bulk.** Not blocking for a local MVP, but the corpus is

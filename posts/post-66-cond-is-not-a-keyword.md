@@ -9,7 +9,7 @@ discovering that most of what looked like model error was reference error.*
 
 Stitch has no training corpus, because Stitch has no users. To train a model to
 write it, the corpus has to be manufactured — and the plan
-([corpus-mvp.md](../plans/corpus-mvp.md)) is the obvious one: ask a local model
+([corpus-mvp.md](../plans/legacy/corpus-mvp.md)) is the obvious one: ask a local model
 for programs, keep the ones that survive a gate, repeat until there are enough.
 
 The gate is the part this project gets for free. `parse → typecheck → run the

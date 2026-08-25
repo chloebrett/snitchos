@@ -27,7 +27,7 @@ guideline, not a cap — let the program's natural size win), lands in
 [stitch-testing-design.md](../../docs/stitch-testing-design.md)) giving **adequate
 coverage of its core logic — every program's tests must pass before it's
 ticked off.** The batch doubles as hand-polished gold-exemplar material for
-[corpus-mvp.md](../corpus-mvp.md)'s recipe-matched prompting, not just a REPL demo
+[corpus-mvp.md](corpus-mvp.md)'s recipe-matched prompting, not just a REPL demo
 corpus like `fs-image/`.
 
 **Findings note:** [stitch-examples-findings.md](../stitch-examples-findings.md)

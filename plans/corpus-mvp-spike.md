@@ -1,7 +1,7 @@
 # Corpus MVP — Increment 0, the spike
 
 **Status: 📐 PLAN — not started.** Increment 0 of
-[corpus-mvp.md](corpus-mvp.md). Related:
+[corpus-mvp.md](legacy/corpus-mvp.md). Related:
 [corpus-recipe-axes.md](corpus-recipe-axes.md) (the recipes used below),
 [../docs/language-design.md](../docs/language-design.md) (source for the
 cheat-sheet), [stitch-examples-corpus.md](legacy/stitch-examples-corpus.md) (where
@@ -646,7 +646,7 @@ itself past a correct observation.
 #### This validates the oracle ladder
 
 Parse ✓, typecheck ✓, **tests ✗**. That is precisely the case
-[corpus-mvp.md](corpus-mvp.md) §3's rung 3 exists for, and the first candidate to
+[corpus-mvp.md](legacy/corpus-mvp.md) §3's rung 3 exists for, and the first candidate to
 demonstrate that rungs 0–2 are not sufficient. A syntax-only gate would have
 accepted this program into the corpus.
 
@@ -777,7 +777,7 @@ The oracle is real but partial, and its blind spot is exactly the case where the
 model misunderstood the problem — which is the case that matters most.
 
 **This is the argument for scoring suites by mutants killed rather than by
-passing** ([corpus-mvp.md](corpus-mvp.md) §7). A mutation that swaps
+passing** ([corpus-mvp.md](legacy/corpus-mvp.md) §7). A mutation that swaps
 `findFirstOverlap`'s tail-scan for a full pairwise scan would survive this suite,
 which is precisely the signal that the suite is thin.
 
@@ -843,7 +843,7 @@ amount of local reasoning catches, because each line is individually plausible.
 | 007 | signature mismatch after a refactor | the type checker (rung 1) |
 
 Each survives the rung below it. Parse alone would have accepted all three.
-**This is the graded oracle ladder ([corpus-mvp.md](corpus-mvp.md) §3) paying for
+**This is the graded oracle ladder ([corpus-mvp.md](legacy/corpus-mvp.md) §3) paying for
 itself on the first six candidates** — and 006 remains the argument that even
 rung 3 needs mutation scoring rather than pass/fail, since a suite written from
 the same misunderstanding as the code agrees with it.
@@ -1096,7 +1096,7 @@ every program load-bearing rather than decorative — without them, three of the
 five would have passed the gate — and it means the funnel's `type` stage may be
 close to empty in practice. Worth measuring rather than assuming, but the
 provisional read is that rung 1 is much weaker than
-[corpus-mvp.md](corpus-mvp.md) §3 implies.
+[corpus-mvp.md](legacy/corpus-mvp.md) §3 implies.
 
 #### 006 is the mutation-scoring argument, now verified
 
@@ -1119,7 +1119,7 @@ conflict away from the head is silently reported as conflict-free, and
 The Findings 006 claim is therefore **confirmed rather than refuted**, and now on
 evidence: a suite written from the same misunderstanding as the code agrees with
 it, and the whole ladder waves it through. This is the concrete case for scoring
-suites by **mutants killed** ([corpus-mvp.md](corpus-mvp.md) §7) — pass/fail
+suites by **mutants killed** ([corpus-mvp.md](legacy/corpus-mvp.md) §7) — pass/fail
 cannot see it, by construction.
 
 #### Two language facts the candidates found

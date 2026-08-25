@@ -11,7 +11,7 @@ three batches (~2 900 candidates) have run through it, and drivel trains on the 
 What landed did so **inside `cram-gen` and `stitch/src/gate.rs`** rather than as the
 planned standalone `sift` crate — the corpus MVP needed a working gate before this plan
 was picked up, so the gate was built where it was needed. See
-[corpus-mvp.md](corpus-mvp.md) for that side.
+[corpus-mvp.md](legacy/corpus-mvp.md) for that side.
 
 **Splitting out `sift` is still open**, and so is the rest of the backlog below. Nothing
 here has been cancelled; increments 4–8 and 11 are simply unbuilt.

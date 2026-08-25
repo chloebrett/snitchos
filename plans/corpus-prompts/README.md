@@ -18,4 +18,4 @@ belongs in the cached prefix.
 **These should eventually be generated, not maintained.** The reference is
 already derived from `natives.rs` and `prelude.st`; a stale prompt does not fail
 loudly, it silently caps program quality (005a). See
-[../corpus-mvp.md](../corpus-mvp.md) Increment 4.
+[../corpus-mvp.md](../legacy/corpus-mvp.md) Increment 4.

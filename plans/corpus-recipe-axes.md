@@ -1,7 +1,7 @@
 # Corpus recipe axes — 100 domains and a sampled crossing each
 
 **Status: 📐 DATA — shipped as `cram-gen/assets/recipes/batch9.toml`, and
-superseded for new batches.** Axis values for [corpus-mvp.md](corpus-mvp.md)'s
+superseded for new batches.** Axis values for [corpus-mvp.md](legacy/corpus-mvp.md)'s
 Increment 3 recipe-tuple generator. Split out of that plan to keep it readable;
 the *rules* for crossing these axes live there, the *values* live here.
 

@@ -1,6 +1,6 @@
 //! The corpus gate — parse → type → run the program's own tests.
 //!
-//! Used by the corpus pipeline (`plans/corpus-mvp.md`) to decide whether a
+//! Used by the corpus pipeline (`plans/legacy/corpus-mvp.md`) to decide whether a
 //! generated candidate is a training token or garbage, and by `bin/check.rs` to
 //! answer the same question about a file on disk.
 //!

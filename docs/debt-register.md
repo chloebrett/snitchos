@@ -475,3 +475,16 @@ consumer waiting on it. `glitch` v2's waveform assertions expect a **square** wa
 changing the default tone shape is not free — this is a new waveform option, not a
 substitution.
 
+### #21 — No model-response cache in `cram-gen`
+
+Re-running the gate or the extractor over an existing batch re-pays generation time,
+because nothing caches what the model said. `cram-gen` writes a `.raw.md` beside each
+candidate, so the raw responses *are* on disk — but no re-scoring path reads them back,
+which makes them a partial substitute rather than a cache.
+
+This bites whenever the gate or the extractor changes: the honest way to compare the new
+funnel against the old is to re-run both over the same responses, and today that means
+re-generating. Carried over from
+[../plans/legacy/corpus-mvp.md](../plans/legacy/corpus-mvp.md)'s Increment 5 (the disk
+response cache was scoped and never built) when that plan was archived.
+

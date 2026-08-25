@@ -1,6 +1,6 @@
 //! The corpus gate: does a candidate program survive parse → type → its own tests?
 //!
-//! This is the funnel from `plans/corpus-mvp.md` in one function. The *stage* a
+//! This is the funnel from `plans/legacy/corpus-mvp.md` in one function. The *stage* a
 //! candidate dies at is the diagnosis — parse deaths mean the generator does not
 //! know the grammar, type deaths mean it has the shape but not the semantics,
 //! test deaths mean it has the semantics and got them wrong — so `Outcome`
