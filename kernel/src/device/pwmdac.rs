@@ -5,7 +5,7 @@
 //! them. Synthesis lives in userspace now — the `glitch` server generates samples
 //! and hands them down via the cap-gated `AudioWrite` syscall ([`play_samples`]);
 //! the in-kernel beep task was retired once `glitch-beep` shipped. See
-//! `plans/glitch.md` and `plans/vf2-audio-tier0.md`.
+//! `plans/glitch.md` and `plans/legacy/vf2-audio-tier0.md`.
 //!
 //! Address-driven, not `cfg(vf2)`-gated: the same code runs on the board and under
 //! snemu's synthetic PWMDAC device, so the path is observable off-hardware via the

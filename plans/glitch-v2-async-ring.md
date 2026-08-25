@@ -386,7 +386,7 @@ waveform** (Increment 8) plus the counter floor:
 - [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md) — the audio arc.
 - [../docs/sonification-feedback-design.md](../docs/sonification-feedback-design.md) —
   why the enqueue path is generic PCM, and what B really needs.
-- [vf2-audio-tier0.md](vf2-audio-tier0.md) — the DAC bring-up + software-paced `WDATA`
+- [vf2-audio-tier0.md](legacy/vf2-audio-tier0.md) — the DAC bring-up + software-paced `WDATA`
   (why the drain cadence is a real decision).
 - Seam refs: `kernel/src/device/pwmdac.rs` (blocking drain to retire),
   `kernel-devices/src/pwmdac.rs` (rate/pacing logic), `kernel/src/syscall/audio.rs`

@@ -55,7 +55,7 @@ checked rather than assumed:
 a feature in its own right. Driver bring-up on real hardware *is* the loop: flash,
 reset, read breadcrumbs, edit, repeat, with frequent wedges needing recovery. Two
 projects are queued behind it and both are worse without it — the PWMDAC audio
-bring-up ([vf2-audio-tier0.md](vf2-audio-tier0.md)), whose `PollUntilSet` hang is
+bring-up ([vf2-audio-tier0.md](legacy/vf2-audio-tier0.md)), whose `PollUntilSet` hang is
 the motivating failure, and the GMAC driver
 ([vf2-gmac-driver.md](vf2-gmac-driver.md)), which is weeks of exactly this loop on
 a peripheral with many ways to hang silently.

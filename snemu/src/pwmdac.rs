@@ -1,6 +1,6 @@
 //! snemu's model of the JH7110 PWMDAC (+ its SYSCRG clock/reset window) — a
 //! synthetic device added to snemu's virt machine so the `audio-beep` workload can
-//! run off-hardware (see `plans/vf2-audio-tier0.md` Increment 9a, fork (a)). It
+//! run off-hardware (see `plans/legacy/vf2-audio-tier0.md` Increment 9a, fork (a)). It
 //! captures the `WDATA` sample stream for `--audio-out` to render (via `audio`),
 //! and — crucially — makes the guest's clock/reset bring-up *complete*: without a
 //! device here, a guest write to `0x100b0000` falls through to RAM and halts the

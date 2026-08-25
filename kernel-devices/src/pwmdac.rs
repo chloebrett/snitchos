@@ -6,7 +6,7 @@
 //! The block is two registers: `WDATA` (sample port, offset 0x00) and `CTRL`
 //! (offset 0x04). Field positions and enum encodings are transcribed verbatim
 //! from mainline Linux `sound/soc/starfive/jh7110_pwmdac.c`. See
-//! `docs/vf2-audio-design.md` for the wider design and `plans/vf2-audio-tier0.md`
+//! `docs/vf2-audio-design.md` for the wider design and `plans/legacy/vf2-audio-tier0.md`
 //! for the increment plan.
 //!
 //! `CTRL` layout: `ENABLE[0]`, `SHIFT[1]` (8- vs 10-bit resolution),
@@ -49,7 +49,7 @@ pub enum DataMode {
 /// Note the discrepancy this newtype guards: mainline's `enum` lists
 /// `PWMDAC_SAMPLE_CNT_512 = 512`, but `GENMASK(12, 4)` is only 9 bits wide and
 /// cannot hold 512. `new` rejects it; whether the hardware field is actually
-/// wider is an open datasheet question (see `plans/vf2-audio-tier0.md`).
+/// wider is an open datasheet question (see `plans/legacy/vf2-audio-tier0.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CntN(u16);
 

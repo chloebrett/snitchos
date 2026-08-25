@@ -157,7 +157,7 @@ in *this* OS rather than being a toy:
 
 > **Emulator audio — snemu yes, QEMU no.** The testing-useful slice of this (capture
 > the `WDATA` write stream, render a `.wav`, listen) is pulled *forward* into Tier 0
-> as [../plans/vf2-audio-tier0.md](../plans/vf2-audio-tier0.md) Increment 9: it gives
+> as [../plans/legacy/vf2-audio-tier0.md](../plans/legacy/vf2-audio-tier0.md) Increment 9: it gives
 > by-ear confirmation without hardware and an exact itest oracle. It works because
 > snemu is a deterministic MMIO-device emulator and the guest's `mtime`-paced writes
 > already encode the sample rate — so snemu need model no analog clock. **QEMU can't

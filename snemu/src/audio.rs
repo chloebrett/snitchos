@@ -7,7 +7,7 @@
 //! Pure — no I/O, no `Machine`/`Bus` dependency — so it's fully host-testable in
 //! isolation; the caller (the `--audio-out` wrapper in `main`) is the thin,
 //! non-pure part that pulls the captured samples out of the PWMDAC device and
-//! writes the bytes to disk. See `plans/vf2-audio-tier0.md` Increment 9a.
+//! writes the bytes to disk. See `plans/legacy/vf2-audio-tier0.md` Increment 9a.
 
 /// Encode `samples` (signed 16-bit PCM) as a canonical mono WAV byte stream at
 /// `sample_rate_hz`. The header is the standard 44-byte RIFF/WAVE/fmt/data layout;

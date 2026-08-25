@@ -12,12 +12,24 @@ decoder (`snemu/src/{pwmdac,audio}.rs`) + `--audio-out`, the kernel driver
 and the `audio-beep-emits-samples` itest — **green, 100% fidelity**. End-to-end proof:
 `snemu … --workload audio-beep --audio-out beep.wav` renders a valid 24.6 s / 196 632-sample
 mono-16-bit-8 kHz WAV (RIFF header verified). All host tests clippy-clean + mutation-verified
-(only the documented `| → ^` disjoint-field equivalents survive). **Remaining: hardware
-validation on the actual VF2** (the design doc's open unknowns: `WDATA` FIFO, real SYSCRG
-offsets, `CORE_DIVIDER` calibration, analog-path GPIO) and two optional refinements — **4b**
-(sine LUT via `build.rs`) and a stronger **9b** oracle (assert on snemu's *captured* samples,
-not just the kernel counter). TDD-decomposition of Tier 0 from
-[../docs/vf2-audio-design.md](../docs/vf2-audio-design.md). Goal: **the board emits a
+(only the documented `| → ^` disjoint-field equivalents survive).
+
+**Nothing here is outstanding — archived 2026-08-25.** Every open unknown this plan
+carried was closed by the 2026-07-25 hardware run described above: the `WDATA` FIFO
+(there is none), the real SYSCRG offsets, `CORE_DIVIDER` calibration, and the
+analog-path GPIO. The two optional refinements were re-homed rather than dropped:
+
+- **4b** (sine LUT via `build.rs`) — the square wave's AC-coupling droop is benign, so
+  this is polish with no consumer. Recorded as debt **#20**
+  ([../../docs/debt-register.md](../../docs/debt-register.md)).
+- **9b** (assert on snemu's *captured* samples, not just the kernel counter) —
+  **superseded**, and by a stronger version: `glitch` v2's Increment 8 makes the
+  capture a gate input and its Increment 9 asserts the drained stream is byte-exact
+  against the expected waveform. See
+  [../glitch-v2-async-ring.md](../glitch-v2-async-ring.md).
+
+TDD-decomposition of Tier 0 from
+[../../docs/vf2-audio-design.md](../../docs/vf2-audio-design.md). Goal: **the board emits a
 fixed-frequency tone from the 3.5mm jack**, fed by CPU PIO writes to the JH7110
 PWMDAC — no DMA engine. Everything here is deferrable-free (gated on nothing
 external); the design doc justifies every hardware fact.
@@ -340,7 +352,7 @@ that lets everything downstream run under snemu at all.
 
 ## References
 
-- [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md) — the design this
+- [../../docs/vf2-audio-design.md](../../docs/vf2-audio-design.md) — the design this
   decomposes; hardware facts, tiers, sources.
-- [visionfive2-port.md](visionfive2-port.md) — board timebase, `vf2` feature,
+- [../visionfive2-port.md](../visionfive2-port.md) — board timebase, `vf2` feature,
   MMIO mapping, the runtime-workload mechanism.

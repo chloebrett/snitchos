@@ -123,7 +123,7 @@ the telemetry panes updating in lockstep — is the tour's showpiece interaction
 
 snemu models virtio-console and ramfb; the PWMDAC device model is **in flight**
 (companion to the VF2 audio work,
-[../plans/vf2-audio-tier0.md](../plans/vf2-audio-tier0.md)). In-tab it sinks to
+[../plans/legacy/vf2-audio-tier0.md](../plans/legacy/vf2-audio-tier0.md)). In-tab it sinks to
 WebAudio. Until it lands, the embed ships without the audio pane — it's the one
 full-screen item that is emulation work rather than UI work.
 

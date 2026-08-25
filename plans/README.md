@@ -20,7 +20,7 @@ the first is work in progress:
 |---|---|---|
 | [In flight](#in-flight) | 16 | Real work, partially done. Only ~8 have moved this month. |
 | [Not started](#not-started) | 6 | Written down, zero code. A plan is cheap; that's deliberate. |
-| [Done bar a detail](#done-bar-a-detail) | 6 | Delivered; something small or deliberate holds back the archive. |
+| [Done bar a detail](#done-bar-a-detail) | 5 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
 
 ## In flight
@@ -70,7 +70,6 @@ Delivered. Each is one small thing from `legacy/`:
 
 | Plan | What holds it back |
 |---|---|
-| [vf2-audio-tier0.md](vf2-audio-tier0.md) | **Beep confirmed on hardware.** Its status paragraph contradicts itself — says the `WDATA` FIFO unknown is resolved, then lists it as open. Fix that, re-home refinements 4b/9b, archive |
 | [corpus-mvp.md](corpus-mvp.md) | The abandon-path byte-cap leak: "a ten-line fix, still open" |
 | [drivel.md](drivel.md) | The candle comparison — "the honest test" — still outstanding |
 | [repl-completion.md](repl-completion.md) | Two non-blocking defects found on the way; tracked in [../docs/debt-register.md](../docs/debt-register.md) |
@@ -108,7 +107,7 @@ Living documents that happen to live here. They will never be archived:
    historical finding is correct as written; don't rewrite it.
 6. `cargo xtask links` to confirm.
 
-Then update this index — which is the one step nothing checks. **This file drifts the
-same way the status headers it summarises drift.** Generating it from the headers
+Then update this index — which is the one step nothing checks. **This file goes stale
+the same way the individual status headers do.** Generating it from the headers
 (and failing the gate on drift, as `docs/generated/` already does) is the obvious
 fix, and needs the headers to share a parseable convention first.

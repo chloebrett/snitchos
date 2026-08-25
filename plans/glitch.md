@@ -311,7 +311,7 @@ was regenerated after the scenario removal.
 
 - [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md) — the audio arc; glitch is
   the discipline everything else builds on.
-- [vf2-audio-tier0.md](vf2-audio-tier0.md) — the shipped DAC bring-up glitch sits on;
+- [vf2-audio-tier0.md](legacy/vf2-audio-tier0.md) — the shipped DAC bring-up glitch sits on;
   `write_sample`/`bringup`/`configure` are what stay kernel-side.
 - Seam refs inline above: `kernel-proc/src/cap.rs`, `abi/src/lib.rs`,
   `kernel/src/syscall/{mod,ipc,metric}.rs`, `user/fs/src/lib.rs`,

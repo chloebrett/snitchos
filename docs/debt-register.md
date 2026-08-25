@@ -460,3 +460,18 @@ release `vf2` images routine, and that regime is where both the `tp`-truncation 
 SBI `a1`-clobber bugs lived — the latter *hidden* precisely because board images were
 debug builds. Worth landing deliberately rather than as a convenience.
 
+### #20 — The VF2 beep is a square wave, not a sine
+
+`kernel-devices/src/pwmdac.rs` generates a square wave. On real hardware the jack's AC
+coupling droops the flat tops, so the 440 Hz tone sounds saw-ish — cosmetic, and the
+tone is audible and at the right pitch.
+
+The fix is a `build.rs`-generated fixed-point sine LUT (the kernel is zero-FP by
+constraint, so the table is computed host-side at build time and linked as `const`
+data). Carried over from [../plans/legacy/vf2-audio-tier0.md](../plans/legacy/vf2-audio-tier0.md)
+Increment 4b when that plan was archived; it was always optional there and has no
+consumer waiting on it. `glitch` v2's waveform assertions expect a **square** wave
+([../plans/glitch-v2-async-ring.md](../plans/glitch-v2-async-ring.md) Increment 9), so
+changing the default tone shape is not free — this is a new waveform option, not a
+substitution.
+
