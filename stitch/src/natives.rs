@@ -72,6 +72,7 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "mapValues",    arity: 1, func: native_map_values,    module: Some("Map"),  export_as: Some("values") },
     NativeFn { name: "mapEntries",   arity: 1, func: native_map_entries,   module: Some("Map"),  export_as: Some("entries") },
     NativeFn { name: "mapFromList",  arity: 1, func: native_map_from_list, module: Some("Map"),  export_as: Some("fromList") },
+    NativeFn { name: "mapUpdate",    arity: 4, func: native_map_update,    module: Some("Map"),  export_as: Some("update") },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -1207,6 +1208,35 @@ fn insert_entry(entries: &mut Vec<(Value, Value)>, key: &Value, value: &Value) {
     }
 }
 
+/// `Map.update(m, k, default, f)` — `f` applied to `k`'s existing value, or
+/// `default` inserted **raw** if `k` is absent. Persistent; an existing key keeps
+/// its position (via [`insert_entry`], like every other builder here).
+///
+/// The absent branch does *not* apply `f` to `default` — matching Rust's
+/// `entry(k).or_insert(d)`, Haskell's `insertWith`, Kotlin's `merge` and Elixir's
+/// `Map.update/4`. The alternative reading is the special case reached by passing
+/// `f(default)` here, and cannot express a first-seen value outside `f`'s image
+/// (no `Int` doubles to 5), so this is strictly the more expressive of the two.
+/// Decided in `plans/stitch-map-you-can-build.md`.
+///
+/// This is the operation six of the twelve association-list workarounds in the
+/// examples corpus were actually reaching for.
+fn native_map_update(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [map, key, default, function] = args else {
+        return Err(RuntimeError::new(
+            "update expects (map, key, default, function)",
+        ));
+    };
+    let existing = expect_map("update", map)?;
+    let updated = match existing.iter().find(|(candidate, _)| candidate == key) {
+        Some((_, value)) => apply_values(function, core::slice::from_ref(value), env)?,
+        None => default.clone(),
+    };
+    let mut entries = existing.to_vec();
+    insert_entry(&mut entries, key, &updated);
+    Ok(Value::Map(entries.into()))
+}
+
 /// `Map.fromList(pairs)` — a `Map` built from a `List` of `(key, value)` tuples.
 ///
 /// The entry count comes from the data, which is the thing a map literal cannot
@@ -1867,6 +1897,90 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(run_map(r#"Map.get([:], "a") == None"#), Value::Bool(true));
+    }
+
+    // The payoff for the whole module. `logstats.st` and `inventory.st` each
+    // hand-wrote the same five-line O(n²) `fold`/`find`/`map` tally, in two
+    // unrelated files, because there was no way to build a dictionary. This is
+    // that tally.
+    #[test]
+    fn map_update_expresses_a_tally_in_one_expression() {
+        assert_eq!(
+            run_map(
+                r#"{
+                       let tally = fold(["a", "b", "a"], [:], (acc, w) -> Map.update(acc, w, 1, $ + 1))
+                       count(tally) == 2
+                           and Map.get(tally, "a") == Some(2)
+                           and Map.get(tally, "b") == Some(1)
+                           and Map.keys(tally) == ["a", "b"]
+                   }"#
+            ),
+            Value::Bool(true)
+        );
+    }
+
+    // The absent-key branch inserts `default` **raw**; `f` applies only to a
+    // value that was already there. That is the fork settled in the plan, and
+    // the two readings differ *only* here — so this is the test that pins it.
+    #[test]
+    fn map_update_applies_f_only_to_an_existing_value() {
+        assert_eq!(
+            run_map(r#"Map.get(Map.update(["k": 3], "k", 99, $ * 2), "k") == Some(6)"#),
+            Value::Bool(true)
+        );
+        // Absent: 5, not 10. The rejected reading (apply `f` to the default)
+        // would give 10 here — and could not produce 5 under *any* Int default,
+        // since nothing doubles to it. That asymmetry is why this form was
+        // chosen: it is strictly the more expressive of the two.
+        assert_eq!(
+            run_map(r#"Map.get(Map.update([:], "k", 5, $ * 2), "k") == Some(5)"#),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn map_update_agrees_with_its_law() {
+        // Present key ≡ inserting f(existing).
+        assert_eq!(
+            run_map(
+                r#"{
+                       let m = ["a": 1, "b": 2]
+                       Map.update(m, "a", 0, $ + 5)
+                           == Map.insert(m, "a", unwrapOr(Map.get(m, "a"), 0) + 5)
+                   }"#
+            ),
+            Value::Bool(true)
+        );
+        // Absent key ≡ inserting the default, untouched.
+        assert_eq!(
+            run_map(
+                r#"{
+                       let m = ["a": 1, "b": 2]
+                       Map.update(m, "zz", 7, $ + 5) == Map.insert(m, "zz", 7)
+                   }"#
+            ),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn map_update_keeps_an_existing_keys_position() {
+        assert_eq!(
+            run_map(r#"Map.keys(Map.update(["a": 1, "b": 2], "a", 0, $ + 10)) == ["a", "b"]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_map(r#"Map.keys(Map.update(["a": 1], "z", 0, $ + 10)) == ["a", "z"]"#),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn map_update_refuses_a_non_map_receiver() {
+        assert_eq!(
+            run_map_err(r#"Map.update([1, 2, 3], "a", 0, $ + 1)"#),
+            "update expects a Map, got List"
+        );
     }
 
     // The criterion the whole `Map` module exists for: the entry count comes
