@@ -177,7 +177,13 @@ enum Cmd {
     /// loom model-check tests (a separate `--cfg loom` compilation), the
     /// generated-diagram drift check, and the doc-link check. Fast (~1s).
     /// Doesn't touch QEMU.
-    Test,
+    Test {
+        /// Extra flags for the nextest run — e.g. `--no-fail-fast` to see every
+        /// failing suite instead of stopping at the first. Not forwarded to the
+        /// loom model-check (a plain `cargo test`, different flag vocabulary).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Check that every relative `.md` link in the repo resolves.
     ///
     /// Also runs inside `cargo xtask test`; standalone here because it's
@@ -526,6 +532,28 @@ mod cli_surface_tests {
         }
     }
 
+    /// `test` forwards trailing flags to its nextest run.
+    ///
+    /// The motivating one is `--no-fail-fast`: nextest stops at the first failure,
+    /// so a single broken suite hides how many *others* would have failed. When the
+    /// tree is red in one crate — a parallel edit, a mid-refactor module — the
+    /// question "is anything else broken?" has no answer without it, and the gate
+    /// is exactly when that question matters.
+    #[test]
+    fn test_forwards_trailing_args() {
+        let cli = Cli::try_parse_from(["xtask", "test", "--no-fail-fast"])
+            .expect("test takes trailing args");
+        let Cmd::Test { args } = cli.cmd else { panic!("expected Test") };
+        assert_eq!(args, ["--no-fail-fast"]);
+    }
+
+    #[test]
+    fn test_without_args_forwards_nothing() {
+        let cli = Cli::try_parse_from(["xtask", "test"]).expect("bare test parses");
+        let Cmd::Test { args } = cli.cmd else { panic!("expected Test") };
+        assert!(args.is_empty(), "a bare `cargo xtask test` must be unchanged: {args:?}");
+    }
+
     /// The snemu-linked verbs are raw passthroughs: lean `xtask` captures their
     /// argv verbatim and forwards it to `xtask-itest`, which does the real parsing
     /// and validation. So the flags are deliberately *not* checked here — keeping
@@ -728,7 +756,7 @@ fn main() -> ExitCode {
             run_collector(&all)
         }
         Cmd::Stack { cmd } => stack(cmd),
-        Cmd::Test => plan::run_unit_tests(),
+        Cmd::Test { args } => plan::run_unit_tests(&args),
         Cmd::Links => links::check(),
         Cmd::ItestShow { args } => delegate_itest("itest-show", &args),
         Cmd::Itest { args } => delegate_itest("itest", &args),

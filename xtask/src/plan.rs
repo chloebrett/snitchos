@@ -290,7 +290,37 @@ pub(crate) fn unit_test_plan<'a>(
 /// **Not** the generated-diagram drift check, despite what this said until
 /// 2026-07-29: that moved to `xtask-itest`'s nextest phase when the tool was
 /// split, so lean `xtask` need not link snemu to run the gate.
-pub fn run_unit_tests() -> ExitCode {
+/// Build the `cargo nextest run …` argv for `plan`, with `forwarded` appended.
+///
+/// One invocation names every host suite with its own `-p`, folds per-crate
+/// features into a single namespaced `--features` (nextest resolves features once
+/// for the whole run), and puts the caller's flags **last** so they can override
+/// what came before rather than the reverse.
+fn nextest_argv(plan: &[(&str, &'static [&'static str])], forwarded: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = vec!["nextest".into(), "run".into()];
+    for (crate_name, _) in plan {
+        args.push("-p".into());
+        args.push((*crate_name).to_string());
+    }
+    let features: Vec<String> = plan
+        .iter()
+        .filter_map(|(name, extra)| match extra {
+            ["--features", feat] => Some(format!("{name}/{feat}")),
+            _ => None,
+        })
+        .collect();
+    if !features.is_empty() {
+        args.push("--features".into());
+        args.push(features.join(","));
+    }
+    args.extend(forwarded.iter().cloned());
+    args
+}
+
+/// Run every host test suite. `forwarded` goes to the **nextest run only** — the
+/// loom model-check below is a plain `cargo test` whose flag vocabulary differs,
+/// so a nextest-only flag like `--no-fail-fast` must not reach it.
+pub fn run_unit_tests(forwarded: &[String]) -> ExitCode {
     let members = match workspace_members() {
         Ok(m) => m,
         Err(e) => {
@@ -316,22 +346,7 @@ pub fn run_unit_tests() -> ExitCode {
     // so nextest's not-running-doctests is a non-issue; loom is a separate `--cfg`
     // build below either way.)
     eprintln!("=== unit tests (nextest, {} host suites) ===", plan.len());
-    let mut nextest_args: Vec<String> = vec!["nextest".into(), "run".into()];
-    for (crate_name, _) in &plan {
-        nextest_args.push("-p".into());
-        nextest_args.push((*crate_name).to_string());
-    }
-    let features: Vec<String> = plan
-        .iter()
-        .filter_map(|(name, extra)| match extra {
-            ["--features", feat] => Some(format!("{name}/{feat}")),
-            _ => None,
-        })
-        .collect();
-    if !features.is_empty() {
-        nextest_args.push("--features".into());
-        nextest_args.push(features.join(","));
-    }
+    let nextest_args = nextest_argv(&plan, forwarded);
     let arg_refs: Vec<&str> = nextest_args.iter().map(String::as_str).collect();
     if !run_cargo_test("all host suites", &arg_refs, &[]) {
         return ExitCode::from(1);
@@ -509,6 +524,52 @@ fn run_cargo_test(label: &str, args: &[&str], env: &[(&str, &str)]) -> bool {
             eprintln!("    FAILED to invoke cargo: {e}");
             false
         }
+    }
+}
+
+/// The nextest invocation `cargo xtask test` runs, as a value.
+///
+/// Extracted from `run_unit_tests` so the argv can be asserted without executing
+/// a full workspace test run — the forwarding is the part worth pinning, and it is
+/// pure.
+#[cfg(test)]
+mod nextest_argv_tests {
+    use super::nextest_argv;
+
+    const PLAN: &[(&str, &'static [&'static str])] =
+        &[("collector", &[]), ("protocol", &["--features", "std"])];
+
+    #[test]
+    fn every_planned_crate_is_named_with_its_own_dash_p() {
+        let argv = nextest_argv(PLAN, &[]);
+        assert!(argv.starts_with(&["nextest".to_string(), "run".to_string()]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-p", "collector"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-p", "protocol"]), "{argv:?}");
+    }
+
+    #[test]
+    fn per_crate_features_fold_into_one_namespaced_flag() {
+        let argv = nextest_argv(PLAN, &[]);
+        assert!(argv.windows(2).any(|w| w == ["--features", "protocol/std"]), "{argv:?}");
+    }
+
+    /// Forwarded flags land **last**, after the packages and features, so they can
+    /// override rather than be overridden.
+    #[test]
+    fn forwarded_args_are_appended() {
+        let argv = nextest_argv(PLAN, &["--no-fail-fast".to_string()]);
+        assert_eq!(argv.last().map(String::as_str), Some("--no-fail-fast"), "{argv:?}");
+    }
+
+    /// The no-args path must be byte-identical to what the gate ran before this
+    /// flag existed — forwarding is opt-in, and the gate's default is untouched.
+    #[test]
+    fn no_forwarded_args_changes_nothing() {
+        assert_eq!(nextest_argv(PLAN, &[]), nextest_argv(PLAN, &[]));
+        assert!(
+            !nextest_argv(PLAN, &[]).iter().any(|a| a.starts_with("--no-")),
+            "a bare run must not acquire flags"
+        );
     }
 }
 
