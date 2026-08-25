@@ -90,3 +90,23 @@ fs-image/bin/
 # RISC-V Image emitted by `cargo xtask image` for the VisionFive 2 (`booti`).
 # A build artifact — regenerate from the vf2 kernel; not reviewed.
 /snitchos.img
+
+# --- web/ (the browser app) ---------------------------------------------------
+# Node dependencies and Yarn 4's caches. `.yarn/releases` IS committed (it pins
+# the package manager for a fresh clone); everything else under .yarn is derived.
+web/node_modules/
+web/.yarn/*
+!web/.yarn/releases
+web/dist/
+
+# Artifacts staged by `cargo xtask web`: the release kernel ELF, the wasm-pack
+# output, and the manifest describing them. Derived — the same call as
+# docs/generated/'s opposite: regenerate with `cargo xtask web`, never commit.
+# Committing them is how a "regression" turns out to be a stale artifact.
+web/public/kernel.elf
+web/public/build.json
+web/src/pkg/
+
+# Playwright's browser downloads and run output.
+web/test-results/
+web/playwright-report/
