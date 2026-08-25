@@ -3,7 +3,7 @@
 //!
 //! Scope is deliberately the *impure* half of the pipeline: the model call and
 //! the shape of a candidate. The gate is `stitch::gate`; recipe values that are
-//! pure data belong in `cram-corpus`. See `plans/corpus-mvp.md` "Structure" —
+//! pure data belong in `cram-corpus`. See `plans/legacy/corpus-mvp.md` "Structure" —
 //! the line goes at the seam, and the seam is the model call.
 //!
 //! Consumed from `xtask-cram`, never lean `xtask`: an edit here must not
@@ -174,11 +174,16 @@ pub struct Run {
     /// up, not that generation was cut short. [`run_once_guarded`] does cut it
     /// short, and sets this too.
     pub abandoned: bool,
-    /// Generation was stopped because the program outgrew its byte cap. Distinct
-    /// from `abandoned`: that one means correction gave up and the program still
-    /// finished, this one means it never did. The gate will usually call such a
-    /// program a parse death, and it is not one — it is a program that was cut
-    /// off, which is a fact about the harness rather than about Stitch.
+    /// Generation was stopped because the program outgrew its byte cap. The gate
+    /// will usually call such a program a parse death, and it is not one — it is
+    /// a program that was cut off, which is a fact about the harness rather than
+    /// about Stitch.
+    ///
+    /// Independent of `abandoned`, not exclusive with it: under
+    /// [`run_once_capped`] a candidate can spend its correction budget (giving up
+    /// the guard) and *then* outgrow the cap while finishing, in which case both
+    /// are set. Read `overlong` as "was it cut short", `abandoned` as "did
+    /// correction give up" — they answer different questions.
     pub overlong: bool,
     /// Every rewind, in order.
     pub corrections: Vec<Correction>,
@@ -463,6 +468,12 @@ pub fn run_once_capped<M: Model + ?Sized>(
             let dropped = round.concat();
             let mut separator = String::new();
             let mut first = true;
+            // Unguarded means the *correction* guard is off, not that the length
+            // cap is. This is the path most likely to yield a finished, trained-on
+            // program, so leaving it uncapped aimed the exemption at the very
+            // candidates the cap exists to bound.
+            let mut tail_chunks: Vec<String> = Vec::new();
+            let mut overlong_finish = false;
             let finished = model.complete(&system, &user, &prefix, &mut |chunk| {
                 tokens += 1;
                 on_chunk(chunk);
@@ -470,12 +481,17 @@ pub fn run_once_capped<M: Model + ?Sized>(
                     first = false;
                     separator = lost_separator(&dropped, chunk).to_string();
                 }
-                true
+                tail_chunks.push(chunk.to_string());
+                let program =
+                    extract(&format!("{prefix}{separator}{}", tail_chunks.concat())).program;
+                overlong_finish = max_bytes > 0 && program.len() > max_bytes;
+                !overlong_finish
             })?;
             // A `Correction` is a *completed* rewind — discarded text plus what
             // replaced it. This last refusal never got one; `abandoned` records
             // that correction ran out, not that the program did.
             let mut run = assemble(format!("{prefix}{separator}{finished}"), tokens, true);
+            run.overlong = overlong_finish;
             run.corrections = corrections;
             return Ok(run);
         }

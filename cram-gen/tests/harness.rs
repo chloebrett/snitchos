@@ -282,6 +282,86 @@ fn a_program_inside_the_cap_is_untouched() {
     assert_eq!(run.outcome.stage(), "ok");
 }
 
+/// The cap must survive the budget running out.
+///
+/// When correction gives up it drops the guard and lets the program finish
+/// unguarded — deliberately, since a truncated candidate is the worst outcome.
+/// But "unguarded" was taken to mean *uncapped*: that finishing completion never
+/// consulted `max_bytes`, so the one path most likely to produce a trained-on
+/// program was the one path with no length bound. ~15 files per batch escaped
+/// the cap this way, and the batch9 measurement behind the cap — 25% of files
+/// over 12 KB, 80% of those dying at parse — applies to them exactly as much.
+#[test]
+fn the_cap_still_fires_once_the_correction_budget_is_spent() {
+    let finish = format!(
+        "ext Time = Int\next g() -> Int = 2\n{}```",
+        "// narration\n".repeat(400)
+    );
+    let model = Sequence::new(&[
+        "```stitch\next f() -> Int = 1\next Time = Int\n",
+        "ext Time = Int\n",
+        &finish,
+    ]);
+
+    let run = run_once_capped(&model, "anything", 1, 500, &mut |_| {}, &mut |_| {})
+        .expect("fake succeeds");
+
+    assert!(run.abandoned, "correction should have given up");
+    assert!(run.overlong, "the cap must bound the unguarded finishing completion too");
+    assert!(
+        run.program.len() < 2000,
+        "the finishing completion ran past the cap: {} bytes",
+        run.program.len()
+    );
+}
+
+/// The other half of the cap's contract on that path: it must not over-fire.
+///
+/// A spent budget deliberately lets the program run to the end, so a *finished*
+/// candidate that stays inside the cap must arrive whole and unflagged. Without
+/// this, "bound the finishing completion" could be satisfied by truncating every
+/// one of them.
+#[test]
+fn a_finished_program_inside_the_cap_is_not_flagged() {
+    let model = Sequence::new(&[
+        "```stitch\next f() -> Int = 1\next Time = Int\n",
+        "ext Time = Int\n",
+        "ext Time = Int\next g() -> Int = 2\next h() -> Int = 3\n```",
+    ]);
+
+    let run = run_once_capped(&model, "anything", 1, 100_000, &mut |_| {}, &mut |_| {})
+        .expect("fake succeeds");
+
+    assert!(run.abandoned, "correction gave up");
+    assert!(!run.overlong, "a short program must not trip the cap");
+    assert!(
+        run.program.contains("ext h() -> Int = 3"),
+        "the program must have run to completion: {:?}",
+        run.program
+    );
+}
+
+/// `max_bytes` is a limit, not a threshold: a program of exactly that many bytes
+/// is within it. Pinned by measuring the program first, so the boundary is
+/// asserted rather than guessed at from a literal that drifts with the fixture.
+#[test]
+fn a_program_exactly_at_the_cap_is_allowed() {
+    let replies = [
+        "```stitch\next f() -> Int = 1\next Time = Int\n",
+        "ext Time = Int\n",
+        "ext Time = Int\next g() -> Int = 2\next h() -> Int = 3\n```",
+    ];
+    let uncapped = run_once_capped(&Sequence::new(&replies), "anything", 1, 0, &mut |_| {}, &mut |_| {})
+        .expect("fake succeeds");
+    let exact = uncapped.program.len();
+
+    let run = run_once_capped(&Sequence::new(&replies), "anything", 1, exact, &mut |_| {}, &mut |_| {})
+        .expect("fake succeeds");
+
+    assert!(!run.overlong, "{exact} bytes against a {exact}-byte cap is not over it");
+    assert_eq!(run.program.len(), exact, "nothing should have been cut");
+}
+
 /// Zero disables it, so the flag can be turned off without a second code path.
 #[test]
 fn a_cap_of_zero_never_fires() {

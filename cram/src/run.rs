@@ -340,6 +340,33 @@ fn mean_loss_and_gradient<G: Gemm + Sync>(
     (loss, gradient)
 }
 
+/// Mean held-out loss for `model` over `held_out`, exactly as `train` measures it.
+///
+/// Scoring a checkpoint after the fact — against different text, or a corpus it
+/// was never trained on — is not something the training loop can do, because it
+/// only ever scores the weights it is currently holding. This is that same pass,
+/// exposed.
+///
+/// It shares `held_out_batch` and `mean_loss_and_gradient` with the loop rather
+/// than reimplementing either. The discarded gradient is deliberate for the
+/// reason given on `mean_loss_and_gradient`: a forward-only path would be a
+/// second implementation of the forward pass, and the two disagreeing is a far
+/// worse bug than the milliseconds.
+///
+/// The batch is a function of `config.seed`, `config.eval_batch` and
+/// `config.context`, so two scores are comparable only when all three match —
+/// and a score is comparable to a training run's curve only when they match it.
+#[must_use]
+pub fn score<G: Gemm + Sync>(
+    model: &Model,
+    held_out: &[u16],
+    config: TrainingConfig,
+    gemm: &G,
+) -> f32 {
+    let batch = config.held_out_batch(held_out);
+    mean_loss_and_gradient(model, &batch, model.weights().len(), gemm).0
+}
+
 /// Draw `max_tokens` tokens from `model`, continuing `prompt`.
 ///
 /// **Unconstrained** — no oracle mask. That is the whole point of the
@@ -576,6 +603,42 @@ mod tests {
         assert!(
             reported.iter().flatten().all(|loss| loss.is_finite() && *loss > 0.0),
             "a held-out loss should be a real positive number: {reported:?}"
+        );
+    }
+
+    /// Scoring a checkpoint after the fact must return the *same number* the
+    /// training loop reported for those weights — not merely a plausible one.
+    ///
+    /// This is the whole reason `score` exists rather than a hand-rolled
+    /// forward-only loss: a second implementation that disagrees would not
+    /// error, it would quietly report a different metric, and every comparison
+    /// built on it would be wrong in a way nothing downstream could catch.
+    ///
+    /// `train` measures the held-out loss *before* the optimizer steps, so the
+    /// first reported value describes the initial weights — which
+    /// `pseudo_random_weights` reproduces exactly from the seed.
+    #[test]
+    fn scoring_a_model_returns_the_trainers_own_held_out_loss() {
+        let tokens: Vec<u16> = (0..64u16).map(|token| token % 16).collect();
+        let config = tiny(1);
+        let mut reported = Vec::new();
+
+        train(&tokens, &tokens, 16, config, &NaiveGemm, |progress| {
+            reported.push(progress.held_out_loss);
+        });
+
+        let model_config = config.rung.config();
+        let model = Model::new(
+            model_config,
+            16,
+            pseudo_random_weights(model_config.param_count(16), config.seed),
+        )
+        .expect("weight count is derived from the same config");
+
+        assert_eq!(
+            score(&model, &tokens, config, &NaiveGemm),
+            reported[0].expect("the first report carries a held-out loss"),
+            "the scorer must be the trainer's own held-out pass, bit for bit"
         );
     }
 
