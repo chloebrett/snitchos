@@ -31,16 +31,20 @@ lands before the hard one.
 ### Status (2026-07-17)
 
 **Cross-hart `Kill` has since landed** — see
-[multi-hart-userspace.md](legacy/multi-hart-userspace.md) Step 3. The "only cross-hart
+[multi-hart-userspace.md](multi-hart-userspace.md) Step 3. The "only cross-hart
 running remains deferred" caveat in increment 3.5 below is **no longer true**:
 `kill_task` now handles a target running on another hart by setting
 `Task.kill_requested` + sending an `IPI_KILL_CHECK`, and the target
 self-terminates at its next checkpoint (`KillOutcome::Requested`). The
-`KillAction::RefuseRunningRemote` classifier arm survives in `kernel-core`, but
-the kernel translates it into that async request rather than a refusal.
+`KillAction::RefuseRunningRemote` classifier arm survives in `kernel-proc`
+(`sched.rs`), but the kernel translates it into that async request rather than a
+refusal.
 
-**Remaining here: increments 4 (graceful shutdown engine) and 5 (acceptance
-itest).** The `Kill` mechanism itself is done.
+**v2a is complete** — increments 1-5 all shipped, all three acceptance scenarios
+green; see the closing note below. v2b's two deferrals both landed elsewhere:
+timed-`WaitAny` + hung detection as
+[timed-waitany-hung-detection.md](timed-waitany-hung-detection.md), and cross-hart
+`Kill` per the paragraph above. Nothing here is outstanding.
 
 - **Increment 1 ✅** — `teardown_order` in the `supervision` crate (17 tests green).
 - **Increment 2 ✅** — the cap primitive, host-tested: `abi` (`Syscall::Kill = 30`,

@@ -25,9 +25,9 @@ blocked on a *mechanism*, not on effort:
 
 **`thread::sleep`'s blocker is being built right now.** The "block-until-deadline
 syscall" it waits on is exactly the timer-driven timeout queue in
-[timed-waitany-hung-detection.md](timed-waitany-hung-detection.md) (v2b). If that
-lands, `sleep` becomes reachable — worth revisiting then rather than rediscovering
-the link later.
+[timed-waitany-hung-detection.md](legacy/timed-waitany-hung-detection.md) (v2b) —
+which has since **shipped** (all increments green). `sleep` is therefore reachable
+now; this is the revisit that plan's note asked for.
 
 **`env`'s blocker moved.** This plan and the facade both say `env` needs "a
 startup-info (`BootInfo`) mechanism". Manifest v2 shipped **without** a BootInfo

@@ -191,7 +191,7 @@ Mitigations:
 - **Action on detection:** reboot-and-report is blunt but deterministic and gives the agent
   the diagnostic it needs. Kill-and-restart-the-task is surgical but assumes the task is a
   clean unit of work; it composes with the shipped `Kill` primitive
-  (see [supervision](../plans/supervision-v2.md)) and is a natural follow-on, not v1.
+  (see [supervision](../plans/legacy/supervision-v2.md)) and is a natural follow-on, not v1.
 
 ## The loop
 
@@ -252,5 +252,5 @@ Do the bounded poll with the driver; treat the watchdog as its own subsystem.
   image` → TFTP → `booti`), the netboot flow, the SBI-call gotchas.
 - [vf2-audio-design.md](vf2-audio-design.md) — the first driver this loop would iterate on;
   the `PollUntilSet` hang is L1's motivating case.
-- [../plans/supervision-v2.md](../plans/supervision-v2.md) — `Kill` + supervision, which a
+- [../plans/legacy/supervision-v2.md](../plans/legacy/supervision-v2.md) — `Kill` + supervision, which a
   kill-and-restart watchdog action would compose with.

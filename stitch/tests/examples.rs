@@ -2,7 +2,7 @@
 //!
 //! Distinct from `canon.rs` (`fs-image/` + the prelude — what's *shipped*,
 //! parse+type-check only) and from `stim_fsm.rs` (one program's own domain
-//! tests). This is the gate for `plans/stitch-examples-corpus.md`: each
+//! tests). This is the gate for `plans/legacy/stitch-examples-corpus.md`: each
 //! example must parse, type-check clean, and — the property canon.rs doesn't
 //! check — every `test` item inside it must pass. A program with no `test`
 //! items is treated as a failure here; the whole point of the batch is

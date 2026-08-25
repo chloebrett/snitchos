@@ -4,7 +4,7 @@
 [corpus-mvp.md](corpus-mvp.md). Related:
 [corpus-recipe-axes.md](corpus-recipe-axes.md) (the recipes used below),
 [../docs/language-design.md](../docs/language-design.md) (source for the
-cheat-sheet), [stitch-examples-corpus.md](stitch-examples-corpus.md) (where
+cheat-sheet), [stitch-examples-corpus.md](legacy/stitch-examples-corpus.md) (where
 better exemplars come from).
 
 **The deliverable is a decision and four numbers, not code.** Roughly two hours,

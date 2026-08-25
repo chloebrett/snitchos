@@ -3,8 +3,8 @@
 **Status: ✅ COMPLETE — all 30 programs shipped.** `examples/stitch/` carries 30
 programs, ~6,300 lines and **279 native tests**, every one parsing, type-checking and
 passing its own suite under `stitch/tests/examples.rs`. Write-up:
-[stitch 18](../posts/stitch-18-a-binding-is-not-a-boundary.md); findings:
-[stitch-examples-findings.md](stitch-examples-findings.md).
+[stitch 18](../../posts/stitch-18-a-binding-is-not-a-boundary.md); findings:
+[stitch-examples-findings.md](../stitch-examples-findings.md).
 
 The exercise paid for itself the way it was designed to — the friction *was* the data.
 It found a real interpreter defect (`Env::bind` reset `self_closure`, silently disabling
@@ -15,7 +15,7 @@ manifestations of one maximal-munch grammar fact plus two stdlib types (`Set<T>`
 `Either`) that were designed and never built.
 
 **What the exemplars turned out to be worth**, measured afterwards in
-[batch11-training-findings.md](../notes/batch11-training-findings.md): swapping the 24
+[batch11-training-findings.md](../../notes/batch11-training-findings.md): swapping the 24
 that reach training for an equal token count of generated corpus costs ~0.022 nats —
 about **20× per token** against generated Stitch. That figure is a *ceiling*, not a point
 estimate, pending the deconfounding pair described in that note's "Open" section.
@@ -24,20 +24,20 @@ Tracking doc, as originally written, for a batch of new `.st` example
 programs, proposed and approved 2026-07-26. Each is ~100+ lines (1000 is a
 guideline, not a cap — let the program's natural size win), lands in
 `examples/stitch/`, and includes native `test "…" { expect … }` blocks (see
-[stitch-testing-design.md](../docs/stitch-testing-design.md)) giving **adequate
+[stitch-testing-design.md](../../docs/stitch-testing-design.md)) giving **adequate
 coverage of its core logic — every program's tests must pass before it's
 ticked off.** The batch doubles as hand-polished gold-exemplar material for
-[corpus-mvp.md](corpus-mvp.md)'s recipe-matched prompting, not just a REPL demo
+[corpus-mvp.md](../corpus-mvp.md)'s recipe-matched prompting, not just a REPL demo
 corpus like `fs-image/`.
 
-**Findings note:** [stitch-examples-findings.md](stitch-examples-findings.md)
+**Findings note:** [stitch-examples-findings.md](../stitch-examples-findings.md)
 — one running doc for all 30, updated as each program lands. Record anything
 non-obvious: language limitations hit, workarounds, awkward-to-express
 constructs, gaps in the stdlib/prelude, checker surprises. This is the point
 of the exercise as much as the programs themselves — it's read-the-language-
 by-writing-a-lot-of-it, and the friction is the data.
 
-Read [../docs/language-design.md](../docs/language-design.md) before writing
+Read [../docs/language-design.md](../../docs/language-design.md) before writing
 any of these — surface syntax, `prod`/`sum`/`contract`/`on`, `uses`
 capabilities, `use <-`, placeholders — and skim the existing corpus
 (`fs-image/{primes,double}.st`, `fs-image/lib/{text,stats,greet}.st`,
@@ -158,7 +158,7 @@ self-tail-call regression fixed) and one documentation fix
   a work queue, not a naming scheme.
 - **Definition of done per program:** file written, type-checks, its `test`
   blocks pass, adequate coverage of the interesting paths (not just the happy
-  path), and [stitch-examples-findings.md](stitch-examples-findings.md)
+  path), and [stitch-examples-findings.md](../stitch-examples-findings.md)
   updated with anything worth recording before the checkbox is ticked.
 - **Gate:** `stitch/tests/examples.rs` (new) parses + type-checks every file
   under `examples/stitch/` and asserts every `test` item in every file

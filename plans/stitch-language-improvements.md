@@ -1,7 +1,7 @@
 # Stitch — language improvements proposed from the 30-program corpus
 
 Derived from [stitch-examples-findings.md](stitch-examples-findings.md) (the lab
-notebook for [stitch-examples-corpus.md](stitch-examples-corpus.md)'s 30
+notebook for [stitch-examples-corpus.md](legacy/stitch-examples-corpus.md)'s 30
 programs, ~6,300 lines, 280+ tests). Every claim below was re-verified against
 the shipped source before being written down — file and line references are to
 `stitch/src/` as of 2026-08-06.
@@ -649,7 +649,7 @@ for a real hash or tree.
 
 - [stitch-examples-findings.md](stitch-examples-findings.md) — the lab notebook
   every claim here derives from.
-- [stitch-examples-corpus.md](stitch-examples-corpus.md) — the 30-program plan.
+- [stitch-examples-corpus.md](legacy/stitch-examples-corpus.md) — the 30-program plan.
 - [../docs/language-design.md](../docs/language-design.md) — design rationale;
   proposals 1 (`Set`, `Key`), 3 (effect rules), 9 (`Either`), and 10c each
   imply an edit here.

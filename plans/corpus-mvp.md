@@ -109,7 +109,7 @@ Point a ~4B local open model at hand-written real Stitch, feed it recipe tuples,
 and let it run until **~500k validated tokens** exist. Then train drivel on that
 and compare against the babble-trained drivel.
 
-**The exemplar source is [stitch-examples-corpus.md](stitch-examples-corpus.md)'s
+**The exemplar source is [stitch-examples-corpus.md](legacy/stitch-examples-corpus.md)'s
 30 programs** (~100+ lines each, native `test` blocks, hand-polished) — that plan
 already names this one as its consumer. 1 of 30 exists today (`json.st`), so
 exemplar quality and count both improve underneath this plan as it proceeds; the

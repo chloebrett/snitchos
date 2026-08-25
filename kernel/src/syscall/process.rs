@@ -42,7 +42,7 @@ pub(super) fn handle_exit(frame: &TrapFrame) -> ! {
 /// **spent** — consumed from the caller's table and snitched as `CapEvent::Revoked`,
 /// the destruction half of the mint at `Spawn` (the lifecycle is symmetric on the
 /// wire). A missing/wrong cap refuses via the normal cap path; a target v2a can't yet
-/// safely kill (self / cross-hart-running / blocked — see `plans/supervision-v2.md`
+/// safely kill (self / cross-hart-running / blocked — see `plans/legacy/supervision-v2.md`
 /// §3a) refuses cleanly and logs the precise deferred reason.
 pub(super) fn handle_kill(frame: &mut TrapFrame) {
     use kernel_proc::cap::{invoke_kill, Handle, Rights};

@@ -337,7 +337,7 @@ pub fn on_wake(state: TaskState) -> bool {
 /// What the kernel-side `kill_task` should do with a target, decided purely from
 /// its scheduler placement. The v2a `Kill` primitive terminates a task that is
 /// **not** the one running; where the target's id lives — and whether reaping it
-/// now is safe — is the whole design (see `plans/supervision-v2.md` §3a).
+/// now is safe — is the whole design (see `plans/legacy/supervision-v2.md` §3a).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KillAction {
     /// The target already `Exited` — nothing to do; the kill succeeds idempotently.

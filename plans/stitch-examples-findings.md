@@ -1,6 +1,6 @@
 # Stitch examples corpus — findings
 
-Running notes from writing [stitch-examples-corpus.md](stitch-examples-corpus.md)'s
+Running notes from writing [stitch-examples-corpus.md](legacy/stitch-examples-corpus.md)'s
 30 programs. One entry per program once it lands (or as it's in progress, if
 something is worth capturing before the file is finished). Optimized for
 "what would I want to know before writing the next one" — language

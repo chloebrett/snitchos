@@ -12,7 +12,7 @@ This tool extends the gate to Stitch, closing the one methodological hole in
 > target has changed.** Both of the design's open questions — "what are the
 > tests" and the non-termination cap — were closed by work that shipped after
 > this page was captured (see *Prerequisites, now met*). Separately, the
-> 30-program [examples corpus](../plans/stitch-examples-corpus.md) now exists
+> 30-program [examples corpus](../plans/legacy/stitch-examples-corpus.md) now exists
 > and is a better first target than stim's FSM, **and** its
 > [findings](../plans/stitch-examples-findings.md) are direct evidence about
 > which mutation operators pay. Both are folded in below.
@@ -167,7 +167,7 @@ host project treats mutation testing as a first-class gate.
 - [stim-design.md](stim-design.md) — the editor whose Stitch FSM this audits.
 - `mutation_testing_setup` memory / the `mutation-testing` skill — the Rust gate
   (`cargo-mutants`) this extends to Stitch.
-- [../plans/stitch-examples-corpus.md](../plans/stitch-examples-corpus.md) and
+- [../plans/legacy/stitch-examples-corpus.md](../plans/legacy/stitch-examples-corpus.md) and
   [../plans/stitch-examples-findings.md](../plans/stitch-examples-findings.md) —
   the 30-program first target and the evidence behind the operator set.
 - `stitch/src/ast.rs`, `stitch/src/parser.rs`, `stitch/src/interp.rs` — the AST +
