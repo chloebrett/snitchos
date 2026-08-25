@@ -2742,6 +2742,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xtask-board"
+version = "0.0.1"
+dependencies = [
+ "collector",
+]
+
+[[package]]
 name = "xtask-cmds"
 version = "0.0.1"
 dependencies = [

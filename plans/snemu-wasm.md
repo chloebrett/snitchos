@@ -38,8 +38,15 @@ wall-clock pacing.
 - **Wall-clock pacing.** Named in [docs/scaling-down-snitchos.md](../docs/scaling-down-snitchos.md);
   irrelevant to a page that boots, prints, and stops. Milestone 4.
 - **Backend B / any JIT in the browser.** wasm gets Backend A by construction.
-- **A bundler, React, or `viz/` convergence.** `wasm-pack --target web` emits an ES
-  module a `<script type="module">` loads directly. Keep the build step at zero.
+- ~~**A bundler, React, or `viz/` convergence.**~~ **Reversed 2026-08-25.** The
+  original reasoning — `wasm-pack --target web` emits an ES module a `<script>` can
+  load, so keep the build step at zero — is true and was the wrong trade. This page
+  is not the deliverable; it is the first surface of the **one browser app with four
+  frame sources** (in-tab wasm, host socket, board serial, replay) that
+  `docs/uart-telemetry-design.md` already commits to, and which is also meant to host
+  the collector's dashboards and the docs-site embeds. Scaffolding that as vanilla JS
+  and porting later is strictly more work than starting on the toolchain it needs.
+  See "The toolchain" below.
 
 ## Precedent to mirror
 
@@ -103,18 +110,24 @@ teaches, in descending order of how much it changes this plan:
 
 ## Acceptance criteria
 
-- [ ] `cargo test -p snemu-wasm` runs on the host and covers the drain cursor and
+- [x] `cargo test -p snemu-wasm` runs on the host and covers the drain cursor and
       status encoding.
-- [ ] `cargo xtask test` runs `snemu-wasm`'s suite without any list edit.
-- [ ] Opening the page boots the real kernel and shows the UART boot log **in an
+- [x] `cargo xtask test` runs `snemu-wasm`'s suite without any list edit.
+- [x] Opening the page boots the real kernel and shows the UART boot log **in an
       xterm.js terminal**, ending with a `kernel.heartbeat`-era log line, with the
       guest's own colour/formatting intact rather than escaped.
-- [ ] The page shows decoded telemetry: at minimum `kernel.boot`, and span/metric
+      *(`e2e/boot.spec.ts`: "boots the kernel and reaches its heartbeat".)*
+- [x] The page shows decoded telemetry: at minimum `kernel.boot`, and span/metric
       names resolved through their `StringRegister`s.
-- [ ] The tab stays responsive throughout (a button or animation keeps working while
-      the guest boots).
-- [ ] Two loads of the same page produce byte-identical UART output — determinism
-      survives the browser.
+      *(`e2e/boot.spec.ts`: "decodes telemetry and resolves interned names".)*
+- [x] The tab stays responsive throughout (a button or animation keeps working while
+      the guest boots). *(`e2e/boot.spec.ts`: "stays responsive while the guest
+      boots" — counts painted animation frames mid-boot and times a round-trip
+      evaluation.)*
+- [x] Two loads of the same page produce byte-identical UART output — determinism
+      survives the browser. *(`e2e/boot.spec.ts`, comparing at a fixed **guest**
+      milestone rather than a wall-clock one — the comparison is only meaningful
+      between runs that executed the same instructions.)*
 - [x] **The wasm build agrees with the native one.** For a fixed program and a fixed
       instret budget, the *architectural* result — every register, the UART bytes, the
       retired instret — is identical between a native run and a wasm32 run. This is the
@@ -122,7 +135,7 @@ teaches, in descending order of how much it changes this plan:
       loads does not. **Corrected after measuring**: this originally said
       "`state_hash()` and the UART bytes", which is not achievable — `state_hash()` is
       pointer-width-dependent by construction (step 1b). The hash is pinned host-only.
-- [ ] The page displays the fingerprint of the `kernel.elf` it loaded, so a stale
+- [x] The page displays the fingerprint of the `kernel.elf` it loaded, so a stale
       artifact is visible rather than mysterious.
 
 ## Steps
@@ -241,6 +254,13 @@ differential can be widened. Making it width-independent is a small change (hash
 as an explicit `u64`; `Hasher::write` for byte slices) and its consumers are all
 same-process comparisons — snapshot-tree fork verification and `snemu_audit`, no
 committed baselines — but nothing needs it today, so it stays a deliberate non-change.
+
+*Gap closed 2026-08-25 for the app's unit tests, still open for this one.*
+`cargo xtask test` now runs the browser app's Vitest suite (see step 6), skipping
+cleanly when the Node toolchain is absent — the same contract `cargo xtask itest` has
+for a missing QEMU. The Playwright suite is `cargo xtask web --e2e`, deliberately not
+in the fast gate: it needs a built site, a staged kernel and a downloaded browser. The
+`wasm-pack test --node` suite below is still manual.
 
 *Known gap.* The wasm test is **not in `cargo xtask test`**. It needs Node on `PATH`
 plus the `wasm-bindgen` CLI, and the local Node 16 is too old (the toolchain emits
@@ -498,41 +518,92 @@ mutated normally. Crate-wide: **29 mutants, 25 caught, 4 unviable, 0 survivors.*
 
 **REFACTOR**: assessed, declined.
 
-### Step 6: The page — boot log in a real terminal, live spans, no frozen tab
+### Step 6: The app — boot log, live spans, and a build that stages itself
 
-**Acceptance criteria**: A static page (`web/`, no bundler,
-`wasm-pack build --target web`) fetches `kernel.elf`, constructs the machine, and runs
-a rAF loop calling `step_budget(~2M)` per frame, writing drained UART bytes straight to
-an **xterm.js** terminal via `term.write()` and drained frames to a span/metric view.
-**The tab stays responsive** — a spinning element or a clickable button proves it. Boot
-reaches heartbeat. Two loads produce byte-identical UART output.
+**Outcome (2026-08-25): done. All four milestone criteria pass in a real browser.**
 
-Mirror `~/c/slay/www/` for the page mechanics rather than rediscovering them:
+`cargo xtask web` builds a release kernel, runs `wasm-pack`, stages the ELF plus a
+manifest into `web/public/`, and builds the site. `--e2e` also runs the browser
+acceptance tests. Boot to heartbeat takes a couple of seconds; the Playwright suite
+runs in ~10s.
 
-- **Vendor xterm.js** into `web/xterm/` (`xterm.js` + `xterm.css`, ~290 KB total) and
-  load it with a plain `<script>` tag. No CDN — the page must work offline — and no
-  bundle step.
-- **Size the terminal from real font metrics.** An off-screen probe span measures one
-  character cell; derive `cols`/`rows` from `window.innerWidth/Height` and re-fit on
-  `resize`. (M1's guest never learns the size, so this is cosmetic here — but M3's
-  interactive Stitch REPL will want it, and it costs ten lines now.)
-- **Keep `#terminal` at `visibility: hidden` until after the first fit**, then reveal.
-  Otherwise the page flashes a wrongly-sized terminal on every load.
-- **Bail out on mobile** with a notice rather than shipping something unusable.
-- **Serve over HTTP** — `python3 -m http.server` or equivalent. `file://` cannot load
-  ES modules, so a double-clicked `index.html` will fail confusingly.
-**RED**: Manual, and honest about it: this step is DOM glue, and a headless-browser
-harness would cost more than this milestone is worth. The Rust behaviour beneath it is
-already covered by steps 2–4. Verify by driving the page and observing.
-**GREEN**: The page + a way to serve it with the release kernel alongside.
-**MUTATE**: N/A (no new Rust logic).
-**REFACTOR**: Assess.
-**Done when**: All acceptance criteria at the top of this plan are met; human approves
-commit.
+#### The toolchain
+
+Vanilla JS was scoped for this step and abandoned before it shipped, for the reason
+in "Explicitly out of scope" above: this is the first surface of the four-source app,
+not a one-off page. What landed:
+
+| Concern | Choice | Note |
+|---|---|---|
+| Build | **Vite 8** (rolldown) | CRA is deprecated; React removed it from the docs. |
+| Package manager | **Yarn 4** via corepack, `nodeLinker: node-modules` | PnP still trips Playwright's browser resolution. |
+| Language | **TypeScript 7** (native port) | Strict, plus `noUncheckedIndexedAccess`. |
+| Styling | **Tailwind 4** | CSS-first: `@theme` in `index.css`, no `tailwind.config.js`. |
+| Unit tests | **Vitest 4** + Testing Library | Shares Vite's transform pipeline. |
+| Browser tests | **Playwright** | See below — the reason this step's criteria stopped being manual. |
+| Lint/format | **Biome 2** | One binary instead of ESLint + Prettier + plugins. |
+| Terminal | **`@xterm/xterm` 6** | The package was renamed from `xterm` in 2024. |
+
+Versions were resolved by `yarn add`, not pinned by hand — which is how Vite 8 and
+TypeScript 7 got picked up rather than the versions guesswork would have chosen.
+
+#### Structure
+
+The app is written against a `FrameSource` interface (`src/frames.ts`), not against
+the emulator. `src/snemu.ts` is the only file that knows `snemu-wasm` exists, so the
+other three sources named in `docs/uart-telemetry-design.md` — host socket, board
+serial, replay — are siblings of that file rather than a refactor of anything above
+it. Scheduling logic lives in plain TypeScript (`src/pump.ts`) for the same reason it
+does on the Rust side: the decisions are testable, the `requestAnimationFrame` around
+them is not.
+
+#### The step's own lesson: the criteria stopped being manual
+
+The original plan said this step's verification was "manual, and honest about it" —
+drive the page and observe. That was the weakest thing in the whole workstream, and
+it survived only because vanilla JS came with no test runner. Playwright makes all
+four criteria assertions, and two are worth more than they look:
+
+- **Responsiveness** is checked by counting animation frames painted *mid-boot* and
+  timing a round-trip evaluation. A rAF loop that ran to completion inside one frame
+  would fail both.
+- **Determinism** compares two loads at a fixed **guest** milestone, not a fixed
+  wall-clock one. Comparing after equal wall-clock time would compare runs that
+  executed different numbers of instructions, which is not the property claimed.
+
+#### What the build learned the hard way
+
+- **`wasm-pack build` ignores a positional crate path** (0.13) and reads `Cargo.toml`
+  from the working directory — while `wasm-pack test` *accepts* the path. The
+  asymmetry produces a confusing "crate directory is missing a `Cargo.toml`".
+- **`Command` reports a missing program and a missing `current_dir` identically**
+  (`os error 2`). The error now names which is absent; it diagnosed the real cause in
+  one run.
+- **`cargo xtask web` resolves paths against the workspace root**, like `links.rs`
+  and `loc.rs`, rather than the caller's cwd. Verified by running it from `kernel/`.
+- **Vitest 4's config needs `defineConfig` from `vitest/config`**, not `vite`.
+- **Testing Library's auto-cleanup only registers with Vitest globals enabled.**
+  With explicit imports, DOM accumulates across tests and queries silently match
+  earlier tests' elements.
+- **A stale global Yarn Classic on `PATH` shadows corepack's shim**, and the failure
+  is silent: v1 ignores `packageManager` *and* `.yarnrc.yml`, then writes a v1
+  lockfile. `cargo xtask web`'s error path names this specific case.
+
+#### Artifacts are generated, never committed
+
+`web/public/kernel.elf`, `web/public/build.json` and `web/src/pkg/` are all
+gitignored. `~/c/slay` commits its built wasm so GitHub Pages needs no CI, and pays
+for it in commits titled "Update wasm binary"; this project knows that failure mode
+by name (a VF2 "regression" is a missed `cargo xtask image` until proven otherwise),
+and here it would be *two* derived artifacts able to disagree with their sources and
+with each other. The mitigation for the remaining direction — you edit the kernel and
+forget to re-run the build — is the manifest: the page shows the fingerprint of the
+kernel it loaded, so "I changed it and the fingerprint didn't move" is visible.
 
 ## Open questions to settle before step 6
 
-- **Where does `kernel.elf` come from for the page?** The release kernel is 1.8 MB and
+- ~~**Where does `kernel.elf` come from for the page?**~~ **Settled: `cargo xtask web`
+  stages it, and the artifacts are gitignored. See step 6.** The release kernel is 1.8 MB and
   is a build artifact, not a repo file. `~/c/slay` answers the equivalent question by
   **committing** its built `www/pkg/*.wasm` (1.1 MB) so GitHub Pages needs no CI — and
   pays for it in commits literally titled "Update wasm binary" and "Update wasm". This

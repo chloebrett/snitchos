@@ -23,7 +23,13 @@ const SKIP_PREFIXES: &[&str] =
 
 /// Is this repo-relative path outside the documentation we navigate?
 fn is_skipped(rel: &Path) -> bool {
-    SKIP_PREFIXES.iter().any(|p| rel.starts_with(p))
+    if SKIP_PREFIXES.iter().any(|p| rel.starts_with(p)) {
+        return true;
+    }
+    // Vendored dependency docs, at whatever depth they appear. Matched as a whole
+    // path component so `docs/node_modules-notes.md` — a real doc that merely says
+    // the word — keeps being checked.
+    rel.components().any(|c| c.as_os_str() == "node_modules")
 }
 
 /// A markdown link worth checking: a relative `.md` target plus the 1-based line
@@ -249,6 +255,25 @@ mod tests {
     fn skips_build_output_and_vcs() {
         assert!(is_skipped(Path::new("target/debug/build/x/out/README.md")));
         assert!(is_skipped(Path::new(".git/something.md")));
+    }
+
+    /// Vendored dependency docs are not ours and their links are not our contract.
+    ///
+    /// `web/node_modules` arrived with the web scaffold and instantly produced 63
+    /// "broken links" — every one of them inside a third-party package's own docs,
+    /// none of them anything this repo could fix. The directory is gitignored, so
+    /// nothing there is even under version control; walking it turns a precise guard
+    /// into noise that has to be scrolled past.
+    ///
+    /// Matched by *component*, not prefix: a second `node_modules` under any future
+    /// sub-project must be skipped too, without editing this list again.
+    #[test]
+    fn skips_vendored_node_modules_at_any_depth() {
+        assert!(is_skipped(Path::new("web/node_modules/undici/docs/index.md")));
+        assert!(is_skipped(Path::new("node_modules/x/README.md")));
+        assert!(is_skipped(Path::new("a/b/node_modules/x/README.md")));
+        // Not a blanket "anything containing the word" — a real doc keeps its links.
+        assert!(!is_skipped(Path::new("docs/node_modules-notes.md")));
     }
 
     #[test]

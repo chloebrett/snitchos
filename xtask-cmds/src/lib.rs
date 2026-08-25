@@ -10,8 +10,10 @@
 use xtask_qemu as qemu;
 
 pub mod audit;
+pub mod counters;
 pub mod links;
 pub mod loc;
 pub mod measure;
 pub mod snip;
 pub mod source;
+pub mod web;

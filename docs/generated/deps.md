@@ -60,6 +60,7 @@ graph LR
     kvetch_serve["kvetch-serve"]
     kvetch_vocab["kvetch-vocab"]
     synth["synth"]
+    xtask_board["xtask-board"]
     xtask_cmds["xtask-cmds"]
     xtask_cram["xtask-cram"]
     xtask_itest["xtask-itest"]
@@ -150,6 +151,7 @@ graph LR
     xtask --> kernel_boot
     xtask --> xtask_cmds
     xtask --> xtask_qemu
+    xtask_board --> collector
     xtask_cmds --> protocol
     xtask_cmds --> snip
     xtask_cmds --> xtask_qemu

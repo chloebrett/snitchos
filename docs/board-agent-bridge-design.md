@@ -14,7 +14,7 @@ The prerequisite for both — **Step 10** of
 [../plans/uart-telemetry.md](../plans/uart-telemetry.md), the collector `--serial`
 source — **landed 2026-08-25** and is gate-green, though not yet run against a board.
 So this plan is unblocked, and step 1 of it shrank: the `cu.*`/`tty.*` refusal it
-specified now exists as `collector::source::call_out_alternative`, to be reused rather
+specified now exists as `collector::serial::call_out_alternative`, to be reused rather
 than rewritten.
 
 The thesis: the same observability that makes SnitchOS worth building — structured

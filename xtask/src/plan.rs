@@ -406,6 +406,17 @@ pub fn run_unit_tests(forwarded: &[String]) -> ExitCode {
     if crate::links::check() != ExitCode::SUCCESS {
         return ExitCode::from(1);
     }
+    // Third member of the same family: a `DeferredCounter` reaches the wire only
+    // if it is *also* listed in `counter::COUNTERS`, and nothing compiles that
+    // second step. Two counters were silently undrained when this landed — one of
+    // them `snitchos.audio.xruns_total`, whose own doc comment calls it "the
+    // marquee real-time observable". A metric that never arrives looks exactly
+    // like a system with nothing to report, which is why this needs a test rather
+    // than attention.
+    eprintln!("=== counter registry ===");
+    if crate::counters::check() != ExitCode::SUCCESS {
+        return ExitCode::from(1);
+    }
     // The sibling of the markdown check above, for the links the *compiler*
     // owns. Rustdoc resolves intra-doc links but only **warns** on a broken one,
     // and nothing ran rustdoc — so they rot invisibly. The kernel-core split
@@ -414,6 +425,18 @@ pub fn run_unit_tests(forwarded: &[String]) -> ExitCode {
     // function that no longer existed. `cargo build` sees none of it.
     eprintln!("=== rustdoc ===");
     if !check_rustdoc(&names) {
+        return ExitCode::from(1);
+    }
+    // The browser app's own logic — the pump's terminal-state handling, the frame
+    // tail's cap, the telemetry projection's rendering. Rust-side tests cannot reach
+    // any of it, and it is exactly as capable of regressing.
+    //
+    // Skips cleanly on a clone without the Node toolchain, the same contract
+    // `cargo xtask itest` has for a missing QEMU. The *browser* acceptance tests are
+    // not here: they need a built site, a staged kernel and a downloaded browser, so
+    // they are `cargo xtask web --e2e`.
+    eprintln!("=== web unit tests ===");
+    if crate::web::test() != ExitCode::SUCCESS {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS

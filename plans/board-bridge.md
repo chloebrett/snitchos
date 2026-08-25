@@ -75,8 +75,9 @@ hoping it shortens the network-console path should read the addendum in
 | `console=frames` — kernel + userspace console output as `Frame::Log` | shipped (B3 Step 4) |
 | `Frame::Log` → clean stdout rendering | shipped (B3 Step 5, `log_text`) |
 | Source abstraction — `Source::open() -> Box<dyn Read>` | `collector/src/source.rs`; **a serial port is a `Read`** |
-| The `cu.*`/`tty.*` refusal, naming the corrected path | `collector::source::call_out_alternative` — **reuse it, step 1 does not rewrite it** |
-| An idle port not reading as end-of-stream | `collector::source::SerialReader` — the same hazard `exec` faces |
+| The `cu.*`/`tty.*` refusal, naming the corrected path | `collector::serial::call_out_alternative` — **reuse it, step 1 does not rewrite it** |
+| An idle port not reading as end-of-stream | `collector::serial::SerialReader` — the same hazard `exec` faces |
+| …both reachable without the HTTP stack | `collector::serial` is **not** `native`-gated, so `xtask-board` depends on `collector` with `default-features = false` |
 | Image delivery — `cargo xtask image` → TFTP root, board netboots on reset | shipped |
 | Raw-mode TTY, keystroke injection, restore-on-drop | `snemu/src/interactive.rs` — crib it |
 | SBI ecall wrappers (`set_timer`, `send_ipi`, `hart_start`) | `kernel/src/sbi.rs` — SRST is **not** among them |
@@ -121,7 +122,9 @@ Phase 2 has its own, below.
       alternative**, rather than blocking forever.
 - [ ] A port already held by another process fails with an error that says so (and
       names the holder if it can be identified) — never reported as board silence.
-- [ ] The port is released on every exit path including panic.
+- [ ] The port is released on every exit path. Panic is covered by ownership (see
+      Step 1's result); the live risk is `std::process::exit`, which runs no
+      destructors — step 4 returns an `ExitCode` instead.
 - [ ] `cargo xtask board reboot` reboots the board via SBI SRST and returns once the
       fresh image is booting; the "task hung"/reboot line is flushed before the reset
       takes effect.
@@ -162,7 +165,37 @@ this whole plan exists to delete.
 
 ---
 
-### Step 1: Port-open policy — device kind and failure classification
+### Step 1: Port-open policy — device kind and failure classification — ✅ DONE
+
+**Result** (`xtask-board/src/reach.rs`, 9 tests, mutants 5 caught / 1 unviable / 0
+survivors): `check_device` refuses a `tty.*` path *before* opening it — delegating
+to `collector::serial::call_out_alternative` rather than restating the rule — and
+`classify_open_failure` maps an `ErrorKind` to an `Unreachable`. `holder_pid` reads
+the pid from `lsof` output, tolerating a malformed row rather than panicking on an
+external tool's output.
+
+**The variants partition by what the operator must do differently** — kill a
+process (`PortHeld`), fix permissions (`NoPermission`), plug the adapter in
+(`NoSuchDevice`) — with `OpenFailed` keeping the kind of anything unrecognised. A
+single catch-all would have been honest about the failure and useless about the
+remedy, which is the whole point of the step.
+
+**Two things changed during the work:**
+
+- The `cu.*`/`tty.*` half was already done — it shipped with Step 10b of
+  [uart-telemetry.md](uart-telemetry.md), so this step reused it.
+- **The release-on-drop criterion was cut as ceremony, and replaced with a sharper
+  constraint on step 4.** A guard type was written, then deleted: `serialport`'s
+  handle closes on drop and Rust runs destructors while unwinding, so a *panicking*
+  bridge already releases the port, and a wrapper testing that would have been
+  testing the language. The case ownership does **not** cover is
+  `std::process::exit`, which runs no destructors — and that is not hypothetical:
+  `xtask-itest/src/itest.rs` already installs a Ctrl-C handler calling
+  `process::exit(130)`, and Ctrl-C is exactly how a person ends an interactive
+  bridge session. **Step 4's rule: return an `ExitCode`, never `process::exit`
+  while the port is open; a signal handler must release first.**
+
+### Step 1 (as originally written): Port-open policy — device kind and failure classification
 
 The two documented ways this goes wrong, as pure functions, before any I/O exists.
 

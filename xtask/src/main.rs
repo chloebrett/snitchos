@@ -9,7 +9,7 @@ use xtask_qemu as qemu;
 // Standalone commands moved to the `xtask-cmds` crate; re-imported at root so
 // existing `crate::links::…` / `crate::source::…` references (and the dispatch
 // calls below) keep resolving unchanged.
-use xtask_cmds::{audit, links, loc, measure, snip};
+use xtask_cmds::{audit, counters, links, loc, measure, snip, web};
 
 mod plan;
 
@@ -184,6 +184,27 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Build and stage everything the browser page needs: a release kernel ELF, the
+    /// `wasm-pack` output, and a manifest describing them.
+    ///
+    /// The artifacts are generated rather than committed — two derived files that can
+    /// silently disagree with their sources is the `cargo xtask image` staleness trap
+    /// twice over. The manifest is the mitigation a browser cannot otherwise offer:
+    /// the page shows the fingerprint of the kernel it loaded, so "I changed the
+    /// kernel and the fingerprint didn't move" is visible.
+    ///
+    /// Needs `wasm-pack` (`cargo install wasm-pack`) and Node >= 22 with corepack.
+    Web {
+        /// After building, run the Playwright acceptance tests against the built
+        /// site: that the guest reaches its heartbeat, that the tab stays responsive
+        /// while it does, and that two loads produce byte-identical output.
+        ///
+        /// Not part of `cargo xtask test`, which runs only the app's unit tests:
+        /// these need a built site, a staged kernel and a downloaded browser
+        /// (`cd web && yarn playwright install chromium`).
+        #[arg(long)]
+        e2e: bool,
+    },
     /// Check that every relative `.md` link in the repo resolves.
     ///
     /// Also runs inside `cargo xtask test`; standalone here because it's
@@ -191,6 +212,13 @@ enum Cmd {
     /// breaks links both ways: inbound links still name the old path, and the
     /// moved file's own `../` links now resolve one directory too high.
     Links,
+    /// Check that every `DeferredCounter` is registered for draining.
+    ///
+    /// Also runs inside `cargo xtask test`; standalone here for the same reason
+    /// as `links` — it's instant, and it's the thing you want right after adding
+    /// a counter. A counter missing from `counter::COUNTERS` is incremented
+    /// forever and never emitted, which looks exactly like a quiet system.
+    Counters,
     /// Run kernel integration tests in QEMU.
     ///
     /// Runs integration only — it does **not** run the host-side checks
@@ -482,6 +510,9 @@ mod mutant_plan_tests {
             "snemu-wasm",
             "stitch",
             "synth",
+            // Joined by existing, not by anyone remembering — which is the
+            // property this test protects. See plans/board-bridge.md step 1.
+            "xtask-board",
             "xtask-cram",
         ]);
     }
@@ -757,7 +788,9 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test { args } => plan::run_unit_tests(&args),
+        Cmd::Web { e2e } => web::web(e2e),
         Cmd::Links => links::check(),
+        Cmd::Counters => counters::check(),
         Cmd::ItestShow { args } => delegate_itest("itest-show", &args),
         Cmd::Itest { args } => delegate_itest("itest", &args),
         Cmd::Cram { args } => delegate_to("xtask-cram", None, &args, Profile::Release),
