@@ -334,11 +334,20 @@ env goes stale is that it names a machine whose address moves; re-running `provi
 after switching networks is a one-liner, whereas a hardcoded value is a bug that
 surfaces as a mysterious TFTP timeout.
 
-**Complementary, and worth doing first because it costs minutes and no code:** give the
-Mac a **DHCP reservation on the router** so its IP stops moving at all. That removes
-the failure *class*; `provision` then handles the residue (a wiped env, a new network,
-a second machine). Prefer eliminating the problem to automating around it — this step
-exists for when you can't.
+**✅ Done 2026-08-25 — the Mac holds a DHCP reservation at `192.168.0.7`.** That was the
+complementary fix, and it was the right one to do first: it costs minutes and no code,
+and it removes the failure *class* (a `serverip` that drifts with the lease) rather
+than automating around it.
+
+**This changes what this step is for.** With a stable `serverip`, a one-time manual
+`saveenv` at the U-Boot prompt already delivers zero-touch netboot — the exact commands,
+and the two parser gotchas the read-back check catches, are written up in
+[visionfive2-port.md](visionfive2-port.md) ("Making netboot zero-touch", **not yet
+applied** at time of writing). So `provision` is
+no longer the daily-loop fix, it is the **residue** handler: a wiped environment, a new
+network, a second dev machine, or a board someone else is bringing up. Still worth
+building (it is small, and it is what makes the loop reproducible rather than
+remembered), but it dropped out of the critical path. Sequence it accordingly.
 
 **RED**: the env-script builder is pure — `(board config) → ordered setenv commands` —
 so golden-test it, plus a read-back verifier that fails when a variable did not stick.

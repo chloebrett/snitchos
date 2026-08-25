@@ -527,8 +527,52 @@ booti 0x40200000 - ${fdtcontroladdr}    # boot it; ${fdtcontroladdr} = U-Boot's 
 
 `${fdtcontroladdr}` handing over U-Boot's DTB is a freebie: it satisfies
 SnitchOS's `a1 = DTB` handoff with the board's *real* devicetree, no DTB of our
-own to supply. Save these into U-Boot's `bootcmd` and the board auto-fetches on
-reset — rebuild on the Mac → power-cycle → fresh kernel, no SD shuffling.
+own to supply.
+
+### Making netboot zero-touch — the one-time `saveenv` ⏳ NOT YET APPLIED
+
+**Status: written down, not run.** Nobody has typed this at the board yet — do not
+assume the environment is provisioned. (The board-bridge design note previously
+claimed netboot was already zero-touch when it was not; that cost a wrong assumption
+in a downstream plan, so this section states its status explicitly.)
+
+With the Mac's IP pinned by DHCP reservation (`192.168.0.7`, above), one manual U-Boot
+session makes the whole loop zero-touch — `cargo xtask image` → reset → fresh kernel,
+no typing:
+
+```
+setenv serverip 192.168.0.7
+setenv bootdelay 3
+setenv bootcmd 'dhcp; tftpboot 0x40200000 snitchos.img; booti 0x40200000 - ${fdtcontroladdr}'
+saveenv
+```
+
+**Verify before trusting it — `printenv bootcmd`.** Two parser-dependent things can go
+wrong silently, and both look like a working `setenv` until the next reset:
+
+- **`${fdtcontroladdr}` must be stored *literally*, not expanded.** It has to resolve at
+  boot time, not at `setenv` time. If `printenv` shows an address instead of the literal
+  `${fdtcontroladdr}`, the quotes did not protect it — re-set it with
+  `\${fdtcontroladdr}`.
+- **The semicolons must survive as one string.** Same dependency: whether this U-Boot
+  was built with the hush parser or the simple one determines whether `'…'` groups the
+  command chain. `printenv` shows whether the whole chain made it into one variable.
+
+This read-back check is exactly what `cargo xtask board provision` automates — see
+[board-bridge.md](board-bridge.md) step 4c, where the verifier is the point of the step.
+
+**Keep `bootdelay` non-zero.** The countdown is the only unprivileged way to interrupt a
+board whose saved environment is wrong; without it, recovering a bad `bootcmd` needs the
+boot-mode jumpers.
+
+**What this does not solve**, both deferred to [board-bridge.md](board-bridge.md) step 6b:
+
+- **Workload switching still needs a retype** — `workload=` rides U-Boot's `bootargs`
+  env var, not the image, so a reset picks up a fresh image with the *old* workload. If
+  you mostly boot one workload, `setenv bootargs 'workload=X'` alongside the above and
+  `saveenv`. The default (no bootarg) is `init`.
+- **A stale image is still silent.** The reservation fixes address drift, not freshness:
+  a missed `cargo xtask image` boots the old kernel and reads as a regression.
 
 **Delivery methods — three ways to land `snitchos.img` in RAM at `0x4020_0000`,
 then the same `booti 0x40200000 - ${fdtcontroladdr}`.** Build the Image with
@@ -540,7 +584,13 @@ both land on `code0`, a `JAL` over the header).
   auto-fetch on reset. Needs the board and Mac on one network: board→router by
   cable + Mac on Wi-Fi (same subnet, **main** Wi-Fi not guest), or a direct
   Mac↔board cable (USB-C Ethernet adapter + static IPs). `serverip` = the Mac's IP
-  on that network (`ipconfig getifaddr en0`). Mac TFTP server: `dnsmasq
+  on that network (`ipconfig getifaddr en0`). **Current dev network (2026-08-25): the
+  Mac holds a DHCP reservation at `192.168.0.7`, so `serverip` is stable and a saved
+  `bootcmd` keeps working across reboots.** That reservation is what makes zero-touch
+  netboot possible without any tooling — it removes the failure class (a `serverip`
+  that drifts with the lease) rather than automating around it. Re-check
+  `ipconfig getifaddr en0` after any network change; the value is stable, not
+  permanent. Mac TFTP server: `dnsmasq
   --enable-tftp --tftp-root="$(pwd)" --port=0 --no-daemon` (serves the repo dir +
   logs requests) or the built-in `tftpd` (`/private/tftpboot`).
 - **microSD** — no network at all: FAT32-format an SD on the Mac, copy the Image,
