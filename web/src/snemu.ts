@@ -47,11 +47,23 @@ export class SnemuSource implements FrameSource {
     return new SnemuSource(new Handle(elf, RAM_BYTES), label);
   }
 
+  /** Fast-forwards seen at the end of the previous slice. */
+  #fastForwards = 0;
+
   advance(budget: number): Slice {
     const status = JSON.parse(this.#handle.step_budget(BigInt(budget))) as Status;
     const text = this.#handle.drain_uart();
     const frames = JSON.parse(this.#handle.drain_frames()) as FrameView[];
-    return { status, text, frames, instret: Number(this.#handle.instret()) };
+
+    // Idle means "waited for something during this slice", not "is parked right
+    // now". The instantaneous check reads false almost always — idle-skip jumps
+    // through the wait and resumes within the slice — and using it measured as 100%
+    // of a core, exactly the cost pacing exists to avoid.
+    const fastForwards = Number(this.#handle.fast_forwards());
+    const idle = fastForwards > this.#fastForwards;
+    this.#fastForwards = fastForwards;
+
+    return { status, text, frames, instret: Number(this.#handle.instret()), idle };
   }
 }
 

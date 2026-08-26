@@ -95,6 +95,18 @@ impl Handle {
     pub fn instret(&self) -> u64 {
         self.machine.instret()
     }
+
+    /// How many times the guest has waited with nothing to do (see
+    /// `Machine::fast_forwards`).
+    ///
+    /// The page paces an idle guest to real time and runs a busy one flat out, and
+    /// compares this across a slice to tell them apart. A cumulative count rather
+    /// than a state, because the parked state barely exists at a slice boundary —
+    /// idle-skip jumps through the wait and resumes inside the same slice.
+    #[must_use]
+    pub fn fast_forwards(&self) -> u64 {
+        self.machine.fast_forwards()
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Console } from "./Console";
 import { describe, type FrameView, type Status } from "./frames";
-import { Pacer } from "./pace";
+import { Pacer, type Speed } from "./pace";
 import { appendCapped, mips, Pump } from "./pump";
 import { type BuildManifest, fetchKernel, SnemuSource } from "./snemu";
 import { TelemetryPane } from "./TelemetryPane";
@@ -14,6 +14,12 @@ export function App() {
   const [manifest, setManifest] = useState<BuildManifest | null>(null);
   const [kernelBytes, setKernelBytes] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [speed, setSpeed] = useState<Speed>("paced");
+
+  // Read inside the animation-frame callback, which is created once — a ref keeps it
+  // seeing the current choice without tearing down and restarting the guest.
+  const speedRef = useRef<Speed>(speed);
+  speedRef.current = speed;
 
   const write = useRef<(text: string) => void>(() => {});
   const onConsoleReady = useCallback((w: (text: string) => void) => {
@@ -48,7 +54,9 @@ export function App() {
         // budget: a `while` loop to completion would freeze the tab for a whole
         // boot.
         const step = (now: number) => {
-          const slice = pump.tick(pacer.budget(now - last, pump.instret));
+          const slice = pump.tick(
+            pacer.budgetFor(speedRef.current, now - last, pump.instret),
+          );
           last = now;
           if (slice) {
             if (slice.text) write.current(slice.text);
@@ -97,7 +105,21 @@ export function App() {
         <span data-testid="status" className={`text-xs ${statusTone}`}>
           {statusText}
         </span>
-        <span className="ml-auto text-neutral-500 text-xs tabular-nums">
+        <label className="ml-auto flex items-center gap-1.5 text-neutral-500 text-xs">
+          <input
+            type="checkbox"
+            data-testid="turbo"
+            checked={speed === "turbo"}
+            onChange={(e) => setSpeed(e.target.checked ? "turbo" : "paced")}
+            className="accent-sky-400"
+          />
+          {/* Paced is the default: the guest's timers mean what they say, and the tab
+              costs a fraction of a core. Turbo is for compute-bound work, where real
+              time is the wrong master — a model completion is ~4x faster and the tab
+              costs a whole core. */}
+          turbo
+        </label>
+        <span className="text-neutral-500 text-xs tabular-nums">
           <b data-testid="instret" className="font-semibold text-neutral-200">
             {(instret / 1e6).toFixed(1)}M
           </b>{" "}

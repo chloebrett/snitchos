@@ -67,6 +67,9 @@ pub struct Machine {
     native_ops: bool,
     /// The memop calibration probe (see [`MemopProbe`]); `None` unless enabled.
     memop_probe: Option<MemopProbe>,
+    /// Rounds in which the clock was fast-forwarded over an idle wait. See
+    /// [`fast_forwards`](Self::fast_forwards).
+    fast_forwards: u64,
 }
 
 impl Machine {
@@ -93,6 +96,7 @@ impl Machine {
             memcpy_pc: None,
             native_ops: false,
             memop_probe: None,
+            fast_forwards: 0,
         }
     }
 
@@ -233,6 +237,7 @@ impl Machine {
         // can't arrive while every hart idles, so it contributes no deadline.
         if !retired && let Some(deadline) = self.earliest_wake_deadline() {
             self.time = self.time.max(deadline);
+            self.fast_forwards += 1;
         }
         Ok(())
     }
@@ -391,6 +396,27 @@ impl Machine {
     #[must_use]
     pub fn hart_count(&self) -> usize {
         self.harts.len()
+    }
+
+    /// How many times the clock has been fast-forwarded over an idle wait.
+    ///
+    /// Incremented once per scheduler round in which *no* hart retired anything and
+    /// the clock was jumped to the earliest armed timer deadline — which happens
+    /// only when every hart is parked on `wfi`. It is therefore a precise "the guest
+    /// had nothing to do" signal, and unlike an instantaneous state check it is
+    /// **cumulative**, so a caller sampling at arbitrary boundaries still sees it.
+    ///
+    /// That distinction is the whole reason this is a counter. An embedder pacing the
+    /// guest against a real clock wants to throttle an idle guest (running one flat
+    /// out buys guest time to no purpose, and burns a core doing it) but not a busy
+    /// one (for a compute-bound workload that is the difference between a demo and a
+    /// stopwatch). Asking `is any hart parked right now?` at the end of a slice
+    /// almost always answers "no": idle-skip jumps *through* the wait and resumes
+    /// inside the same slice, so the parked state barely exists when sampled.
+    /// Measured — that mistake read as 100% of a core.
+    #[must_use]
+    pub fn fast_forwards(&self) -> u64 {
+        self.fast_forwards
     }
 
     #[must_use]
@@ -623,6 +649,71 @@ impl Machine {
         for hart in &mut self.harts {
             hart.set_idle_skip(on);
         }
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::Machine;
+    use crate::mem::{Memory, RAM_BASE};
+
+    /// `wfi` — park the hart until an interrupt.
+    const WFI: u32 = 0x1050_0073;
+    /// `jal x0, 0` — branch to self, retiring forever.
+    const SPIN: u32 = 0x0000_006F;
+
+    fn machine_running(program: &[u32], harts: usize) -> Machine {
+        let mut m = Machine::new(Memory::new(64 * 1024), harts);
+        let mut image = Vec::new();
+        for w in program {
+            image.extend_from_slice(&w.to_le_bytes());
+        }
+        m.write_ram(RAM_BASE, &image).expect("program fits");
+        m.set_pc(0, RAM_BASE);
+        m
+    }
+
+    /// A guest with work to do never fast-forwards, however long it runs — the case
+    /// that must be allowed to run flat out.
+    #[test]
+    fn a_spinning_guest_never_fast_forwards() {
+        let mut m = machine_running(&[SPIN], 1);
+        for _ in 0..1000 {
+            m.step().expect("steps");
+        }
+        assert_eq!(m.fast_forwards(), 0);
+    }
+
+    /// A guest parked on `wfi` with a timer armed fast-forwards — the case that may
+    /// be paced. Without an armed timer there is no deadline to jump to, so the
+    /// machine is wedged rather than idling, and the counter stays put: a wedged
+    /// guest is not a guest to throttle, it is one to stop stepping.
+    #[test]
+    fn a_parked_guest_with_no_timer_does_not_fast_forward() {
+        let mut m = machine_running(&[WFI], 1);
+        for _ in 0..10 {
+            m.step().expect("steps");
+        }
+        assert_eq!(m.fast_forwards(), 0, "nothing to wake for is not idling");
+    }
+
+    /// The counter is cumulative, which is the property that makes it usable from a
+    /// caller sampling at arbitrary slice boundaries — unlike an instantaneous
+    /// "is anything parked?" check, which idle-skip makes almost always false.
+    #[test]
+    fn the_counter_only_ever_climbs() {
+        let mut m = machine_running(&[SPIN], 1);
+        let before = m.fast_forwards();
+        for _ in 0..100 {
+            m.step().expect("steps");
+            assert!(m.fast_forwards() >= before);
+        }
+    }
+
+    /// A fresh machine has not idled.
+    #[test]
+    fn a_new_machine_has_never_fast_forwarded() {
+        assert_eq!(machine_running(&[SPIN], 1).fast_forwards(), 0);
     }
 }
 

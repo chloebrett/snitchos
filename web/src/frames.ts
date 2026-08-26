@@ -41,6 +41,15 @@ export interface Slice {
   frames: FrameView[];
   /** The source's cumulative clock, in guest instructions. */
   instret: number;
+  /**
+   * Whether the guest had nothing to do at the end of this slice.
+   *
+   * Drives pacing: an idle guest is held to real time (which is what stops a tab
+   * burning a core), a busy one runs as fast as the host allows (which is what keeps
+   * a compute-bound completion from taking 42 seconds). A source with no notion of
+   * idleness — a socket, a replay — reports `false` and is simply never throttled.
+   */
+  idle: boolean;
 }
 
 /**

@@ -25,9 +25,22 @@ describe("Pacer", () => {
     expect(pacer.budget(0, first)).toBe(0);
   });
 
-  it("buys nothing when the guest is ahead of real time", () => {
+  /**
+   * A guest ahead of the clock is re-anchored, not frozen.
+   *
+   * This test used to assert the opposite — that a guest ahead buys nothing until
+   * real time catches up. That was wrong once `budgetFor` began running busy guests
+   * flat out: a ~417M-instruction completion puts the guest ~40 guest-seconds ahead
+   * in ~11 real ones, and "sit out the credit" would then freeze it for half a
+   * minute. Credit is forgiven instead, which leaves a one-off offset rather than a
+   * stall, and keeps the long-run *rate* at the timebase either way.
+   */
+  it("re-anchors a guest that is ahead rather than freezing it", () => {
     const pacer = new Pacer();
-    expect(pacer.budget(FRAME_MS, FRAME_INSTRET * 10)).toBe(0);
+    const budget = pacer.budget(FRAME_MS, FRAME_INSTRET * 10);
+
+    expect(budget).toBe(Math.floor(FRAME_INSTRET));
+    expect(pacer.debt).toBeCloseTo(FRAME_INSTRET, 0);
   });
 
   /** Falling a little behind is made up on the next frame, not dropped. */
@@ -131,5 +144,55 @@ describe("Pacer", () => {
     const pacer = new Pacer(1_000_000);
     expect(pacer.budget(1000, 0)).toBeCloseTo(500_000, 0); // capped by maxPerFrame
     expect(new Pacer(1_000_000, 10_000_000).budget(1000, 0)).toBeCloseTo(1_000_000, 0);
+  });
+});
+
+describe("Pacer.budgetFor — the speed control", () => {
+  /**
+   * Measured, and the reason this method exists: a Tab completion from the trained
+   * model costs ~417M guest instructions. Paced to a 10 MHz timebase that is 42
+   * seconds of waiting. Run flat out it is ~11. Pacing a *working* guest is the
+   * mirror of the bug pacing was introduced to fix.
+   */
+  it("runs flat out in turbo", () => {
+    const pacer = new Pacer();
+    expect(pacer.budgetFor("turbo", FRAME_MS, 0)).toBe(MAX_INSTRET_PER_FRAME);
+  });
+
+  /** And paces once it parks — which is where the core-burn came from. */
+  it("holds the guest to real time when paced", () => {
+    const pacer = new Pacer();
+    expect(pacer.budgetFor("paced", FRAME_MS, 0)).toBe(Math.floor(FRAME_INSTRET));
+  });
+
+  /**
+   * The trap this method has to avoid. Running flat out advances the guest's clock
+   * far ahead of the wall clock — 417M instructions is 42 guest-seconds bought in
+   * ~11 real ones. A pacer that then saw a 31-second *credit* would freeze the guest
+   * until real time caught up, which is a worse bug than the one being fixed.
+   */
+  it("does not bank credit while in turbo", () => {
+    const pacer = new Pacer();
+
+    // Busy for a while: the guest races ahead of the clock.
+    let instret = 0;
+    for (let frame = 0; frame < 100; frame++) {
+      instret += pacer.budgetFor("turbo", FRAME_MS, instret);
+    }
+
+    // The moment it parks, pacing must resume normally rather than sitting out the
+    // enormous credit it just accumulated.
+    expect(pacer.budgetFor("paced", FRAME_MS, instret)).toBe(Math.floor(FRAME_INSTRET));
+  });
+
+  /** Idleness comes from the guest, so a machine that alternates is handled. */
+  it("switches between the two on demand", () => {
+    const pacer = new Pacer();
+    let instret = 0;
+
+    instret += pacer.budgetFor("paced", FRAME_MS, instret);
+    expect(pacer.budgetFor("turbo", FRAME_MS, instret)).toBe(MAX_INSTRET_PER_FRAME);
+    instret += MAX_INSTRET_PER_FRAME;
+    expect(pacer.budgetFor("paced", FRAME_MS, instret)).toBe(Math.floor(FRAME_INSTRET));
   });
 });

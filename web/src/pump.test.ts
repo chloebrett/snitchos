@@ -12,7 +12,7 @@ function fakeSource(statuses: Status[]): FrameSource & { calls: number } {
       this.calls += 1;
       const status = statuses[Math.min(i, statuses.length - 1)] as Status;
       i += 1;
-      return { status, text: "", frames: [], instret: i };
+      return { status, text: "", frames: [], instret: i, idle: false };
     },
   };
 }

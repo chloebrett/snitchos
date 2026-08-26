@@ -43,6 +43,16 @@ export const MAX_INSTRET_PER_FRAME = 500_000;
 export const MAX_DEBT_INSTRET = TIMEBASE_HZ / 4;
 
 /**
+ * How fast to run the guest.
+ *
+ * - `paced` — real time. The guest's clock matches the wall clock, so its timers are
+ *   truthful, and the tab costs a fraction of a core.
+ * - `turbo` — as fast as the host manages. For a compute-bound workload this is the
+ *   difference between a demo and a stopwatch, and it costs a whole core.
+ */
+export type Speed = "paced" | "turbo";
+
+/**
  * Decides how much guest time to buy each frame.
  *
  * Driven by the *delta* since the previous frame rather than an absolute start time,
@@ -85,7 +95,54 @@ export class Pacer {
    * all. The running target keeps its fractional part, so flooring here costs
    * precision on one frame rather than accumulating drift.
    */
+  /**
+   * The budget for a frame under a chosen {@link Speed}.
+   *
+   * `Paced` holds the guest to real time: cheap, and the guest's timers mean what
+   * they say. `Turbo` runs it as fast as the host allows, which is the difference
+   * between a ~42-second Tab completion from the trained model and a ~11-second one.
+   *
+   * **This was originally driven by whether the guest was idle**, on the theory that
+   * an idle guest should be paced and a working one let run. Measured, the theory
+   * did not survive: SnitchOS's idle task is `loop { wfi; yield_now(); }`, so it
+   * retires instructions between waits instead of parking, and a booted guest logged
+   * **zero** clock fast-forwards over 60M instructions. There is no idle state here
+   * to detect — the guest is always busy, and an idle-driven rule would simply
+   * always choose full speed. So the choice is the user's, honestly.
+   *
+   * Turbo advances the guest's clock far past the wall clock, which is why
+   * {@link budget} clamps credit: without that, switching back to `Paced` after a
+   * long run would leave tens of seconds of credit and freeze the guest until real
+   * time caught up — a worse fault than the one being avoided.
+   */
+  budgetFor(speed: Speed, dtMs: number, instretSoFar: number): number {
+    if (speed === "turbo") {
+      // No target bookkeeping here: the frame about to run will push the guest
+      // further ahead than anything predicted, and `budget`'s credit clamp re-anchors
+      // on the next idle frame from what actually happened rather than a guess.
+      this.#debt = 0;
+      return this.#maxPerFrame;
+    }
+    return this.budget(dtMs, instretSoFar);
+  }
+
   budget(dtMs: number, instretSoFar: number): number {
+    // Never carry *credit*: guest time already spent is not owed back.
+    //
+    // The debt ceiling's mirror, and load-bearing rather than tidy. A frame that ran
+    // flat out (see `budgetFor`) can put the guest tens of seconds ahead of the wall
+    // clock, and a pacer treating that as credit would freeze the guest until real
+    // time caught up — trading a busy tab for a frozen one. It also absorbs the
+    // ordinary case: a slice overshoots its budget because a step is atomic, and
+    // repaying that by starving the next frame would be pacing to a precision the
+    // clock does not have.
+    //
+    // **Before** the clock advances, not after: clamping afterwards would discard
+    // the time this very frame just bought, and the guest would never run again.
+    if (this.#target < instretSoFar) {
+      this.#target = instretSoFar;
+    }
+
     // A negative or absent delta (a clock that jumped backwards, a first frame)
     // buys nothing rather than something arbitrary.
     if (dtMs > 0) {
