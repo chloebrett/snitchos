@@ -1,0 +1,226 @@
+# Plan: the telemetry view (milestone 3)
+
+**Branch**: main (this project works directly on main; the human commits)
+**Status**: Active
+
+Follows [legacy/snemu-wasm-interactive.md](legacy/snemu-wasm-interactive.md). The tab
+runs a machine you can type at; this is the machine explaining itself.
+
+## Goal
+
+Live panels in the browser for the things Grafana is bad at — the capability
+derivation tree, the span tree across a context switch, and the switch timeline —
+folded from the same frame stream the terminal already consumes.
+
+## The decision this inherits, and keeps
+
+**Prometheus stays the store; only the UI is replaced.** Owning retention,
+downsampling, range queries and alerting is a far bigger commitment than the UI, and
+custom React wins only for what Grafana is *bad* at: cap-derivation trees, span trees,
+and the terminal. It does not win at line charts, and this plan does not attempt any.
+(Nor at the physics desktop, which is not a panel at all — the OS renders that itself,
+to its own framebuffer. React's job stops at the frame stream.) (`docs/uart-telemetry-design.md` Decision 4.)
+
+So the scope is **structure, not series**.
+
+## What the investigation found
+
+**1. `diagram` compiles to wasm32 unmodified.** Verified, not assumed
+(`cargo build -p diagram --target wasm32-unknown-unknown`). Its only dependencies are
+`protocol`, `serde_json` and `snitchos-abi` — nothing native.
+
+That matters more than it sounds. The crate already folds `OwnedFrame`s into exactly
+the three views this milestone wants:
+
+| fold | what it reconstructs |
+|---|---|
+| `caps::derivation_tree(&[OwnedFrame]) -> Graph` | who granted which capability to whom |
+| `trace::span_call_graph(&[OwnedFrame]) -> Graph` | the span tree |
+| `switches::transition_graph(&[OwnedFrame]) -> Graph` | context-switch transitions |
+
+"A diagram is a collector" becomes literally true: **the same fold that produces the
+committed `docs/generated/*.md` produces the live panel.** One implementation, no
+drift, and the committed diagrams become a regression test for the panels.
+
+**2. `Graph` is write-only from outside.** `Node` and `Edge` are private, there are no
+accessors, and the only exits are `to_mermaid()` and `to_dot()`. A React panel cannot
+read the structure it is meant to render. That is the one real obstacle, and step 1 is
+choosing how to get past it.
+
+**3. `FrameView` is deliberately lossy** — kind, name, timestamp, metric value. It was
+right for a boot log and is not enough here: a cap tree needs `cap_id`,
+`parent_cap_id`, `holder`, `rights`; a span tree needs `id` and `parent`. The
+`Decoder` currently projects and discards the `OwnedFrame`, so the frames the folds
+need are being thrown away.
+
+## Acceptance criteria
+
+- [ ] A panel shows the capability derivation tree of the running guest, updating as
+      caps are granted, and naming objects rather than showing bare ids.
+- [ ] A panel shows the span tree, and a span that survives a context switch is
+      visibly one span rather than two.
+- [ ] A panel shows context-switch transitions between named tasks.
+- [ ] The panels update live without the tab dropping below the responsiveness bar
+      the acceptance suite already enforces.
+- [ ] The folds are the *same code* as the committed diagrams — no second
+      implementation of any projection.
+- [ ] Switching workload resets the panels, as it already resets the terminal.
+
+## Steps
+
+Every step follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code without
+a failing test. Rust unit tests for the folds and projections, Vitest for the panels'
+own logic, Playwright only for what needs a browser.
+
+### Step 1: Decide and build the `Graph` → JS path
+
+**Acceptance criteria**: A React component can render a `Graph`'s nodes and edges.
+**Decide first, with the human**, because the options differ in kind rather than
+degree:
+
+- **(a) Render mermaid in the browser.** `to_mermaid()` already exists, and mermaid.js
+  would draw it. Cheapest, and produces a picture identical to the committed docs.
+  But it is a *picture*: no hit-testing, no hover, no selecting a cap to see its
+  rights — and re-rendering a mermaid graph on every update is not free.
+- **(b) Accessors or a serialization on `Graph`.** `nodes()` / `edges()`, or a
+  `to_json()` beside `to_mermaid()`. The panel renders its own SVG/DOM and can be
+  interactive. More work, and it widens `diagram`'s API for a second consumer.
+
+Recommendation: **(b)**. The whole argument for replacing Grafana is the things it
+cannot do — a cap tree you can interrogate is exactly that, and a static image is
+Grafana's weakness reproduced. `to_json` sits naturally beside `to_mermaid`/`to_dot`
+as a third renderer, which is a shape the crate already has.
+**RED**: A `diagram` test that a folded graph serializes to the nodes and edges it
+contains, including groups and classes.
+**GREEN**: The renderer.
+**MUTATE**: `cargo mutants -p diagram`.
+**Done when**: Criteria met, report reviewed, human approves commit.
+
+### Step 2: Retain decoded frames so the folds have something to fold
+
+**The naive version of this step is wrong, and wrong quietly.** Read this before
+writing a ring buffer.
+
+#### Why "keep the last N frames" produces a lying cap tree
+
+The folds are **cumulative reconstructions, not windowed views**. `derivation_tree`
+walks the whole slice three times, and each pass depends on frames that arrived at
+startup:
+
+1. `thread_names(frames)` scans for `ThreadRegister` to label holders. Those all
+   arrive during boot. Drop them and every holder renders as `h3` instead of
+   `stitch_repl` — degraded, still plausible-looking.
+2. A `revoked` set is built by scanning for `CapEvent::Revoked`. Drop an old revocation
+   and a **revoked capability renders as live**. That is not degraded, it is *wrong*,
+   and it is wrong in the direction that matters for a security-shaped view.
+3. Roots are `parent_cap_id == 0`. Drop a parent's `CapEvent` while a child's survives
+   and the child points at a node that no longer exists — a dangling edge, or a
+   phantom node, depending on the renderer.
+
+None of those raise an error. The panel renders confidently and is untrue, which is
+precisely the failure class this project keeps finding in its own controls.
+
+#### The shape that works: durable vs windowed
+
+The wire already draws the line for us. Some frames are **cumulative facts** —
+registrations and lifecycle events, low-volume by nature, meaningless to drop. The
+rest are a **stream** — high-volume, and a recent window is not merely acceptable but
+what you actually want to look at.
+
+| bucket | frames | why | bound |
+|---|---|---|---|
+| durable | `StringRegister`, `ThreadRegister`, `HartRegister`, `MetricRegister`, `BuildInfo`, `Hello` | registrations; a name that stops resolving makes every later view unreadable | none — they are emitted once each |
+| durable | `CapEvent` where kind is `Granted` / `Transferred` / `Revoked` | the derivation tree is cumulative state, and a dropped revocation inverts its meaning | none — bounded in practice by how many caps exist |
+| windowed | `SpanStart`, `SpanEnd`, `Event`, `ContextSwitch`, `Message`, `Notify*`, `Log`, `Metric` | a stream; the span tree and switch timeline are *about* the recent past | ring, oldest-first |
+| windowed | `CapEvent` where kind is `Invoked` / `Denied` | audit events, not lifecycle: unbounded volume, no structural meaning | ring |
+
+That `CapEvent` splits across both buckets **by its `kind` field** is the detail most
+likely to be missed, and the one that decides whether the tree is right.
+
+#### What still has to be decided
+
+- **Does `Decoder` own this, or something above it?** A replay source wants the whole
+  stream and can afford it; a live tab cannot. Leaning: a separate `FrameStore` that
+  the `Decoder` feeds, so the policy is not welded to the decoder and a replay source
+  can choose a different one.
+- **Is the durable bucket really unbounded?** "Bounded in practice" is an assumption
+  about guest behaviour, and this plan has already been wrong once about guest
+  behaviour (the idle task that never idles). It should be *measured* — count
+  `CapEvent` and `*Register` frames over a long boot — and given a ceiling with a
+  visible warning rather than a silent drop if the measurement says otherwise.
+- **The alternative considered: fold incrementally and never retain.** A real
+  collector maintains the graph as frames arrive. Rejected for now because
+  `diagram`'s API is `fold(&[OwnedFrame]) -> Graph` — batch, by design — and rewriting
+  those folds incrementally would fork the very code this milestone exists to share.
+  Worth revisiting only if retention proves too expensive, which is a measurement, not
+  a guess.
+
+**Acceptance criteria**: a `FrameStore` retains frames under the durable/windowed
+policy above; a fold over its contents equals a fold over the same frames passed
+directly, **including after the window has overflowed**; the durable bucket survives
+an overflow that discards thousands of windowed frames.
+**RED**: Tests that (a) retained order matches arrival order; (b) the window drops
+oldest-first; (c) a `ThreadRegister` from before an overflow still names a holder in
+the folded tree; (d) a `CapEvent::Revoked` from before an overflow still marks its cap
+revoked — the failure that would otherwise show a revoked cap as live; (e) `Invoked`
+events *are* dropped, so the split is by kind and not by frame type.
+**GREEN**: The store.
+**MUTATE**: `cargo mutants -p snemu-wasm`.
+**KILL MUTANTS**: Address survivors — the kind-based split and the window bound are
+the two that matter.
+**Done when**: Criteria met, report reviewed, human approves commit.
+
+### Step 3: The capability derivation tree panel
+
+**Acceptance criteria**: The panel shows the guest's cap tree, edges labelled with the
+rights transferred, nodes named from `CapEvent`'s name field rather than by id. This
+is the panel that justifies the milestone: it is the project's own subject matter, and
+nothing off-the-shelf draws it.
+**RED**: Vitest over the panel's own logic (layout/grouping decisions, empty state),
+against a fixture graph — not against a live guest.
+**GREEN**: The component.
+**Done when**: Criteria met, human approves commit.
+
+### Step 4: The span tree and switch panels
+
+**Acceptance criteria**: Both render from their folds. The span tree makes the
+survives-a-context-switch case legible — that is the v0.5 devlog's whole angle, and
+the thing a flat log cannot show.
+**RED**: Vitest over each panel's logic against fixture graphs.
+**GREEN**: The components.
+**Done when**: Criteria met, human approves commit.
+
+### Step 5: Live, and proven live
+
+**Acceptance criteria**: A Playwright spec boots a workload that grants capabilities
+and asserts the tree appears with named nodes; a second asserts the panels clear on
+workload switch. Responsiveness stays above the existing bar with panels rendering.
+**RED**: The specs.
+**GREEN**: Whatever they turn up.
+**Done when**: All acceptance criteria at the top are met; human approves commit.
+
+## Open questions
+
+- **How often should a panel re-fold?** Folding every animation frame is certainly
+  wasteful and possibly slow; the frame stream is bursty and mostly idle. A dirty flag
+  on new frames, or a fixed cadence, or `CapQuiescence` (which `caps.rs` already has,
+  for deciding when a cap graph has settled) — that last one exists precisely because
+  this question was answered once already for the static diagrams.
+- **Does the retention bound belong in the `Decoder` or above it?** A replay source
+  would want the whole stream; a live tab cannot afford it.
+- **Where do metrics go?** Explicitly not here. But a page showing structure and no
+  numbers will invite the question, and "Grafana, deliberately" should be visible
+  somewhere rather than implied.
+
+## Pre-PR quality gate
+
+1. Mutation testing — `mutation-testing` skill on `diagram` and `snemu-wasm`.
+2. Refactoring assessment — `refactoring` skill.
+3. `cargo xtask clippy`, `cargo xtask test`, `cargo xtask links`.
+4. `yarn check`, `yarn test`, `yarn e2e`, `yarn measure`.
+
+---
+*On completion, `git mv` this file to `plans/legacy/` (per CLAUDE.md this project keeps
+the historical record) and follow the archiving checklist in
+[README.md](README.md) — including the `.rs` doc-path citations `cargo xtask links`
+cannot see.*
