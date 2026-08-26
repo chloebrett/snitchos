@@ -34,6 +34,10 @@ serde_json = "1"
 # through this instead. Dev-only: nothing shipped to the browser depends on it.
 wasm-bindgen-test = "0.3"
 
+# Read-only FDT parser — the same one the kernel uses. Tests that patch the device
+# tree parse it back through the guest's own reader rather than trusting our writer.
+fdt = "0.1.5"
+
 [lints]
 workspace = true
 

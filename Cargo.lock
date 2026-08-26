@@ -1783,6 +1783,7 @@ dependencies = [
 name = "snemu-wasm"
 version = "0.0.1"
 dependencies = [
+ "fdt",
  "protocol",
  "serde",
  "serde_json",

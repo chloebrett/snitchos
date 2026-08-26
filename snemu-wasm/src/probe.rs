@@ -288,6 +288,59 @@ mod tests {
         assert_eq!(fast.fault, oracle.fault, "one configuration faulted and the other did not");
     }
 
+    /// **The A/B pair cannot, on its own, prove the speedups are switched on.**
+    ///
+    /// Every other test here asserts that `ON` and `OFF` agree — which an `apply`
+    /// that did nothing would satisfy perfectly. Mutation testing found exactly that
+    /// (`replace Speedups::apply with ()` survived), and the consequence is not
+    /// cosmetic: the browser would silently drop from 38.9 MIPS back to the 11 MIPS
+    /// plain interpreter, and every test would stay green.
+    ///
+    /// So this asserts the opposite direction, using the one difference that *is*
+    /// deterministic: with the block JIT on, a compiled block retires its whole
+    /// length in a single `step()`. Without it, a step retires exactly one
+    /// instruction, always.
+    #[test]
+    fn the_speedups_are_actually_applied() {
+        use snemu::machine::Machine;
+        use snemu::mem::{Memory, RAM_BASE};
+
+        // A five-instruction loop: long enough to form a block worth compiling.
+        let loop_body: [u32; 5] = [
+            0x0011_8193, // addi x3, x3, 1
+            0x0012_0213, // addi x4, x4, 1
+            0x0012_8293, // addi x5, x5, 1
+            0x0013_0313, // addi x6, x6, 1
+            0xFF1F_F06F, // jal  x0, -16
+        ];
+
+        let biggest_step = |speedups: super::Speedups| {
+            let mut m = Machine::new(Memory::new(64 * 1024), 1);
+            speedups.apply(&mut m);
+            let mut image = Vec::new();
+            for w in loop_body {
+                image.extend_from_slice(&w.to_le_bytes());
+            }
+            m.write_ram(RAM_BASE, &image).expect("fits");
+            m.set_pc(0, RAM_BASE);
+
+            let mut biggest = 0;
+            for _ in 0..40 {
+                let before = m.instret();
+                m.step().expect("steps");
+                biggest = biggest.max(m.instret() - before);
+            }
+            biggest
+        };
+
+        assert_eq!(biggest_step(super::Speedups::OFF), 1, "the interpreter retires one at a time");
+        assert!(
+            biggest_step(super::Speedups::ON) > 1,
+            "with the block JIT on, a step should retire a whole block — if this fails, \
+             the accelerators are not reaching the machine"
+        );
+    }
+
     /// Each accelerator alone, so a failure names which one is not transparent
     /// rather than only that the combination is not.
     #[test]

@@ -36,19 +36,24 @@ pub struct Handle {
 
 #[wasm_bindgen]
 impl Handle {
-    /// Load a kernel ELF and place it in `ram_bytes` of guest RAM.
+    /// Load a kernel ELF and place it in `ram_bytes` of guest RAM, booting
+    /// `workload` — or the kernel's default when that is empty.
     ///
     /// The device tree rides along from the lib (`snemu::dtb::VIRT`), so the browser
-    /// and the CLI boot the same machine description. Two harts, because the kernel
-    /// brings up its secondary unconditionally.
+    /// and the CLI boot the same machine description, and the selection is patched
+    /// into `/chosen/bootargs` exactly as QEMU's `-append` would. Two harts, because
+    /// the kernel brings up its secondary unconditionally.
+    ///
+    /// An empty `workload` rather than an `Option`: `Option<&str>` does not cross the
+    /// `wasm_bindgen` boundary as cleanly, and the page has one way to say "default".
     ///
     /// # Errors
     /// If the image is not a loadable RV64 ELF.
     #[wasm_bindgen(constructor)]
-    pub fn new(elf: &[u8], ram_bytes: usize) -> Result<Handle, JsError> {
-        let mut machine =
-            snemu::loader::load_machine(elf, ram_bytes, Some(snemu::dtb::VIRT), 2, false)
-                .map_err(|e| JsError::new(&format!("{e:?}")))?;
+    pub fn new(elf: &[u8], ram_bytes: usize, workload: &str) -> Result<Handle, JsError> {
+        let dtb = crate::boot::dtb_for(snemu::dtb::VIRT, crate::boot::selection(workload));
+        let mut machine = snemu::loader::load_machine(elf, ram_bytes, Some(&dtb), 2, false)
+            .map_err(|e| JsError::new(&format!("{e:?}")))?;
         // snemu leaves its accelerators off by default (the plain interpreter is the
         // differential oracle). A browser pays emulation cost on top of the guest's
         // own work, so it wants all of them — and `probe::the_speedups_change_nothing

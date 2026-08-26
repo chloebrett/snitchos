@@ -49,6 +49,24 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Kernel features the browser build needs.
+///
+/// The page selects its workload at runtime from a `<select>`, so one binary has to
+/// contain everything a visitor might pick. Only `kvetch-drivel` is gated — it
+/// carries the ~4.5 MB trained checkpoint, taking the kernel from 2.09 MB to 6.57 MB,
+/// which is the price of a demo that answers Tab from the real model rather than from
+/// babble.
+///
+/// Deliberately *not* `itest-workloads`: that umbrella embeds every test program,
+/// none of them selectable by a visitor, and its own doc records those same weights
+/// pushing a machine out of frames when they were not gated. The Stitch workloads do
+/// not need it — there is not one `cfg(feature = "itest-workloads")` in
+/// `kernel/src/trap/user.rs`.
+#[must_use]
+pub fn web_features() -> Vec<&'static str> {
+    vec!["kvetch-drivel"]
+}
+
 /// A short, readable identifier for a build artifact's contents.
 ///
 /// Not a cryptographic digest and not trying to be: nothing here defends against a
@@ -96,8 +114,9 @@ pub fn web(run_e2e: bool) -> ExitCode {
     let opt = qemu::OptLevel::Max;
     let root = workspace_root();
 
-    println!("web: building the kernel ({opt:?})…");
-    match qemu::build_kernel_profiled(&[], opt) {
+    let features = web_features();
+    println!("web: building the kernel ({opt:?}, features: {})…", features.join(","));
+    match qemu::build_kernel_profiled(&features, opt) {
         Ok(s) if s.success() => {}
         Ok(_) => return ExitCode::from(1),
         Err(e) => {
@@ -342,6 +361,25 @@ fn yarn(args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{fingerprint, manifest_json};
+
+    /// The page picks its workload at runtime, so the kernel it fetches has to
+    /// contain every program a visitor might select — including the trained
+    /// checkpoint, which is the only one behind a feature.
+    #[test]
+    fn the_web_kernel_carries_the_trained_checkpoint() {
+        assert!(super::web_features().contains(&"kvetch-drivel"));
+    }
+
+    /// And nothing else. `itest-workloads` is the storm-workload umbrella: it embeds
+    /// every test program, none of which a visitor can select, and its own doc
+    /// records 4.5 MB of weights pushing a machine out of frames. Checked because
+    /// "add the feature that makes it work" is the reflex, and here it would cost
+    /// megabytes for nothing — the Stitch workloads are selectable without it (there
+    /// is not one `cfg(feature = "itest-workloads")` in `kernel/src/trap/user.rs`).
+    #[test]
+    fn the_web_kernel_leaves_the_test_workload_umbrella_out() {
+        assert!(!super::web_features().contains(&"itest-workloads"));
+    }
 
     /// Yarn 4 and anything newer is what the project pins.
     #[test]

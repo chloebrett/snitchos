@@ -41,10 +41,14 @@ export class SnemuSource implements FrameSource {
     this.label = label;
   }
 
-  /** Load `elf` into a fresh machine. Rejects if it is not a loadable RV64 ELF. */
-  static async boot(elf: Uint8Array, label = "snemu (in tab)"): Promise<SnemuSource> {
+  /**
+   * Load `elf` into a fresh machine booting `workload`, or the kernel's default when
+   * that is empty. Rejects if it is not a loadable RV64 ELF.
+   */
+  static async boot(elf: Uint8Array, workload = ""): Promise<SnemuSource> {
     await load();
-    return new SnemuSource(new Handle(elf, RAM_BYTES), label);
+    const label = workload ? `snemu · ${workload}` : "snemu · default";
+    return new SnemuSource(new Handle(elf, RAM_BYTES, workload), label);
   }
 
   /** Fast-forwards seen at the end of the previous slice. */

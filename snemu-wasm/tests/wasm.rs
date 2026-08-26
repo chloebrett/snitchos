@@ -120,7 +120,7 @@ fn the_shell_boots_a_guest_steps_it_and_drains_its_output() {
     }
 
     let elf = tiny_elf(entry, &segment);
-    let mut h = snemu_wasm::shell::Handle::new(&elf, 1024 * 1024).expect("the ELF loads");
+    let mut h = snemu_wasm::shell::Handle::new(&elf, 1024 * 1024, "").expect("the ELF loads");
 
     assert_eq!(h.instret(), 0, "a freshly loaded guest has retired nothing");
 
@@ -138,10 +138,23 @@ fn the_shell_boots_a_guest_steps_it_and_drains_its_output() {
     );
 }
 
+/// A workload selection must not stop a machine booting. The guest decides what an
+/// unknown name means; the shim's job is only to deliver it.
+#[wasm_bindgen_test]
+fn a_workload_selection_still_boots() {
+    let entry = 0x8000_0000u64;
+    let program: [u32; 1] = [0x0000_006F]; // spin
+    let elf = tiny_elf(entry, &program[0].to_le_bytes());
+
+    let mut h = snemu_wasm::shell::Handle::new(&elf, 1024 * 1024, "stitch-drivel")
+        .expect("a patched device tree still loads");
+    assert!(h.step_budget(16).expect("steps").contains("Running"));
+}
+
 /// A bad image must arrive as a JS error, not a panic. A Rust panic across the wasm
 /// boundary aborts the module and takes the page with it; an `Err` is something the
 /// page can render.
 #[wasm_bindgen_test]
 fn a_non_elf_image_is_reported_as_an_error() {
-    assert!(snemu_wasm::shell::Handle::new(b"not an elf", 1024 * 1024).is_err());
+    assert!(snemu_wasm::shell::Handle::new(b"not an elf", 1024 * 1024, "").is_err());
 }
