@@ -11,6 +11,7 @@ pub mod boot;
 pub mod budget;
 pub mod cursor;
 pub mod probe;
+pub mod series;
 pub mod shell;
 pub mod store;
 pub mod telemetry;
