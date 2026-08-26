@@ -120,12 +120,18 @@ test("answers Tab with a completion from the trained model", async ({ page }) =>
   // re-validates it and falls back to a grammar menu if it refuses, which looks
   // identical from the frame stream.
   //
-  // Deliberately *not* also asserting a `kvetch.complete` span in the frame tail.
-  // That tail is a bounded live window, and this guest emits thousands of
-  // `ContextSwitch` frames per second — a single transient span is evicted within a
-  // fraction of a second, so catching it depends on a poll landing in the right
-  // window. It had been passing on luck. The terminal is the durable observable and
-  // the actual claim.
+  // The model working is observable while you wait, which is the point of showing it
+  // rather than apologising for the delay.
+  //
+  // This assertion was **removed** as a race and is back because collapsing fixed the
+  // cause. The tail is bounded, and this guest emits thousands of `ContextSwitch`
+  // frames a second; uncollapsed they filled the whole window and evicted a single
+  // transient span within a fraction of a second. As one counted row they cost
+  // nothing, and the span survives. Verified over repeated runs before restoring it.
+  await page.getByTestId("tab-frames").click();
+  await expect(page.getByTestId("frame-list")).toContainText("kvetch.complete", {
+    timeout: BOOT_TIMEOUT,
+  });
   await expect(page.getByTestId("console")).toContainText(/stitch> let x =\s*\S/, {
     timeout: BOOT_TIMEOUT,
   });

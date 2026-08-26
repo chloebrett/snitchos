@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { FrameSource, FrameView, Slice, Status } from "./frames";
-import { appendCapped, mips, Pump } from "./pump";
+import type { FrameSource, Slice, Status } from "./frames";
+import { mips, Pump } from "./pump";
 
 /** A source that returns a scripted sequence of slices — no emulator involved. */
 function fakeSource(statuses: Status[]): FrameSource & { calls: number } {
@@ -16,8 +16,6 @@ function fakeSource(statuses: Status[]): FrameSource & { calls: number } {
     },
   };
 }
-
-const view = (kind: string): FrameView => ({ kind, name: null, t: null, value: null });
 
 describe("Pump", () => {
   it("advances the source once per tick", () => {
@@ -109,38 +107,6 @@ describe("Pump", () => {
 
   it("is not done before it has run", () => {
     expect(new Pump(fakeSource([{ Running: { instret: 1 } }])).done).toBe(false);
-  });
-});
-
-describe("appendCapped", () => {
-  it("keeps everything while under the cap", () => {
-    expect(appendCapped([view("a")], [view("b")], 10)).toHaveLength(2);
-  });
-
-  /** The tail is a *tail*: when it overflows, the oldest rows go, not the newest. */
-  it("drops the oldest rows once over the cap", () => {
-    const existing = [view("a"), view("b"), view("c")];
-    const result = appendCapped(existing, [view("d")], 3);
-
-    expect(result.map((f) => f.kind)).toEqual(["b", "c", "d"]);
-  });
-
-  it("keeps exactly the cap when the join lands on it", () => {
-    expect(appendCapped([view("a")], [view("b")], 2)).toHaveLength(2);
-  });
-
-  it("handles an incoming batch larger than the cap on its own", () => {
-    const result = appendCapped([view("old")], [view("x"), view("y"), view("z")], 2);
-    expect(result.map((f) => f.kind)).toEqual(["y", "z"]);
-  });
-
-  /**
-   * Identity on an empty batch, so React can skip re-rendering the pane on the many
-   * animation frames that carry no telemetry.
-   */
-  it("returns the same array when nothing is new", () => {
-    const existing = [view("a")];
-    expect(appendCapped(existing, [], 10)).toBe(existing);
   });
 });
 

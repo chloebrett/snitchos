@@ -8,16 +8,7 @@
  * hook supplies the clock; this file supplies the judgement.
  */
 
-import { type FrameSource, type FrameView, isTerminal, type Slice } from "./frames";
-
-/**
- * How many telemetry rows the pane keeps.
- *
- * A live tail, not a log. An unbounded list grows without limit across a long boot
- * and takes the frame rate down with it — the DOM, not the emulator, becomes the
- * bottleneck.
- */
-export const MAX_FRAME_ROWS = 400;
+import { type FrameSource, isTerminal, type Slice } from "./frames";
 
 /** Runs a source in slices and knows when to stop. */
 export class Pump {
@@ -66,22 +57,6 @@ export class Pump {
     if (isTerminal(slice.status)) this.#done = true;
     return slice;
   }
-}
-
-/**
- * Append `incoming` to `existing`, keeping at most `cap` of the most recent.
- *
- * Returns `existing` unchanged when there is nothing new, so React can skip a
- * re-render on the many frames that produce no telemetry at all.
- */
-export function appendCapped(
-  existing: readonly FrameView[],
-  incoming: readonly FrameView[],
-  cap: number = MAX_FRAME_ROWS,
-): readonly FrameView[] {
-  if (incoming.length === 0) return existing;
-  const joined = [...existing, ...incoming];
-  return joined.length <= cap ? joined : joined.slice(joined.length - cap);
 }
 
 /** Millions of guest instructions per second of wall clock, or 0 before any elapse. */

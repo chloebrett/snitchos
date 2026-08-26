@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Console, type ConsoleHandle } from "./Console";
-import { describe, type FrameView, type Status, type Views } from "./frames";
+import { describe, type Status, type Views } from "./frames";
 import { encodeInput } from "./input";
 import { Panels } from "./Panels";
 import { Pacer, type Speed } from "./pace";
 import { progressLabel } from "./progress";
-import { appendCapped, mips, Pump } from "./pump";
+import { mips, Pump } from "./pump";
 import {
   type BuildManifest,
   fetchKernel,
@@ -13,6 +13,7 @@ import {
   type Workload,
   workloads,
 } from "./snemu";
+import { appendCollapsed, type FrameRow, MAX_TAIL_ROWS } from "./tail";
 
 /**
  * How often to re-fold the structural views, in milliseconds.
@@ -25,7 +26,7 @@ const FOLD_INTERVAL_MS = 250;
 
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
-  const [frames, setFrames] = useState<readonly FrameView[]>([]);
+  const [frames, setFrames] = useState<readonly FrameRow[]>([]);
   const [instret, setInstret] = useState(0);
   const [rate, setRate] = useState(0);
   const [manifest, setManifest] = useState<BuildManifest | null>(null);
@@ -106,7 +107,7 @@ export function App() {
           last = now;
           if (slice) {
             if (slice.text) term.current?.write(slice.text);
-            setFrames((prev) => appendCapped(prev, slice.frames));
+            setFrames((prev) => appendCollapsed(prev, slice.frames, MAX_TAIL_ROWS));
             setStatus(slice.status);
             setInstret(slice.instret);
             setRate(mips(slice.instret, now - started));

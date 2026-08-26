@@ -64,7 +64,12 @@ describe("Panels", () => {
     render(
       <Panels
         views={views()}
-        frames={[{ kind: "SpanStart", name: "kernel.boot", t: 1, value: null }]}
+        frames={[
+          {
+            view: { kind: "SpanStart", name: "kernel.boot", t: 1, value: null },
+            count: 1,
+          },
+        ]}
       />,
     );
 

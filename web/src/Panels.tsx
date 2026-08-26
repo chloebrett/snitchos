@@ -1,8 +1,9 @@
 import { useState } from "react";
-import type { FrameView, Views } from "./frames";
+import type { Views } from "./frames";
 import { GraphView } from "./GraphView";
 import type { Graph } from "./graph";
 import { TelemetryPane } from "./TelemetryPane";
+import type { FrameRow } from "./tail";
 
 /** Which view the right-hand pane is showing. */
 export type PanelId = "caps" | "spans" | "switches" | "frames";
@@ -54,7 +55,7 @@ export function Panels({
   frames,
 }: {
   views: Views | null;
-  frames: readonly FrameView[];
+  frames: readonly FrameRow[];
 }) {
   const [active, setActive] = useState<PanelId>("caps");
 
@@ -104,9 +105,9 @@ function Body({
 }: {
   active: PanelId;
   views: Views | null;
-  frames: readonly FrameView[];
+  frames: readonly FrameRow[];
 }) {
-  if (active === "frames") return <TelemetryPane frames={frames} />;
+  if (active === "frames") return <TelemetryPane rows={frames} />;
 
   // "No source yet" is not "a source that produced nothing". Conflating them shows an
   // empty capability tree during boot, which reads as *this guest granted nothing*.
