@@ -1,16 +1,44 @@
 import { useState } from "react";
 import type { FrameView, Views } from "./frames";
 import { GraphView } from "./GraphView";
+import type { Graph } from "./graph";
 import { TelemetryPane } from "./TelemetryPane";
 
 /** Which view the right-hand pane is showing. */
 export type PanelId = "caps" | "spans" | "switches" | "frames";
 
+/**
+ * The folded views, each with what to say when it is empty.
+ *
+ * A table rather than a chain of conditionals: every entry here is the *same* kind of
+ * thing — a graph and the sentence that explains its absence — and the next one
+ * (metrics, once they land) is too. Adding a branch per view would put that sameness
+ * behind a decision tree that grows a level each time.
+ */
+const GRAPH_TABS: Array<{
+  id: PanelId;
+  label: string;
+  of: (v: Views) => Graph;
+  empty: string;
+}> = [
+  {
+    id: "caps",
+    label: "capabilities",
+    of: (v) => v.caps,
+    empty: "no capabilities derived yet",
+  },
+  { id: "spans", label: "spans", of: (v) => v.spans, empty: "no spans yet" },
+  {
+    id: "switches",
+    label: "switches",
+    of: (v) => v.switches,
+    empty: "no context switches yet",
+  },
+];
+
 const TABS: Array<{ id: PanelId; label: string }> = [
-  { id: "caps", label: "capabilities" },
-  { id: "spans", label: "spans" },
-  { id: "switches", label: "switches" },
-  { id: "frames", label: "frames" },
+  ...GRAPH_TABS.map(({ id, label }) => ({ id, label })),
+  { id: "frames" as const, label: "frames" },
 ];
 
 /**
@@ -63,20 +91,32 @@ export function Panels({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {active === "frames" ? (
-          <TelemetryPane frames={frames} />
-        ) : views === null ? (
-          <p className="px-3 py-2 text-neutral-600 text-xs italic">
-            waiting for the guest…
-          </p>
-        ) : active === "caps" ? (
-          <GraphView graph={views.caps} empty="no capabilities derived yet" />
-        ) : active === "spans" ? (
-          <GraphView graph={views.spans} empty="no spans yet" />
-        ) : (
-          <GraphView graph={views.switches} empty="no context switches yet" />
-        )}
+        <Body active={active} views={views} frames={frames} />
       </div>
     </section>
   );
+}
+
+function Body({
+  active,
+  views,
+  frames,
+}: {
+  active: PanelId;
+  views: Views | null;
+  frames: readonly FrameView[];
+}) {
+  if (active === "frames") return <TelemetryPane frames={frames} />;
+
+  // "No source yet" is not "a source that produced nothing". Conflating them shows an
+  // empty capability tree during boot, which reads as *this guest granted nothing*.
+  if (views === null) {
+    return (
+      <p className="px-3 py-2 text-neutral-600 text-xs italic">waiting for the guest…</p>
+    );
+  }
+
+  const tab = GRAPH_TABS.find((t) => t.id === active);
+  if (!tab) return null;
+  return <GraphView graph={tab.of(views)} empty={tab.empty} />;
 }

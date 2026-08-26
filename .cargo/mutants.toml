@@ -82,6 +82,13 @@ exclude_re = [
   # narrow.
   "replace (workspace_root|git_rev|yarn_version|yarn_is_usable|yarn|web|test|e2e|web_toolchain_ready) ->",
   "in (yarn|web|test)$",
+  # Equivalent mutant in diagram's derivation_tree: with `||`, a root capability
+  # (`parent_cap_id == 0`) pushes an edge from cap id 0 — but the very next stage
+  # keeps only edges whose *both* endpoints carry a label, and 0 is the wire's
+  # "no parent" sentinel, so no capability ever has that id and no such node exists.
+  # The edge is filtered either way. The sibling `&&` on the filter itself is NOT
+  # equivalent and is covered by `an_edge_out_of_a_dropped_reply_cap_is_not_kept`.
+  'replace && with \|\| in derivation_tree',
   # Equivalent mutant in snemu-wasm's probe: the operand is a
   # `Vec::with_capacity` argument, and capacity is a performance hint with no
   # observable effect — the vector is filled by `extend_from_slice` either way,

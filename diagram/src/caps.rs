@@ -79,6 +79,21 @@ impl CapQuiescence {
 /// `parent_cap_id == 0` grant is styled as a root. **Isolated** grants — no
 /// parent and no children, i.e. the per-process bootstrap telemetry/span sinks —
 /// are dropped, so what remains is the actual delegation structure. Top-down.
+/// Whether a derivation edge connects two capabilities that both became nodes.
+///
+/// **Both**, not either. Reply caps are skipped before labelling, so a capability
+/// derived from one has an edge whose `from` never becomes a node; keeping it draws
+/// an arrow out of nothing, which the browser panel renders as a visible claim about
+/// a capability that does not exist.
+///
+/// Named rather than inlined so its correctness is attributable: as an anonymous
+/// `&&` inside `derivation_tree` it shared a mutation-test description with a
+/// genuinely equivalent mutant nearby, and excluding that one would have silenced
+/// this one too.
+fn both_are_nodes(labels: &HashMap<u64, String>, from: u64, to: u64) -> bool {
+    labels.contains_key(&from) && labels.contains_key(&to)
+}
+
 pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
     let names = thread_names(frames);
     let revoked: HashSet<u64> = frames
@@ -132,10 +147,8 @@ pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
 
     // Keep only edges between real (non-Reply) nodes; a node is dropped if it
     // ends up in no edge (isolated bootstrap grant).
-    let edges: Vec<(u64, u64)> = edge_order
-        .into_iter()
-        .filter(|(from, to)| label_of.contains_key(from) && label_of.contains_key(to))
-        .collect();
+    let edges: Vec<(u64, u64)> =
+        edge_order.into_iter().filter(|(from, to)| both_are_nodes(&label_of, *from, *to)).collect();
     let connected: HashSet<u64> = edges.iter().flat_map(|(from, to)| [*from, *to]).collect();
 
     let mut graph = Graph::new(Direction::TopDown);
@@ -256,6 +269,33 @@ mod tests {
         let mermaid = derivation_tree(&frames).to_mermaid();
         assert!(mermaid.contains("#1 Endpoint fs-server"), "holder id resolved to its name");
         assert!(!mermaid.contains(" h6"), "raw holder id not shown when named");
+    }
+
+    /// An edge needs **both** endpoints to be real nodes, not either.
+    ///
+    /// Reply caps are skipped before labelling, so a capability derived *from* one has
+    /// an edge whose `from` never becomes a node. Keeping it would draw an arrow out
+    /// of nothing — and in the browser panel, which renders these graphs live, a
+    /// dangling edge is a visible claim about a capability that does not exist.
+    ///
+    /// The existing Reply test covers a reply as a *child*; this is the parent case,
+    /// which is the one the `&&` at the filter actually guards. Mutation testing found
+    /// it: `&&` → `||` survived.
+    #[test]
+    fn an_edge_out_of_a_dropped_reply_cap_is_not_kept() {
+        let frames = vec![
+            cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint),
+            cap_event(CapEventKind::Transferred, 2, 1, 7, CapObject::Endpoint),
+            // A reply cap, dropped as noise...
+            cap_event(CapEventKind::Transferred, 3, 1, 6, CapObject::Reply),
+            // ...and something derived from it, whose parent therefore has no node.
+            cap_event(CapEventKind::Transferred, 4, 3, 7, CapObject::Endpoint),
+        ];
+        let mermaid = derivation_tree(&frames).to_mermaid();
+
+        assert!(!mermaid.contains("cap3 --> cap4"), "no edge out of a dropped node");
+        assert!(!mermaid.contains("cap4"), "and cap4 is isolated, so it is dropped too");
+        assert!(mermaid.contains("cap1 --> cap2"), "the real delegation still stands");
     }
 
     #[test]

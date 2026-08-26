@@ -376,6 +376,26 @@ mod tests {
         assert_eq!(d.frames().len(), 2);
     }
 
+    /// The unbounded bucket is reportable through the decoder, not only the store.
+    ///
+    /// It is what the page displays so the "registrations are naturally few"
+    /// assumption can be watched rather than trusted — so it has to move with what
+    /// arrives. Counts chosen to differ from each other and from one: a constant
+    /// would satisfy a single equality, which is how the store's own version of this
+    /// accessor first shipped untested.
+    #[test]
+    fn the_decoder_reports_its_cumulative_frames() {
+        let mut d = Decoder::new();
+        assert_eq!(d.durable_len(), 0);
+
+        d.push(&wire(&[register(1, "a"), register(2, "b"), register(3, "c")]));
+        assert_eq!(d.durable_len(), 3);
+
+        // A stream frame is windowed, so it must not move the durable count.
+        d.push(&wire(&[span_start(1, 1)]));
+        assert_eq!(d.durable_len(), 3, "a span is not a cumulative fact");
+    }
+
     /// A corrupt chunk is skipped rather than retained: a frame that failed to decode
     /// is not a frame, and folding it is not possible.
     #[test]

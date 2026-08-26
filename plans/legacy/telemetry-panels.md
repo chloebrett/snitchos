@@ -3,7 +3,7 @@
 **Branch**: main (this project works directly on main; the human commits)
 **Status**: Active
 
-Follows [legacy/snemu-wasm-interactive.md](legacy/snemu-wasm-interactive.md). The tab
+Follows [snemu-wasm-interactive.md](snemu-wasm-interactive.md). The tab
 runs a machine you can type at; this is the machine explaining itself.
 
 ## Goal
@@ -18,6 +18,9 @@ folded from the same frame stream the terminal already consumes.
 downsampling, range queries and alerting is a far bigger commitment than the UI, and
 custom React wins only for what Grafana is *bad* at: cap-derivation trees, span trees,
 and the terminal. It does not win at line charts, and this plan does not attempt any.
+(**Superseded in part** — see the metrics note under Open questions: numbers shown
+*in the context that explains them* are also something Grafana cannot do. Still not
+line charts, and still not a store.)
 (Nor at the physics desktop, which is not a panel at all — the OS renders that itself,
 to its own framebuffer. React's job stops at the frame stream.) (`docs/uart-telemetry-design.md` Decision 4.)
 
@@ -289,9 +292,26 @@ something continuous, or assert the durable projection.
   this question was answered once already for the static diagrams.
 - **Does the retention bound belong in the `Decoder` or above it?** A replay source
   would want the whole stream; a live tab cannot afford it.
-- **Where do metrics go?** Explicitly not here. But a page showing structure and no
-  numbers will invite the question, and "Grafana, deliberately" should be visible
-  somewhere rather than implied.
+- ~~**Where do metrics go?** Explicitly not here.~~ **Reversed 2026-08-26: metrics
+  belong here too, and custom.**
+
+  This plan scoped itself to "structure, not series" on the inherited reasoning that
+  custom React wins only where Grafana is *bad*, and loses at line charts. That is
+  still true of line charts and is now the wrong conclusion: the interesting metrics
+  this guest emits are not series to plot, they are numbers that mean something
+  alongside the structure — a capability's use count next to the capability, a task's
+  CPU time next to the task in the switch graph, heap occupancy next to the frames
+  that allocated it. Grafana cannot put a number *next to* a derivation-tree node,
+  because it has never heard of one.
+
+  So the split is not "structure here, numbers there". It is **numbers in the context
+  that explains them here; numbers over time in Grafana**. Prometheus remains the
+  store — that decision is untouched, and this needs no storage of its own.
+
+  Its own milestone; this one does not attempt it. Worth noting the frames are already
+  arriving and already retained: `Metric` frames are classified `Windowed` in
+  `snemu-wasm/src/store.rs`, which is right for a live reading and would need
+  revisiting if any view wanted history.
 
 ## Pre-PR quality gate
 
@@ -303,5 +323,5 @@ something continuous, or assert the durable projection.
 ---
 *On completion, `git mv` this file to `plans/legacy/` (per CLAUDE.md this project keeps
 the historical record) and follow the archiving checklist in
-[README.md](README.md) — including the `.rs` doc-path citations `cargo xtask links`
+[README.md](../README.md) — including the `.rs` doc-path citations `cargo xtask links`
 cannot see.*
