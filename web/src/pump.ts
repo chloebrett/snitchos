@@ -11,16 +11,6 @@
 import { type FrameSource, type FrameView, isTerminal, type Slice } from "./frames";
 
 /**
- * Guest instructions per animation frame.
- *
- * Boot is roughly 25M instructions, so ~2M per frame reaches heartbeat in a second
- * or two while leaving each frame near the 16ms budget on a desktop machine. It is a
- * comfort knob, not a correctness one: too high and the tab janks, too low and boot
- * crawls, but neither changes what the guest computes.
- */
-export const INSTRET_PER_FRAME = 2_000_000;
-
-/**
  * How many telemetry rows the pane keeps.
  *
  * A live tail, not a log. An unbounded list grows without limit across a long boot
@@ -32,12 +22,10 @@ export const MAX_FRAME_ROWS = 400;
 /** Runs a source in slices and knows when to stop. */
 export class Pump {
   #source: FrameSource;
-  #budget: number;
   #done = false;
 
-  constructor(source: FrameSource, budget: number = INSTRET_PER_FRAME) {
+  constructor(source: FrameSource) {
     this.#source = source;
-    this.#budget = budget;
   }
 
   /** True once the guest reached a terminal state; further ticks do nothing. */
@@ -46,15 +34,35 @@ export class Pump {
   }
 
   /**
-   * Advance by one slice, or return `null` if the guest has already finished.
+   * The guest's cumulative retired-instruction count, as of the last slice.
    *
-   * Refusing to step a finished guest is the point: a `Halted` machine would
-   * otherwise be asked to run again on every animation frame for as long as the tab
-   * is open, burning a core to retire nothing.
+   * This is what {@link Pacer} compares against the clock, so it has to be the
+   * *guest's* count rather than a total of what was asked for: a slice may overshoot
+   * its budget (a step is atomic, and a JIT block or a collapsed `memset` retires
+   * many instructions at once), and pacing against the request rather than the
+   * result would let that overshoot accumulate as phantom debt.
    */
-  tick(): Slice | null {
-    if (this.#done) return null;
-    const slice = this.#source.advance(this.#budget);
+  get instret(): number {
+    return this.#instret;
+  }
+  #instret = 0;
+
+  /**
+   * Advance by up to `budget` guest instructions, or return `null` if there is
+   * nothing to do.
+   *
+   * Two ways there is nothing to do, and both matter for a page left open:
+   *
+   * - The guest has finished. A `Halted` machine asked to run again on every
+   *   animation frame would burn a core to retire nothing.
+   * - The budget is zero, which is what {@link Pacer} returns once the guest has
+   *   caught up with real time. Crossing into wasm to run no instructions is pure
+   *   overhead, and it happens most frames in the steady state.
+   */
+  tick(budget: number): Slice | null {
+    if (this.#done || budget <= 0) return null;
+    const slice = this.#source.advance(budget);
+    this.#instret = slice.instret;
     if (isTerminal(slice.status)) this.#done = true;
     return slice;
   }

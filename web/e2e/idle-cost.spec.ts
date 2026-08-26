@@ -3,11 +3,12 @@ import { expect, test } from "@playwright/test";
 /**
  * What does this page cost while it is just sitting there?
  *
- * snemu's clock is the instruction counter, and it fast-forwards over an idle `wfi`
- * rather than sleeping — `docs/scaling-down-snitchos.md` flags that "an idle tab
- * would pin a core" as a known gap. That was a prediction, not a measurement. This
- * measures it, because the difference decides whether wall-clock pacing is a
- * milestone-4 nicety or a prerequisite for showing anyone the page.
+ * `docs/scaling-down-snitchos.md` predicted "an idle tab would pin a core". It was
+ * right, and measuring it is what turned a milestone-4 nicety into a prerequisite —
+ * and then what proved the fix. The diagnosis was not what the prediction implied,
+ * though: nothing was being wasted. snemu's clock *is* the retired-instruction
+ * count, so a second of guest time costs the timebase in instructions, and a loop
+ * with no pacing simply buys guest time as fast as the host can make it.
  *
  * `Performance.getMetrics` over CDP gives `TaskDuration` — cumulative main-thread
  * busy seconds — so the busy *fraction* over a window is a real number rather than a
@@ -17,7 +18,9 @@ import { expect, test } from "@playwright/test";
 const BOOT_TIMEOUT = 90_000;
 const WINDOW_MS = 4000;
 
-test("reports what an open tab costs once the guest has booted @measurement", async ({ page }) => {
+test("reports what an open tab costs once the guest has booted @measurement", async ({
+  page,
+}) => {
   await page.goto("/");
   await expect(page.getByTestId("console")).toContainText(/heartbeat/i, {
     timeout: BOOT_TIMEOUT,
@@ -54,17 +57,21 @@ test("reports what an open tab costs once the guest has booted @measurement", as
       `  guest throughput : ${guestMips.toFixed(1)} MIPS\n`,
   );
 
-  // MEASURED 2026-08-25: 100.0% of one core, sustained, at 11 MIPS of guest
-  // throughput. The prediction in scaling-down-snitchos.md was right and not
-  // marginal — this tab pins a core for as long as it is open.
+  // The history this number carries, because it is the point of keeping it:
   //
-  // The assertion is deliberately left FAILING rather than relaxed to match. A
-  // threshold moved to accommodate the bug would turn the only evidence of it into a
-  // green tick; a red test is the honest record until wall-clock pacing lands, and
-  // it is what will confirm the fix.
+  //   100.0% of a core, 11.0 MIPS — the default interpreter, running flat out.
+  //    100.0% of a core, 38.9 MIPS — snemu's caches enabled. Faster, not cheaper:
+  //                                  the loop simply bought guest time quicker.
+  //     43.3% of a core, 10.0 MIPS — wall-clock pacing. 10.0 is the guest timebase
+  //                                  exactly, so the guest now runs at real time.
+  //
+  // The bar is one third of a core with headroom. The remaining cost is not the
+  // emulator — at 10 MIPS of a 38.9 MIPS ceiling that is roughly a quarter of a core
+  // — so the rest is the page: React re-renders and xterm writes, every frame. That
+  // is the next thing to measure if this needs to come down further.
   //
   // Tagged `@measurement` and excluded from the default e2e run (see
-  // playwright.config.ts) so it does not mask real regressions; run it with
-  //   yarn measure
-  expect(busyFraction).toBeLessThan(0.9);
+  // playwright.config.ts), because a number worth watching is not the same as a
+  // regression gate; run it with `yarn measure`.
+  expect(busyFraction).toBeLessThan(0.6);
 });

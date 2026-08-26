@@ -49,8 +49,15 @@ test("stays responsive while the guest boots", async ({ page }) => {
   // If the rAF loop ever ran to completion inside one frame, the main thread would
   // be blocked and neither of these could happen: the pulse animation would freeze
   // and a round-trip evaluation would stall behind it.
-  const beforeFrames = await countAnimationFrames(page);
-  expect(beforeFrames).toBeGreaterThan(2);
+  //
+  // The bar is 20fps over half a second. It started at ">2 frames", which sounds
+  // strict and is not — that passes at 5.5fps, which is exactly the jank the
+  // unbounded 2M-instret slice produced (~180ms per frame at the then-current
+  // 11 MIPS). A threshold that a known-bad build satisfies is not a test. Pacing
+  // holds ~60fps here, so 20 leaves room for a slow CI box while still failing
+  // anything a person would call stuttering.
+  const framesPainted = await countAnimationFrames(page);
+  expect(framesPainted).toBeGreaterThan(10);
 
   // And the page still answers a fresh evaluation promptly.
   const started = Date.now();

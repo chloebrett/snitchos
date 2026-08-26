@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Console } from "./Console";
 import { describe, type FrameView, type Status } from "./frames";
-import { appendCapped, INSTRET_PER_FRAME, mips, Pump } from "./pump";
+import { Pacer } from "./pace";
+import { appendCapped, mips, Pump } from "./pump";
 import { type BuildManifest, fetchKernel, SnemuSource } from "./snemu";
 import { TelemetryPane } from "./TelemetryPane";
 
@@ -30,21 +31,31 @@ export function App() {
         setManifest(manifest);
         setKernelBytes(elf.length);
 
-        const pump = new Pump(await SnemuSource.boot(elf), INSTRET_PER_FRAME);
+        const pump = new Pump(await SnemuSource.boot(elf));
         if (cancelled) return;
+        const pacer = new Pacer();
         const started = performance.now();
+        let last = started;
 
-        // One bounded slice per animation frame. The browser gets the thread back
-        // between slices, which is the whole reason `step_budget` is bounded — a
-        // `while` loop to completion here would freeze the tab for the entire boot.
-        const step = () => {
-          const slice = pump.tick();
+        // One paced slice per animation frame.
+        //
+        // The budget is what the *clock* says is owed, not what the host could
+        // manage: running flat out buys guest time as fast as the machine can make
+        // it, which measured as 100% of a core forever. Asking the pacer instead
+        // means most frames in the steady state do nothing at all.
+        //
+        // Still bounded per frame, for the other reason `step_budget` takes a
+        // budget: a `while` loop to completion would freeze the tab for a whole
+        // boot.
+        const step = (now: number) => {
+          const slice = pump.tick(pacer.budget(now - last, pump.instret));
+          last = now;
           if (slice) {
             if (slice.text) write.current(slice.text);
             setFrames((prev) => appendCapped(prev, slice.frames));
             setStatus(slice.status);
             setInstret(slice.instret);
-            setRate(mips(slice.instret, performance.now() - started));
+            setRate(mips(slice.instret, now - started));
           }
           // Keep scheduling even once done, so a future source (or a restart) has a
           // running clock to attach to; `tick` is a no-op past the terminal state.

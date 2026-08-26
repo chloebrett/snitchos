@@ -22,10 +22,10 @@ const view = (kind: string): FrameView => ({ kind, name: null, t: null, value: n
 describe("Pump", () => {
   it("advances the source once per tick", () => {
     const source = fakeSource([{ Running: { instret: 1 } }]);
-    const pump = new Pump(source, 100);
+    const pump = new Pump(source);
 
-    pump.tick();
-    pump.tick();
+    pump.tick(100);
+    pump.tick(100);
 
     expect(source.calls).toBe(2);
   });
@@ -34,7 +34,7 @@ describe("Pump", () => {
     const source = fakeSource([{ Running: { instret: 1 } }]);
     const spy = vi.spyOn(source, "advance");
 
-    new Pump(source, 12_345).tick();
+    new Pump(source).tick(12_345);
 
     expect(spy).toHaveBeenCalledWith(12_345);
   });
@@ -46,32 +46,69 @@ describe("Pump", () => {
    */
   it("stops advancing the source once the guest halts", () => {
     const source = fakeSource([{ Running: { instret: 1 } }, { Halted: { instret: 2 } }]);
-    const pump = new Pump(source, 100);
+    const pump = new Pump(source);
 
-    pump.tick();
-    pump.tick();
+    pump.tick(100);
+    pump.tick(100);
     const after = source.calls;
-    pump.tick();
-    pump.tick();
+    pump.tick(100);
+    pump.tick(100);
 
     expect(source.calls).toBe(after);
     expect(pump.done).toBe(true);
-    expect(pump.tick()).toBeNull();
+    expect(pump.tick(100)).toBeNull();
   });
 
   it("stops on a trap too, and the trapping slice is still delivered", () => {
     const source = fakeSource([{ Trapped: { instret: 3, reason: "boom" } }]);
-    const pump = new Pump(source, 100);
+    const pump = new Pump(source);
 
-    const slice = pump.tick();
+    const slice = pump.tick(100);
 
     expect(slice).not.toBeNull();
     expect(slice?.status).toEqual({ Trapped: { instret: 3, reason: "boom" } });
     expect(pump.done).toBe(true);
   });
 
+  /**
+   * A zero budget is the steady state once {@link Pacer} has the guest at real time,
+   * so it must be free: no wasm call, no slice, no re-render.
+   */
+  it("does not touch the source when the budget is zero", () => {
+    const source = fakeSource([{ Running: { instret: 1 } }]);
+    const pump = new Pump(source);
+
+    expect(pump.tick(0)).toBeNull();
+    expect(pump.tick(-1)).toBeNull();
+
+    expect(source.calls).toBe(0);
+    expect(pump.done).toBe(false);
+  });
+
+  /**
+   * The pacer reads this every frame to decide what is owed, so it must track what
+   * the guest actually retired rather than what was asked for.
+   */
+  it("reports the guest's own retired count, not the budget asked for", () => {
+    const source = fakeSource([{ Running: { instret: 1 } }]);
+    const pump = new Pump(source);
+
+    expect(pump.instret).toBe(0);
+    const slice = pump.tick(999_999);
+    expect(pump.instret).toBe(slice?.instret);
+    expect(pump.instret).not.toBe(999_999);
+  });
+
+  it("leaves the retired count alone when nothing ran", () => {
+    const pump = new Pump(fakeSource([{ Running: { instret: 1 } }]));
+    pump.tick(100);
+    const before = pump.instret;
+    pump.tick(0);
+    expect(pump.instret).toBe(before);
+  });
+
   it("is not done before it has run", () => {
-    expect(new Pump(fakeSource([{ Running: { instret: 1 } }]), 100).done).toBe(false);
+    expect(new Pump(fakeSource([{ Running: { instret: 1 } }])).done).toBe(false);
   });
 });
 
