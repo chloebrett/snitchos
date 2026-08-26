@@ -31,6 +31,36 @@ struct ClassDef {
     dot: Vec<(String, String)>,
 }
 
+/// `s` as a quoted JSON string.
+///
+/// Hand-written rather than `serde_json`, to match how this module already emits
+/// mermaid and DOT: the model is the testable seam and the renderers are string
+/// builders. Escaping is not optional here — labels carry *guest* data (a task name,
+/// a capability descriptor), so a quote or a backslash arriving from the wire must not
+/// be able to produce JSON the panel cannot parse.
+fn quoted(s: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Everything below 0x20 must be escaped for the output to be valid JSON.
+            c if (c as u32) < 0x20 => {
+                write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// A directed graph rendered as a mermaid `graph` (flowchart) or DOT digraph.
 /// Nodes keep insertion order so the emitted output is deterministic and
 /// diffable. Nodes may carry style classes defined via [`Graph::define_class`].
@@ -113,6 +143,63 @@ impl Graph {
             }
         }
         groups
+    }
+
+    /// The graph as JSON, for a consumer that draws it itself.
+    ///
+    /// The third renderer beside [`to_mermaid`](Self::to_mermaid) and
+    /// [`to_dot`](Self::to_dot), and it exists for a different kind of consumer: those
+    /// two emit a *picture*, this emits the structure. The browser panels need the
+    /// structure because the argument for building them at all is interaction —
+    /// hovering a capability to see its rights, selecting a span to follow it across a
+    /// context switch — and a rendered image is exactly the thing Grafana already does
+    /// well enough.
+    ///
+    /// Sharing this one model is what keeps a live panel and its committed `.md`
+    /// counterpart describing the same graph. Two folds would drift; one fold with
+    /// three renderers cannot.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let direction = match self.direction {
+            Direction::LeftRight => "LR",
+            Direction::TopDown => "TD",
+        };
+
+        let nodes: Vec<String> = self
+            .nodes
+            .iter()
+            .map(|n| {
+                let classes: Vec<String> =
+                    n.classes.iter().map(|c| quoted(c)).collect();
+                let group = n.group.as_ref().map_or_else(|| "null".to_string(), |g| quoted(g));
+                format!(
+                    r#"{{"id":{},"label":{},"classes":[{}],"group":{group}}}"#,
+                    quoted(&n.id),
+                    quoted(&n.label),
+                    classes.join(","),
+                )
+            })
+            .collect();
+
+        let edges: Vec<String> = self
+            .edges
+            .iter()
+            .map(|e| {
+                let label =
+                    e.label.as_ref().map_or_else(|| "null".to_string(), |l| quoted(l));
+                format!(
+                    r#"{{"from":{},"to":{},"label":{label}}}"#,
+                    quoted(&e.from),
+                    quoted(&e.to),
+                )
+            })
+            .collect();
+
+        format!(
+            r#"{{"direction":"{direction}","nodes":[{}],"edges":[{}]}}"#,
+            nodes.join(","),
+            edges.join(","),
+        )
     }
 
     pub fn to_mermaid(&self) -> String {
@@ -228,6 +315,115 @@ impl Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shape a browser panel reads. A contract with TypeScript, which has no
+    /// compiler to notice a renamed key — so it is pinned rather than described.
+    #[test]
+    fn serializes_nodes_and_edges_for_a_consumer_that_draws_its_own() {
+        let mut g = Graph::new(Direction::LeftRight);
+        g.node("a", "Alpha");
+        g.node("b", "Beta");
+        g.edge_labeled("a", "b", "grants");
+
+        assert_eq!(
+            g.to_json(),
+            r#"{"direction":"LR","nodes":[{"id":"a","label":"Alpha","classes":[],"group":null},{"id":"b","label":"Beta","classes":[],"group":null}],"edges":[{"from":"a","to":"b","label":"grants"}]}"#
+        );
+    }
+
+    /// Groups and classes are how a fold says "these belong together" and "this one is
+    /// a root". A renderer that cannot see them draws a flat, unstyled blob — the
+    /// mermaid backend gets both, so the JSON one must too.
+    #[test]
+    fn serialization_carries_groups_and_classes() {
+        let mut g = Graph::new(Direction::TopDown);
+        g.define_class("root", "fill:#eee", &[("shape", "box")]);
+        g.node_classed("r", "Root", &["root"]);
+        g.node_in("c", "Child", "cluster one");
+
+        let json = g.to_json();
+        assert!(json.contains(r#""direction":"TD""#), "{json}");
+        assert!(json.contains(r#""classes":["root"]"#), "{json}");
+        assert!(json.contains(r#""group":"cluster one""#), "{json}");
+    }
+
+    /// An unlabelled edge is `null`, not `""` — the panel can then tell "no label"
+    /// from "an empty one" without guessing, the same distinction `FrameView.name`
+    /// keeps for unresolved names.
+    #[test]
+    fn an_unlabelled_edge_is_null_rather_than_empty() {
+        let mut g = Graph::new(Direction::LeftRight);
+        g.node("a", "A");
+        g.node("b", "B");
+        g.edge("a", "b");
+
+        assert!(g.to_json().contains(r#"{"from":"a","to":"b","label":null}"#));
+    }
+
+    /// Labels come from guest data — a task name, a capability descriptor — so they
+    /// can contain characters that are not JSON-safe. Escaped, or the panel receives
+    /// something it cannot parse.
+    #[test]
+    fn labels_are_escaped_so_guest_data_cannot_break_the_json() {
+        let mut g = Graph::new(Direction::LeftRight);
+        g.node("a", r#"say "hi"\now"#);
+
+        let json = g.to_json();
+        assert!(json.contains(r#"say \"hi\"#), "quotes escaped: {json}");
+        // Round-trips, which is the property that actually matters.
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["nodes"][0]["label"], r#"say "hi"\now"#);
+    }
+
+    /// Control characters are escaped, or the whole payload is unparseable.
+    ///
+    /// JSON forbids a raw control character inside a string, so one arriving in a
+    /// label — and labels are guest data: a task name read out of a NUL-padded byte
+    /// array, a log line — would not corrupt *that node*, it would make `JSON.parse`
+    /// throw and take the entire panel with it. Mutation testing found this: deleting
+    /// the guard changed nothing any test could see.
+    #[test]
+    fn control_characters_in_guest_data_are_escaped() {
+        let mut g = Graph::new(Direction::LeftRight);
+        g.node("a", "bell\u{7}and\u{1}start");
+
+        let json = g.to_json();
+        assert!(json.contains("\\u0007"), "escaped as a unicode escape: {json}");
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["nodes"][0]["label"], "bell\u{7}and\u{1}start");
+    }
+
+    /// An empty graph is a normal state — a guest that has granted nothing yet — and
+    /// must serialize to something the panel can render as "nothing here".
+    #[test]
+    fn an_empty_graph_serializes_to_empty_collections() {
+        let json = Graph::new(Direction::LeftRight).to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        assert_eq!(parsed["nodes"].as_array().map(Vec::len), Some(0));
+        assert_eq!(parsed["edges"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// The three renderers describe the same graph. If `to_json` ever disagreed with
+    /// `to_mermaid` about what exists, the live panel and the committed diagram would
+    /// quietly diverge — which is the one thing sharing the folds was meant to prevent.
+    #[test]
+    fn the_json_and_mermaid_renderers_agree_about_what_is_in_the_graph() {
+        let mut g = Graph::new(Direction::LeftRight);
+        g.node("one", "One");
+        g.node("two", "Two");
+        g.edge("one", "two");
+
+        let mermaid = g.to_mermaid();
+        let parsed: serde_json::Value = serde_json::from_str(&g.to_json()).expect("valid JSON");
+
+        for node in parsed["nodes"].as_array().expect("nodes") {
+            let label = node["label"].as_str().expect("a label");
+            assert!(mermaid.contains(label), "mermaid is missing {label}: {mermaid}");
+        }
+        assert_eq!(parsed["edges"].as_array().map(Vec::len), Some(1));
+    }
 
     #[test]
     fn emits_a_markdown_table() {
