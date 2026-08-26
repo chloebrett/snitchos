@@ -114,6 +114,37 @@ impl Handle {
         self.machine.push_console_input(text.as_bytes());
     }
 
+    /// The capability derivation tree, as JSON — who granted what to whom.
+    ///
+    /// Folded by `diagram`, the same code that generates `docs/generated/caps.md`, so
+    /// the live panel and the committed diagram cannot disagree about the guest.
+    ///
+    /// # Errors
+    /// Never in practice; the signature matches the other JSON accessors.
+    pub fn cap_tree(&self) -> String {
+        diagram::caps::derivation_tree(&self.decoder.frames()).to_json()
+    }
+
+    /// The span call tree, as JSON.
+    pub fn span_tree(&self) -> String {
+        diagram::trace::span_call_graph(&self.decoder.frames()).to_json()
+    }
+
+    /// Context-switch transitions between tasks, as JSON.
+    pub fn switch_graph(&self) -> String {
+        diagram::switches::transition_graph(&self.decoder.frames()).to_json()
+    }
+
+    /// How many cumulative facts the decoder is holding.
+    ///
+    /// That bucket is unbounded by design — "bounded in practice" is an assumption
+    /// about guest behaviour, and this project has been wrong about guest behaviour
+    /// before. Exposed so the assumption can be watched rather than trusted.
+    #[must_use]
+    pub fn durable_frames(&self) -> usize {
+        self.decoder.durable_len()
+    }
+
     /// The guest's cumulative retired-instruction count — its clock.
     #[must_use]
     pub fn instret(&self) -> u64 {

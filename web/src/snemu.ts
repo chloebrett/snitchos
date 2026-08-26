@@ -6,7 +6,8 @@
  * of this file rather than a change to anything that consumes it.
  */
 
-import type { FrameSource, FrameView, Slice, Status } from "./frames";
+import type { FrameSource, FrameView, Slice, Status, Views } from "./frames";
+import type { Graph } from "./graph";
 import init, { demo_workloads, Handle } from "./pkg/snemu_wasm.js";
 // The wasm is fetched as an asset, not imported as a module: it is several MB, and
 // this keeps it a separate file the browser can instantiate by streaming. See the
@@ -78,6 +79,23 @@ export class SnemuSource implements FrameSource {
   /** Deliver typed characters to the guest's console. */
   pushInput(text: string): void {
     this.#handle.push_input(text);
+  }
+
+  /**
+   * Fold everything seen so far into the structural views.
+   *
+   * Folded on demand rather than incrementally, because these are the same batch
+   * folds that generate the committed diagrams — sharing them is the point, and
+   * re-implementing them incrementally would fork the code this reuses. The cost is
+   * bounded by the retention window, and the caller decides how often to ask.
+   */
+  views(): Views {
+    return {
+      caps: JSON.parse(this.#handle.cap_tree()) as Graph,
+      spans: JSON.parse(this.#handle.span_tree()) as Graph,
+      switches: JSON.parse(this.#handle.switch_graph()) as Graph,
+      durableFrames: this.#handle.durable_frames(),
+    };
   }
 
   advance(budget: number): Slice {

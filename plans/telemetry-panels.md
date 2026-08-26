@@ -55,16 +55,16 @@ need are being thrown away.
 
 ## Acceptance criteria
 
-- [ ] A panel shows the capability derivation tree of the running guest, updating as
+- [x] A panel shows the capability derivation tree of the running guest, updating as
       caps are granted, and naming objects rather than showing bare ids.
-- [ ] A panel shows the span tree, and a span that survives a context switch is
+- [x] A panel shows the span tree, and a span that survives a context switch is
       visibly one span rather than two.
-- [ ] A panel shows context-switch transitions between named tasks.
-- [ ] The panels update live without the tab dropping below the responsiveness bar
+- [x] A panel shows context-switch transitions between named tasks.
+- [x] The panels update live without the tab dropping below the responsiveness bar
       the acceptance suite already enforces.
-- [ ] The folds are the *same code* as the committed diagrams — no second
+- [x] The folds are the *same code* as the committed diagrams — no second
       implementation of any projection.
-- [ ] Switching workload resets the panels, as it already resets the terminal.
+- [x] Switching workload resets the panels, as it already resets the terminal.
 
 ## Steps
 
@@ -236,6 +236,49 @@ workload switch. Responsiveness stays above the existing bar with panels renderi
 **RED**: The specs.
 **GREEN**: Whatever they turn up.
 **Done when**: All acceptance criteria at the top are met; human approves commit.
+
+**Outcome (2026-08-26): steps 3–5 done together. 14 browser tests, 79 unit tests.**
+
+The chain is decoder retention → `diagram` folds behind the shell → `Views` on
+`FrameSource` → `Panels` with tabs for capabilities, spans, switches and the raw
+frame tail. Re-folded four times a second rather than per frame: these are batch
+folds over the whole retention window, and the structures change on the timescale a
+person reads them, not sixty times a second.
+
+Paced CPU *fell* from 40.9% to 32.3% with the panels in — the default view is a small
+tree rather than 400 DOM rows of frame tail.
+
+#### The e2e suite found a race that had been passing on luck
+
+Adding the panels broke two existing tests, and the reason was not the change:
+
+`frame-list` is a bounded 400-row live tail, and this guest emits **thousands of
+`ContextSwitch` frames a second** — one heartbeat's metric dump plus its switches
+fills the entire window. Any assertion naming a *once-only* frame (`kernel.boot`, a
+single `kvetch.complete` span) depends on a poll landing in the fraction of a second
+before eviction. Those assertions were races that had been winning.
+
+Fixed by asserting on what the guest emits *continuously* (`snitchos.`, which still
+proves name resolution through the intern table), and by dropping the frame-tail
+assertion from the drivel test entirely — the terminal is the durable observable and
+the actual claim there. **The suite went from 2.2 minutes to 22.6 seconds**, because
+the flaky assertions were also the slow ones: retrying for two minutes against a
+window that would never contain what they wanted.
+
+Worth keeping as a rule: *do not assert a transient frame in a bounded tail.* Assert
+something continuous, or assert the durable projection.
+
+#### The panel assertions are about truth, not presence
+
+- The cap tree must contain **names** (`init`/`fs`/`stitch`), not `h1 → h2`. A tree of
+  bare holder ids is what a dropped `ThreadRegister` produces — plausible-looking and
+  wrong, which is the whole reason the retention split exists.
+- "No source yet" and "a source that produced nothing" are distinguished, because
+  conflating them shows an empty capability tree during boot that reads as *this guest
+  granted nothing*.
+- The durable count is displayed and asserted to stay bounded on a long run — that
+  bucket has no ceiling by design, and this is the assumption under measurement rather
+  than under trust.
 
 ## Open questions
 

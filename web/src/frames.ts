@@ -9,6 +9,8 @@
  * the emulator, so adding the others is an implementation, not a refactor.
  */
 
+import type { Graph as GraphData } from "./graph";
+
 /** Mirrors `snemu_wasm::telemetry::FrameView`. Its shape is pinned Rust-side. */
 export interface FrameView {
   /** The wire variant, e.g. `"SpanStart"`. */
@@ -73,6 +75,32 @@ export interface FrameSource {
    * when this is absent rather than pretending input went somewhere.
    */
   pushInput?(text: string): void;
+
+  /**
+   * The structural views folded from everything this source has seen.
+   *
+   * Optional for the same reason `pushInput` is: a source that only relays text has
+   * no frames to fold. A panel with no source to ask says so rather than rendering an
+   * empty graph, which would read as "the guest granted nothing".
+   */
+  views?(): Views;
+}
+
+/** The folded views a panel renders. */
+export interface Views {
+  /** Who granted which capability to whom. */
+  caps: GraphData;
+  /** Which span opened inside which. */
+  spans: GraphData;
+  /** Context-switch transitions between tasks. */
+  switches: GraphData;
+  /**
+   * How many cumulative facts the source is holding.
+   *
+   * That bucket has no ceiling by design, so it is surfaced rather than trusted —
+   * "bounded in practice" is an assumption about guest behaviour.
+   */
+  durableFrames: number;
 }
 
 /** Whether a status means there is any point scheduling another slice. */

@@ -98,18 +98,56 @@ impl FrameView {
 /// Owns the two pieces of state a drain-based consumer cannot do without: the
 /// incomplete tail of the last push, and the intern table built from every
 /// `StringRegister` seen so far.
-#[derive(Debug, Default)]
+/// How many *stream* frames a live tab keeps for folding.
+///
+/// A comfort knob, not a correctness one — the frames whose loss would make a view
+/// untrue are held durably regardless (see [`crate::store`]). This bounds the span
+/// and switch views to a recent window, which is what you want to look at anyway, and
+/// bounds the cost of re-folding, which is paid per render.
+pub const FRAME_WINDOW: usize = 4_000;
+
+#[derive(Debug)]
 pub struct Decoder {
     /// Bytes received but not yet forming a whole frame. Bounded by one frame:
     /// everything complete is consumed and dropped on each push.
     pending: Vec<u8>,
     strings: HashMap<StringId, String>,
+    /// Decoded frames, kept for the folds that build the panels.
+    store: crate::store::FrameStore,
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Decoder {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            pending: Vec::new(),
+            strings: HashMap::new(),
+            store: crate::store::FrameStore::new(FRAME_WINDOW),
+        }
+    }
+
+    /// The frames retained so far, in arrival order, ready to fold.
+    ///
+    /// Whole `OwnedFrame`s rather than [`FrameView`]s: the projection is deliberately
+    /// lossy — kind, name, timestamp, value — and a derivation tree needs `cap_id`,
+    /// `parent_cap_id`, `holder` and `rights`. The two views of a frame serve
+    /// different consumers and neither subsumes the other.
+    #[must_use]
+    pub fn frames(&self) -> Vec<OwnedFrame> {
+        self.store.frames()
+    }
+
+    /// How many cumulative facts are being held — unbounded by design, so worth
+    /// being able to watch.
+    #[must_use]
+    pub fn durable_len(&self) -> usize {
+        self.store.durable_len()
     }
 
     /// How many bytes are held awaiting completion. Diagnostic — it exists so a test
@@ -149,6 +187,9 @@ impl Decoder {
                     }
                     let strings = &self.strings;
                     views.push(FrameView::of(&frame, &|id| strings.get(&id).cloned()));
+                    // Retained *after* projecting, so the borrow of `strings` above
+                    // is done with before the frame moves into the store.
+                    self.store.push(frame);
                 }
                 // No terminator yet — the rest is an incomplete frame.
                 Ok(None) => break,
@@ -310,6 +351,43 @@ mod tests {
 
         d.push(&bytes[..3]);
         assert_eq!(d.held(), 3, "and an incomplete frame holds exactly its bytes");
+    }
+
+    /// Decoded frames are kept for the folds, not only projected and dropped.
+    ///
+    /// The panels reconstruct their views from a *slice* of frames, so a decoder that
+    /// projected and discarded would leave them nothing to work with.
+    #[test]
+    fn decoded_frames_are_retained_for_folding() {
+        let mut d = Decoder::new();
+        d.push(&wire(&[register(1, "kernel.boot"), span_start(7, 1)]));
+
+        assert_eq!(d.frames().len(), 2, "both frames kept");
+    }
+
+    /// Retention spans pushes, like the intern table — a registration and the frame
+    /// that needs it routinely arrive in different animation frames.
+    #[test]
+    fn retention_spans_pushes() {
+        let mut d = Decoder::new();
+        d.push(&wire(&[register(1, "a")]));
+        d.push(&wire(&[span_start(1, 1)]));
+
+        assert_eq!(d.frames().len(), 2);
+    }
+
+    /// A corrupt chunk is skipped rather than retained: a frame that failed to decode
+    /// is not a frame, and folding it is not possible.
+    #[test]
+    fn a_chunk_that_failed_to_decode_is_not_retained() {
+        let mut bytes = wire(&[register(1, "before")]);
+        bytes.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0x00]);
+        bytes.extend_from_slice(&wire(&[register(2, "after")]));
+
+        let mut d = Decoder::new();
+        d.push(&bytes);
+
+        assert_eq!(d.frames().len(), 2, "the two real frames, not the garbage");
     }
 
     /// A metric carries a value the page wants to show, and its name interns like

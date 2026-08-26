@@ -135,9 +135,11 @@ graph LR
     protocol --> snitchos_abi
     ramfs --> fs_core
     snemu --> protocol
+    snemu_wasm --> diagram
     snemu_wasm --> protocol
     snemu_wasm --> snemu
     snemu_wasm --> kernel_boot
+    snemu_wasm --> snitchos_abi
     snitchos_abi --> hitch_pod
     snitchos_std --> snitchos_user
     snitchos_user --> hitch

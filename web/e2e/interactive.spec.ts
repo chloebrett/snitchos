@@ -116,15 +116,16 @@ test("answers Tab with a completion from the trained model", async ({ page }) =>
   await page.keyboard.type("let x =");
   await page.keyboard.press("Tab");
 
-  // The model working is observable while you wait — which is the point of showing
-  // it in this project rather than apologising for the delay.
-  await expect(page.getByTestId("frame-list")).toContainText("kvetch.complete", {
-    timeout: BOOT_TIMEOUT,
-  });
-
-  // And the suggestion has to reach the *terminal*, not merely the wire: the client
+  // The suggestion has to reach the *terminal*, not merely the wire: the client
   // re-validates it and falls back to a grammar menu if it refuses, which looks
   // identical from the frame stream.
+  //
+  // Deliberately *not* also asserting a `kvetch.complete` span in the frame tail.
+  // That tail is a bounded live window, and this guest emits thousands of
+  // `ContextSwitch` frames per second — a single transient span is evicted within a
+  // fraction of a second, so catching it depends on a poll landing in the right
+  // window. It had been passing on luck. The terminal is the durable observable and
+  // the actual claim.
   await expect(page.getByTestId("console")).toContainText(/stitch> let x =\s*\S/, {
     timeout: BOOT_TIMEOUT,
   });

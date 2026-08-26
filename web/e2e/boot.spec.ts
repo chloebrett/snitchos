@@ -28,11 +28,20 @@ test("boots the kernel and reaches its heartbeat", async ({ page }) => {
 
 test("decodes telemetry and resolves interned names", async ({ page }) => {
   await page.goto("/");
+  // The raw frame tail lives behind a tab now that the structural panels are the
+  // default view.
+  await page.getByTestId("tab-frames").click();
 
-  // `kernel.boot` is the first interned string on the wire. Seeing it as text rather
-  // than a numeric StringId proves the whole chain: virtio drain → COBS/postcard
-  // decode → intern table → projection → render.
-  await expect(page.getByTestId("frame-list")).toContainText("kernel.boot", {
+  // A resolved *name* rather than a numeric StringId is the claim: it proves the
+  // whole chain — virtio drain → COBS/postcard decode → intern table → projection →
+  // render.
+  //
+  // Asserted against a name the guest re-emits every heartbeat, not against a
+  // boot-time one. The tail is a bounded live window and the guest emits thousands of
+  // `ContextSwitch` frames a second, so one heartbeat's worth of traffic evicts
+  // everything older — a specific once-only frame cannot be observed reliably, and an
+  // assertion on one is a race that happens to have been winning.
+  await expect(page.getByTestId("frame-list")).toContainText("snitchos.", {
     timeout: BOOT_TIMEOUT,
   });
 });

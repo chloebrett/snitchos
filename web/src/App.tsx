@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Console, type ConsoleHandle } from "./Console";
-import { describe, type FrameView, type Status } from "./frames";
+import { describe, type FrameView, type Status, type Views } from "./frames";
 import { encodeInput } from "./input";
+import { Panels } from "./Panels";
 import { Pacer, type Speed } from "./pace";
 import { progressLabel } from "./progress";
 import { appendCapped, mips, Pump } from "./pump";
@@ -12,7 +13,15 @@ import {
   type Workload,
   workloads,
 } from "./snemu";
-import { TelemetryPane } from "./TelemetryPane";
+
+/**
+ * How often to re-fold the structural views, in milliseconds.
+ *
+ * Four times a second: fast enough that a capability grant appears while you are
+ * still looking for it, slow enough that folding a full retention window is not
+ * competing with the guest for the frame budget.
+ */
+const FOLD_INTERVAL_MS = 250;
 
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -23,6 +32,7 @@ export function App() {
   const [kernelBytes, setKernelBytes] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
+  const [views, setViews] = useState<Views | null>(null);
   const [speed, setSpeed] = useState<Speed>("paced");
   const [choices, setChoices] = useState<Workload[]>([]);
   const [workload, setWorkload] = useState("");
@@ -83,6 +93,12 @@ export function App() {
         // Still bounded per frame, for the other reason `step_budget` takes a
         // budget: a `while` loop to completion would freeze the tab for a whole
         // boot.
+        // Re-fold on a cadence, not per frame. These are batch folds over the whole
+        // retention window, and the structures they produce change on the timescale a
+        // person reads them — a capability is granted, a task yields — not sixty times
+        // a second. Folding per frame would spend the emulator's budget on redrawing
+        // an unchanged tree.
+        let nextFold = 0;
         const step = (now: number) => {
           const slice = pump.tick(
             pacer.budgetFor(speedRef.current, now - last, pump.instret),
@@ -94,6 +110,11 @@ export function App() {
             setStatus(slice.status);
             setInstret(slice.instret);
             setRate(mips(slice.instret, now - started));
+          }
+
+          if (now >= nextFold) {
+            nextFold = now + FOLD_INTERVAL_MS;
+            setViews(booted.views());
           }
           // Keep scheduling even once done, so a future source (or a restart) has a
           // running clock to attach to; `tick` is a no-op past the terminal state.
@@ -125,6 +146,7 @@ export function App() {
       if (next === current) return current; // selecting what is already running
       term.current?.clear();
       setFrames([]);
+      setViews(null);
       setInstret(0);
       setRate(0);
       setStatus(null);
@@ -193,7 +215,7 @@ export function App() {
 
       <main className="flex min-h-0 flex-1 gap-3">
         <Console onReady={onConsoleReady} onInput={onInput} />
-        <TelemetryPane frames={frames} />
+        <Panels views={views} frames={frames} />
       </main>
 
       <footer data-testid="build" className="shrink-0 text-[0.7rem] text-neutral-600">

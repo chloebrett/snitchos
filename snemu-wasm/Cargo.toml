@@ -21,6 +21,12 @@ protocol = { path = "../protocol", features = ["std"] }
 # that shell.
 wasm-bindgen = "0.2"
 
+# The telemetry folds behind the panels — the *same* code that generates the
+# committed `docs/generated/*.md`, so a live panel and its diagram cannot drift.
+# Compiles to wasm32 unmodified: its only deps are `protocol`, `serde_json` and
+# `snitchos-abi`.
+diagram = { path = "../diagram" }
+
 # The page's data shapes. `Status` and `FrameView` cross into JS as JSON, because a
 # `#[wasm_bindgen]` method cannot return an enum with payloads and hand-rolling that
 # conversion is precisely the logic the shell must not carry. Deriving `Serialize`
@@ -47,10 +53,7 @@ kernel-boot = { path = "../kernel-boot" }
 # frames. Dev-only: the shim never constructs a frame in production, it decodes them.
 snitchos-abi = { path = "../abi" }
 
-# The folds the browser panels use. A dev-dependency here because the *store*'s
-# contract is "a fold over my contents is still true", and the only honest way to
-# assert that is to run a real fold over them.
-diagram = { path = "../diagram" }
+
 
 [lints]
 workspace = true
