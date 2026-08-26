@@ -24,6 +24,16 @@ use crate::cursor::Cursor;
 use crate::telemetry::Decoder;
 use snemu::machine::Machine;
 
+/// The workloads the page offers, as JSON.
+///
+/// Handed across rather than retyped in TypeScript so there is one list, and it is
+/// the one a Rust test checks against the kernel's own `workload=` parser.
+#[wasm_bindgen]
+#[must_use]
+pub fn demo_workloads() -> String {
+    crate::boot::demo_workloads_json()
+}
+
 /// A booted guest, plus the three pieces of drain state a page needs to keep
 /// between animation frames.
 #[wasm_bindgen]

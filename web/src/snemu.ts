@@ -7,7 +7,7 @@
  */
 
 import type { FrameSource, FrameView, Slice, Status } from "./frames";
-import init, { Handle } from "./pkg/snemu_wasm.js";
+import init, { demo_workloads, Handle } from "./pkg/snemu_wasm.js";
 // The wasm is fetched as an asset, not imported as a module: it is several MB, and
 // this keeps it a separate file the browser can instantiate by streaming. See the
 // `assetsInlineLimit` note in `vite.config.ts`.
@@ -18,6 +18,26 @@ export interface BuildManifest {
   kernel_bytes: number;
   kernel_fingerprint: string;
   git_rev: string;
+}
+
+/** One entry in the workload picker. */
+export interface Workload {
+  /** The `workload=` bootarg value; empty means the kernel's default. */
+  name: string;
+  /** What the picker shows. */
+  label: string;
+}
+
+/**
+ * The workloads the page offers.
+ *
+ * Curated on the Rust side, where a test checks every name against the kernel's own
+ * parser — a name that drifted would otherwise boot the default silently, and the
+ * page would appear to ignore the selection.
+ */
+export async function workloads(): Promise<Workload[]> {
+  await load();
+  return JSON.parse(demo_workloads()) as Workload[];
 }
 
 /** QEMU `virt`'s default RAM. The guest's DTB describes this much, so it must agree. */
@@ -53,6 +73,11 @@ export class SnemuSource implements FrameSource {
 
   /** Fast-forwards seen at the end of the previous slice. */
   #fastForwards = 0;
+
+  /** Deliver typed characters to the guest's console. */
+  pushInput(text: string): void {
+    this.#handle.push_input(text);
+  }
 
   advance(budget: number): Slice {
     const status = JSON.parse(this.#handle.step_budget(BigInt(budget))) as Status;

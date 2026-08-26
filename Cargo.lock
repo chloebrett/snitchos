@@ -1784,6 +1784,7 @@ name = "snemu-wasm"
 version = "0.0.1"
 dependencies = [
  "fdt",
+ "kernel-boot",
  "protocol",
  "serde",
  "serde_json",

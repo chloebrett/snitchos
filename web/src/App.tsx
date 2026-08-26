@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Console } from "./Console";
+import { Console, type ConsoleHandle } from "./Console";
 import { describe, type FrameView, type Status } from "./frames";
+import { encodeInput } from "./input";
 import { Pacer, type Speed } from "./pace";
 import { appendCapped, mips, Pump } from "./pump";
-import { type BuildManifest, fetchKernel, SnemuSource } from "./snemu";
+import {
+  type BuildManifest,
+  fetchKernel,
+  SnemuSource,
+  type Workload,
+  workloads,
+} from "./snemu";
 import { TelemetryPane } from "./TelemetryPane";
 
 export function App() {
@@ -15,15 +22,30 @@ export function App() {
   const [kernelBytes, setKernelBytes] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [speed, setSpeed] = useState<Speed>("paced");
+  const [choices, setChoices] = useState<Workload[]>([]);
+  const [workload, setWorkload] = useState("");
 
   // Read inside the animation-frame callback, which is created once — a ref keeps it
   // seeing the current choice without tearing down and restarting the guest.
   const speedRef = useRef<Speed>(speed);
   speedRef.current = speed;
 
-  const write = useRef<(text: string) => void>(() => {});
-  const onConsoleReady = useCallback((w: (text: string) => void) => {
-    write.current = w;
+  const term = useRef<ConsoleHandle | null>(null);
+  const onConsoleReady = useCallback((h: ConsoleHandle) => {
+    term.current = h;
+  }, []);
+
+  // Typed characters go straight to the guest, translated for its console. Held in a
+  // ref so the guest can be swapped underneath without re-creating the terminal.
+  const source = useRef<SnemuSource | null>(null);
+  const onInput = useCallback((data: string) => {
+    source.current?.pushInput(encodeInput(data));
+  }, []);
+
+  useEffect(() => {
+    workloads()
+      .then(setChoices)
+      .catch(() => setChoices([]));
   }, []);
 
   useEffect(() => {
@@ -37,8 +59,10 @@ export function App() {
         setManifest(manifest);
         setKernelBytes(elf.length);
 
-        const pump = new Pump(await SnemuSource.boot(elf));
+        const booted = await SnemuSource.boot(elf, workload);
         if (cancelled) return;
+        source.current = booted;
+        const pump = new Pump(booted);
         const pacer = new Pacer();
         const started = performance.now();
         let last = started;
@@ -59,7 +83,7 @@ export function App() {
           );
           last = now;
           if (slice) {
-            if (slice.text) write.current(slice.text);
+            if (slice.text) term.current?.write(slice.text);
             setFrames((prev) => appendCapped(prev, slice.frames));
             setStatus(slice.status);
             setInstret(slice.instret);
@@ -79,6 +103,27 @@ export function App() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
+    // Re-runs on a workload change: the old guest's loop is cancelled and a fresh
+    // machine boots. Everything derived from the old one is reset below.
+  }, [workload]);
+
+  /**
+   * Switch workload, discarding the previous guest's output.
+   *
+   * The terminal and the telemetry tail both have to be cleared, and neither is React
+   * state — the terminal owns its own scrollback. Leaving either would show the new
+   * boot appended to the old one, which reads as a machine that rebooted itself.
+   */
+  const chooseWorkload = useCallback((next: string) => {
+    setWorkload((current) => {
+      if (next === current) return current; // selecting what is already running
+      term.current?.clear();
+      setFrames([]);
+      setInstret(0);
+      setRate(0);
+      setStatus(null);
+      return next;
+    });
   }, []);
 
   const statusText = error ?? (status ? describe(status) : "loading…");
@@ -105,7 +150,19 @@ export function App() {
         <span data-testid="status" className={`text-xs ${statusTone}`}>
           {statusText}
         </span>
-        <label className="ml-auto flex items-center gap-1.5 text-neutral-500 text-xs">
+        <select
+          data-testid="workload"
+          value={workload}
+          onChange={(e) => chooseWorkload(e.target.value)}
+          className="ml-auto rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-300 text-xs"
+        >
+          {choices.map((w) => (
+            <option key={w.name} value={w.name}>
+              {w.label}
+            </option>
+          ))}
+        </select>
+        <label className="flex items-center gap-1.5 text-neutral-500 text-xs">
           <input
             type="checkbox"
             data-testid="turbo"
@@ -129,7 +186,7 @@ export function App() {
       </header>
 
       <main className="flex min-h-0 flex-1 gap-3">
-        <Console onReady={onConsoleReady} />
+        <Console onReady={onConsoleReady} onInput={onInput} />
         <TelemetryPane frames={frames} />
       </main>
 

@@ -14,12 +14,25 @@ import { useEffect, useRef } from "react";
  * side hands over a container once and then only pushes bytes at it — re-rendering a
  * terminal through React would fight it for control of the same nodes.
  */
-export function Console({
-  onReady,
-}: {
-  onReady: (write: (text: string) => void) => void;
-}) {
+/** What the page can do to the terminal once it exists. */
+export interface ConsoleHandle {
+  write(text: string): void;
+  clear(): void;
+}
+
+interface Props {
+  onReady: (handle: ConsoleHandle) => void;
+  /** Called with each chunk the user types, already encoded for the guest. */
+  onInput: (text: string) => void;
+}
+
+export function Console({ onReady, onInput }: Props) {
   const host = useRef<HTMLDivElement>(null);
+
+  // Read through a ref so the terminal is built once: re-creating it on every render
+  // would throw away scrollback, and re-attaching handlers would double them up.
+  const onInputRef = useRef(onInput);
+  onInputRef.current = onInput;
 
   useEffect(() => {
     const el = host.current;
@@ -32,7 +45,6 @@ export function Console({
       scrollback: 10_000,
       // The kernel emits bare `\n`; without this every line stair-steps rightward.
       convertEol: true,
-      disableStdin: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -42,9 +54,18 @@ export function Console({
     const observer = new ResizeObserver(() => fit.fit());
     observer.observe(el);
 
-    onReady((text) => term.write(text));
+    // Everything typed goes to the guest, and *only* to the guest: no local echo,
+    // because the REPL echoes what it receives. Echoing here too would double every
+    // character, and would show characters the guest never got.
+    const typed = term.onData((data) => onInputRef.current(data));
+
+    onReady({
+      write: (text) => term.write(text),
+      clear: () => term.clear(),
+    });
 
     return () => {
+      typed.dispose();
       observer.disconnect();
       term.dispose();
     };

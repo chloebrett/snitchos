@@ -66,13 +66,13 @@ Two mitigations, cheapest first:
 
 ## Acceptance criteria
 
-- [ ] A `<select>` on the page offers the runtime workloads and reboots the guest
+- [x] A `<select>` on the page offers the runtime workloads and reboots the guest
       into the chosen one, with no rebuild.
-- [ ] Typing in the terminal reaches the guest: the Stitch REPL echoes and evaluates.
-- [ ] Tab at the REPL prompt returns a completion from the trained model.
+- [x] Typing in the terminal reaches the guest: the Stitch REPL echoes and evaluates.
+- [x] Tab at the REPL prompt returns a completion from the trained model.
 - [ ] Switching workload mid-run cannot wedge or panic the page.
 - [ ] The interactive path is usable — a keystroke is visible in well under a second.
-- [ ] `cargo xtask web` stages the drivel-capable kernel, and the page still reports
+- [x] `cargo xtask web` stages the drivel-capable kernel, and the page still reports
       its fingerprint.
 
 ## Steps
@@ -283,6 +283,27 @@ wiring itself is glue and belongs to step 5.
 **MUTATE**: `yarn test` plus a review of the pure modules.
 **Done when**: Criteria met, human approves commit.
 
+**Outcome (2026-08-26): done**, and the open question about the workload list is
+settled with it.
+
+*The list is a curation, validated against the registry rather than duplicating it.*
+`boot::DEMO_WORKLOADS` picks five of the thirty-odd worth showing a visitor, and a
+**test feeds every name through `kernel_boot::bootargs::select`** — the guest's own
+parser. That is what makes a curation safe where a copy would not be: a drifted name
+cannot be caught by the type system, and its failure is silent (an unknown workload
+boots the default, so the page appears to ignore the selection). The list crosses to
+JS as JSON from the Rust side, so there is one of it.
+
+*The line-ending translation was the trap worth finding early.* xterm reports Enter as
+a **carriage return**; SnitchOS's console wants a **newline** — every itest that
+drives the REPL sends `b"...\n"`. Untranslated, Enter does nothing and the REPL looks
+broken while being perfectly healthy. `input.ts` is that one decision, with tests, and
+everything else (Tab, Ctrl-C, escape sequences) passes through untouched: the guest
+has its own opinions about those and is entitled to them.
+
+Also: no local echo in the terminal. The REPL echoes what it receives, so echoing
+again would double every character *and* show characters the guest never got.
+
 ### Step 5: The demo, end to end
 
 **Acceptance criteria**: A Playwright spec picks `stitch-drivel`, waits for the
@@ -292,15 +313,32 @@ This is the milestone's headline claim and the only place it is checkable.
 **GREEN**: Whatever it turns up.
 **Done when**: All acceptance criteria at the top are met; human approves commit.
 
+**Outcome (2026-08-26): done. The milestone's headline claim holds.**
+
+`e2e/interactive.spec.ts`, four tests, all passing:
+
+- the picker offers the curated workloads, default first;
+- `stitch-repl` boots to a `stitch>` prompt;
+- typing `1.5 + 1.75` and pressing Enter evaluates to `3.25` — through the real
+  keyboard path: xterm `onData` → CR→LF → `push_input` → the guest's UART;
+- `stitch-drivel` in turbo answers **Tab** with a completion from the trained model,
+  asserted both on the wire (a `kvetch.complete` span) *and* on the terminal line —
+  because the client re-validates a suggestion and falls back to a grammar menu if it
+  refuses, which looks identical from the frame stream alone.
+
+Whole browser suite: **8 passed in 21.9s.**
+
 ## Open questions
 
 - **Does the 6.5 MB fetch want a progress indicator?** A blank page for several
   seconds on a cold cache is a bad first impression, and the page currently says
   nothing until the kernel has loaded.
-- **Should the selector list come from the guest?** Hardcoding workload names in the
-  page duplicates `kernel_boot::bootargs`'s registry, which is exactly the
-  duplicated-mapping shape `workload_features` was extracted to kill. Probably fine
-  for a handful of demo entries, but decide it rather than drift into it.
+- ~~**Should the selector list come from the guest?**~~ **Settled (step 4):** the page
+  offers a *curation* held in `boot::DEMO_WORKLOADS`, crossing to JS as JSON so there
+  is one copy, with a test validating every name through
+  `kernel_boot::bootargs::select`. A curation is not the duplicated-mapping shape —
+  it answers "which few to show", not "which are valid" — and the test closes the one
+  way it could still go wrong.
 
 ## Pre-PR quality gate
 

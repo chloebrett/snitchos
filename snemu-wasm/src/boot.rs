@@ -13,6 +13,41 @@
 //! the guest's business: it falls back to its default, which is the same thing that
 //! happens on real hardware.
 
+/// The workloads the page offers, as `(bootarg name, human label)`.
+///
+/// A **curation, not a registry.** `kernel_boot::bootargs` owns what is *valid*; this
+/// picks a handful worth showing a visitor out of the thirty-odd that exist, in the
+/// order they tell the best story: a shell you can type at, then the same shell with
+/// completion, then the same again answered by a trained model, then the machine
+/// showing off its scheduler.
+///
+/// The distinction matters because it decides what can go wrong. A curated list
+/// cannot make an invalid name valid — an unknown one just boots the default — but it
+/// *can* silently offer something the kernel no longer knows, and the page would show
+/// a workload that quietly does nothing. That is what the test below prevents: every
+/// name here is fed through the kernel's own parser.
+pub const DEMO_WORKLOADS: &[(&str, &str)] = &[
+    ("", "init (default)"),
+    ("stitch-repl", "Stitch REPL"),
+    ("stitch-kvetch", "Stitch REPL + completion (babble)"),
+    ("stitch-drivel", "Stitch REPL + completion (trained model, slow)"),
+    ("smp", "SMP producer/consumer"),
+];
+
+/// The curated list as JSON, for the page's `<select>`.
+///
+/// One source of truth: the list is validated against the kernel's parser on the Rust
+/// side and handed across, rather than retyped in TypeScript where nothing could
+/// check it.
+#[must_use]
+pub fn demo_workloads_json() -> String {
+    let entries: Vec<String> = DEMO_WORKLOADS
+        .iter()
+        .map(|(name, label)| format!(r#"{{"name":"{name}","label":"{label}"}}"#))
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
 /// A workload selection from the string the JS boundary carries.
 ///
 /// Empty means "the kernel's default", because `Option<&str>` does not cross
@@ -57,6 +92,45 @@ pub fn dtb_for(base: &[u8], workload: Option<&str>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{bootargs_for, dtb_for, selection};
+
+    /// **Every workload the page offers is one the kernel actually knows.**
+    ///
+    /// The curated list is the one place a browser-side name could drift from the
+    /// guest's registry, and the failure would be quiet: selecting it boots the
+    /// default, so the page appears to work and simply ignores you. Checked through
+    /// `kernel_boot::bootargs::select` — the guest's own parser, not a copy of it.
+    #[test]
+    fn every_offered_workload_is_one_the_kernel_recognises() {
+        for (name, label) in super::DEMO_WORKLOADS {
+            if name.is_empty() {
+                continue; // the default entry, which deliberately sends no bootarg
+            }
+            let args = super::bootargs_for(Some(name)).expect("a name yields bootargs");
+            assert!(
+                kernel_boot::bootargs::select(&args).is_some(),
+                "the page offers {label:?} as `workload={name}`, which the kernel does \
+                 not recognise — it would silently boot the default instead"
+            );
+        }
+    }
+
+    /// The default entry has to be present and has to be the one that sends nothing;
+    /// without it a visitor cannot get back to a plain boot.
+    #[test]
+    fn the_list_offers_a_way_back_to_the_default_boot() {
+        let (name, _) = super::DEMO_WORKLOADS.first().expect("a non-empty list");
+        assert!(name.is_empty(), "the first entry should be the default boot");
+    }
+
+    /// The JSON shape is a contract with the page, which has no compiler to notice a
+    /// renamed key.
+    #[test]
+    fn the_workload_json_is_what_the_page_reads() {
+        let json = super::demo_workloads_json();
+        assert!(json.starts_with(r#"[{"name":"","label":"init (default)"}"#), "{json}");
+        assert!(json.contains(r#"{"name":"stitch-drivel","#), "{json}");
+        assert!(json.ends_with("]"));
+    }
 
     /// The page says "default" by sending nothing.
     #[test]

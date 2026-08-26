@@ -65,6 +65,14 @@ export interface FrameSource {
   advance(budget: number): Slice;
   /** A short description of where these frames come from, for the UI. */
   readonly label: string;
+  /**
+   * Deliver typed characters to the source, if it accepts any.
+   *
+   * Optional because not every source is interactive: a replay has nothing to type
+   * at, and a read-only socket may not either. The page hides its keyboard wiring
+   * when this is absent rather than pretending input went somewhere.
+   */
+  pushInput?(text: string): void;
 }
 
 /** Whether a status means there is any point scheduling another slice. */

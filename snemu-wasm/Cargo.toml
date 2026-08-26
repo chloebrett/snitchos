@@ -38,6 +38,11 @@ wasm-bindgen-test = "0.3"
 # tree parse it back through the guest's own reader rather than trusting our writer.
 fdt = "0.1.5"
 
+# The kernel's own `workload=` parser. A dev-dependency so the curated workload list
+# is checked against what the guest actually accepts, without the browser shim
+# depending on a kernel crate at runtime.
+kernel-boot = { path = "../kernel-boot" }
+
 [lints]
 workspace = true
 
