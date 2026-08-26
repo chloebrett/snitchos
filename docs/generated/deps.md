@@ -137,6 +137,7 @@ graph LR
     snemu --> protocol
     snemu_wasm --> protocol
     snemu_wasm --> snemu
+    snemu_wasm --> kernel_boot
     snitchos_abi --> hitch_pod
     snitchos_std --> snitchos_user
     snitchos_user --> hitch

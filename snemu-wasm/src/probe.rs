@@ -198,7 +198,7 @@ pub const EXPECTED_STATE_HASH: u64 = 980_759_326_325_069_301;
 /// - `[0]` a `u64` hashed directly — no `usize` anywhere.
 /// - `[1]` a byte slice hashed via [`Hash`] — `<[u8]>::hash` length-prefixes with a
 ///   **`usize`**, which is 8 bytes on the host and 4 in the browser.
-/// - `[2]` the same bytes via [`Hasher::write`] — raw, no length prefix.
+/// - `[2]` the same bytes via [`Hasher::write`](std::hash::Hasher::write) — raw, no length prefix.
 ///
 /// If `[0]` and `[2]` agree across targets while `[1]` does not, the divergence is
 /// the `usize` length prefix and nothing to do with `SipHash` or with snemu's

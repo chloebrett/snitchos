@@ -3,6 +3,7 @@ import { Console, type ConsoleHandle } from "./Console";
 import { describe, type FrameView, type Status } from "./frames";
 import { encodeInput } from "./input";
 import { Pacer, type Speed } from "./pace";
+import { progressLabel } from "./progress";
 import { appendCapped, mips, Pump } from "./pump";
 import {
   type BuildManifest,
@@ -21,6 +22,7 @@ export function App() {
   const [manifest, setManifest] = useState<BuildManifest | null>(null);
   const [kernelBytes, setKernelBytes] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState<string | null>(null);
   const [speed, setSpeed] = useState<Speed>("paced");
   const [choices, setChoices] = useState<Workload[]>([]);
   const [workload, setWorkload] = useState("");
@@ -54,8 +56,12 @@ export function App() {
 
     (async () => {
       try {
-        const { elf, manifest } = await fetchKernel();
+        setLoading(progressLabel(0, null));
+        const { elf, manifest } = await fetchKernel((received, total) => {
+          if (!cancelled) setLoading(progressLabel(received, total));
+        });
         if (cancelled) return;
+        setLoading(null);
         setManifest(manifest);
         setKernelBytes(elf.length);
 
@@ -126,7 +132,7 @@ export function App() {
     });
   }, []);
 
-  const statusText = error ?? (status ? describe(status) : "loading…");
+  const statusText = error ?? loading ?? (status ? describe(status) : "starting…");
   const statusTone = error
     ? "text-rose-400"
     : status && "Trapped" in status

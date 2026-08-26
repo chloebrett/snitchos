@@ -12,6 +12,7 @@ import init, { demo_workloads, Handle } from "./pkg/snemu_wasm.js";
 // this keeps it a separate file the browser can instantiate by streaming. See the
 // `assetsInlineLimit` note in `vite.config.ts`.
 import wasmUrl from "./pkg/snemu_wasm_bg.wasm?url";
+import { readWithProgress } from "./progress";
 
 /** What `cargo xtask web` records about the kernel it staged. */
 export interface BuildManifest {
@@ -104,20 +105,26 @@ export class SnemuSource implements FrameSource {
  * *kernel* is fatal, and says how to fix it — that error is the one someone will hit
  * on a fresh clone.
  */
-export async function fetchKernel(): Promise<{
+export async function fetchKernel(
+  onProgress: (received: number, total: number | null) => void = () => {},
+): Promise<{
   elf: Uint8Array;
   manifest: BuildManifest | null;
 }> {
-  const [manifest, elf] = await Promise.all([
+  const [manifest, response] = await Promise.all([
     fetch("build.json")
       .then((r) => (r.ok ? (r.json() as Promise<BuildManifest>) : null))
       .catch(() => null),
-    fetch("kernel.elf").then((r) => {
-      if (!r.ok) {
-        throw new Error(`kernel.elf: ${r.status} — run \`cargo xtask web\` to stage it`);
-      }
-      return r.arrayBuffer();
-    }),
+    fetch("kernel.elf"),
   ]);
-  return { elf: new Uint8Array(elf), manifest };
+
+  if (!response.ok) {
+    throw new Error(
+      `kernel.elf: ${response.status} — run \`cargo xtask web\` to stage it`,
+    );
+  }
+
+  // Streamed rather than awaited whole: the kernel is several megabytes, and on a
+  // cold cache the page would otherwise say nothing at all until it landed.
+  return { elf: await readWithProgress(response, onProgress), manifest };
 }

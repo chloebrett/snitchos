@@ -12,7 +12,7 @@
 //! `#[wasm_bindgen]` method. If a test would be *meaningful* against something in
 //! this file, that thing is in the wrong file.
 //!
-//! The two data types cross as JSON ([`Status`], [`FrameView`]), whose shapes are
+//! The two data types cross as JSON ([`Status`](crate::budget::Status), [`FrameView`](crate::telemetry::FrameView)), whose shapes are
 //! pinned by tests in their own modules — a `#[wasm_bindgen]` method cannot return
 //! an enum with payloads, and open-coding that conversion here is exactly the logic
 //! this file must not carry.
