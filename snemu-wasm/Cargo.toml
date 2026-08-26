@@ -43,6 +43,15 @@ fdt = "0.1.5"
 # depending on a kernel crate at runtime.
 kernel-boot = { path = "../kernel-boot" }
 
+# `CAP_NAME_LEN` — the fixed width of a CapEvent's name array, for building test
+# frames. Dev-only: the shim never constructs a frame in production, it decodes them.
+snitchos-abi = { path = "../abi" }
+
+# The folds the browser panels use. A dev-dependency here because the *store*'s
+# contract is "a fold over my contents is still true", and the only honest way to
+# assert that is to run a real fold over them.
+diagram = { path = "../diagram" }
+
 [lints]
 workspace = true
 

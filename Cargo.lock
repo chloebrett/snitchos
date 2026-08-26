@@ -1783,12 +1783,14 @@ dependencies = [
 name = "snemu-wasm"
 version = "0.0.1"
 dependencies = [
+ "diagram",
  "fdt",
  "kernel-boot",
  "protocol",
  "serde",
  "serde_json",
  "snemu",
+ "snitchos-abi",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

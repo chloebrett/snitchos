@@ -132,10 +132,20 @@ what you actually want to look at.
 | durable | `StringRegister`, `ThreadRegister`, `HartRegister`, `MetricRegister`, `BuildInfo`, `Hello` | registrations; a name that stops resolving makes every later view unreadable | none — they are emitted once each |
 | durable | `CapEvent` where kind is `Granted` / `Transferred` / `Revoked` | the derivation tree is cumulative state, and a dropped revocation inverts its meaning | none — bounded in practice by how many caps exist |
 | windowed | `SpanStart`, `SpanEnd`, `Event`, `ContextSwitch`, `Message`, `Notify*`, `Log`, `Metric` | a stream; the span tree and switch timeline are *about* the recent past | ring, oldest-first |
-| windowed | `CapEvent` where kind is `Invoked` / `Denied` | audit events, not lifecycle: unbounded volume, no structural meaning | ring |
+| ~~windowed~~ | ~~`CapEvent` kind `Invoked` / `Denied`~~ | **those variants do not exist** — see below | — |
 
-That `CapEvent` splits across both buckets **by its `kind` field** is the detail most
-likely to be missed, and the one that decides whether the tree is right.
+**Correction (2026-08-26): `CapEventKind` has four variants — `Granted`,
+`Transferred`, `Revoked`, `Minted` — and all four are derivation lifecycle.**
+`Invoked`/`Denied` appear only in a doc comment in `protocol/src/lib.rs`, describing
+*reserved future* wire slots. This plan asserted a kind-based split as "the detail
+most likely to be missed"; there is no split to miss today, and `CapEvent` is entirely
+durable.
+
+The correction improves the design rather than simplifying it away. `retention_of`
+matches `CapEventKind` **exhaustively, with no catch-all**, so if an audit variant is
+ever added it is a *build failure* rather than a silent default into the unbounded
+bucket — which is exactly the leak a catch-all would have created, in the one bucket
+that has no ceiling.
 
 #### What still has to be decided
 
@@ -169,6 +179,34 @@ events *are* dropped, so the split is by kind and not by frame type.
 **KILL MUTANTS**: Address survivors — the kind-based split and the window bound are
 the two that matter.
 **Done when**: Criteria met, report reviewed, human approves commit.
+
+**Outcome (2026-08-26): `snemu-wasm/src/store.rs` — `FrameStore`, 13 tests, 13
+mutants, 0 survivors.**
+
+Durable and windowed frames each carry an arrival sequence and `frames()` merges on
+it, rather than concatenating the buckets: the span and switch folds read *sequences*,
+and a registration emitted mid-run would otherwise appear to precede everything before
+it.
+
+*The test that matters uses the real fold as its oracle.* Asserting a frame is
+*present* after an overflow is one inference short of the claim; the claim is that
+`derivation_tree` still produces a **true tree**. So a store that discarded 500 stream
+frames is folded and compared against one that discarded nothing — plus non-vacuity
+assertions, without which two *empty* trees would compare equal and prove nothing.
+
+Those guards earned their place twice over. They caught, in order: a fixture whose
+`holder` id did not match its `ThreadRegister`, so no name resolved in either tree;
+and then that `derivation_tree` **drops any node that ends up in no edge** ("isolated
+bootstrap grant"), so a fixture where every capability had `parent_cap_id: 0` folded
+to nothing at all. Neither would have failed a plain equality assertion.
+
+*Mutation testing found the recurring shape again, twice.* `while window.len() >
+cap` mutated to `<` or `>=` spins forever — the **third** time in this work that a
+loop whose termination depends on arithmetic has produced a timeout, and this plan had
+already said to state such bounds structurally. A push adds exactly one frame and the
+cap is fixed, so the loop became an `if` and cannot spin. And `durable_len -> 1`
+survived because the test asserted it *equalled* 1; the counts now differ from each
+other and from one.
 
 ### Step 3: The capability derivation tree panel
 
