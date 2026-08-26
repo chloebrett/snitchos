@@ -95,6 +95,15 @@ impl Handle {
         serde_json::to_string(&views).map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// Deliver typed characters to the guest's console.
+    ///
+    /// Queued, not overwritten: keystrokes arriving between two animation frames all
+    /// survive, in order. The guest reads them at its own pace by polling the UART,
+    /// exactly as it would from a serial line.
+    pub fn push_input(&mut self, text: &str) {
+        self.machine.push_console_input(text.as_bytes());
+    }
+
     /// The guest's cumulative retired-instruction count — its clock.
     #[must_use]
     pub fn instret(&self) -> u64 {

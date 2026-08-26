@@ -138,6 +138,72 @@ fn the_shell_boots_a_guest_steps_it_and_drains_its_output() {
     );
 }
 
+/// An ELF whose guest echoes the console: poll the ns16550a until a byte is ready,
+/// read it, write it straight back.
+///
+/// Hand-assembled, and the jump offsets are the part to be careful with. The first
+/// version branched to offset 4 instead of 8, re-running `slli x6, x6, 28` — which
+/// shifted the UART base back out of the register, so exactly one character echoed
+/// and then the loop polled address 5 forever. It looked like "input is dropped".
+fn echo_elf() -> Vec<u8> {
+    let program: [u32; 8] = [
+        0x0010_0313, //  0: addi x6, x0, 1
+        0x01C3_1313, //  4: slli x6, x6, 28   -> x6 = 0x1000_0000, the UART
+        0x0053_4383, //  8: lbu  x7, 5(x6)    -> LSR
+        0x0013_F393, // 12: andi x7, x7, 1    -> data-ready bit
+        0xFE03_8CE3, // 16: beq  x7, x0, -8   -> not ready: poll again (to 8)
+        0x0003_4403, // 20: lbu  x8, 0(x6)    -> RBR
+        0x0083_0023, // 24: sb   x8, 0(x6)    -> THR
+        0xFEDF_F06F, // 28: jal  x0, -20      -> back to the poll (to 8, not 4)
+    ];
+    let mut segment = Vec::new();
+    for w in program {
+        segment.extend_from_slice(&w.to_le_bytes());
+    }
+    tiny_elf(0x8000_0000, &segment)
+}
+
+/// **Keystrokes reach the guest.**
+///
+/// The guest is an echo loop written by hand rather than the real REPL, and that is
+/// deliberate: the REPL lives in the staged 6.37 MB `kernel.elf`, which is a
+/// gitignored build artifact, so a test depending on it would fail on a clean clone.
+/// This exercises the same seam — host pushes bytes, guest polls the UART's
+/// data-ready bit, reads RBR and writes THR — with nothing outside the test.
+///
+/// On the wasm side because that is where `Handle` exists at all, and because "the
+/// bytes crossed the JS boundary" is precisely the claim.
+#[wasm_bindgen_test]
+fn pushed_keystrokes_reach_the_guest_and_come_back() {
+    let mut h = snemu_wasm::shell::Handle::new(&echo_elf(), 1024 * 1024, "")
+        .expect("the ELF loads");
+
+    // Nothing typed yet: the guest polls and says nothing.
+    h.step_budget(200).expect("steps");
+    assert_eq!(h.drain_uart(), "", "an unprompted guest emits nothing");
+
+    h.push_input("hi");
+    h.step_budget(2000).expect("steps");
+
+    assert_eq!(h.drain_uart(), "hi", "what was typed came back out");
+}
+
+/// Input queues rather than overwrites: a fast typist must not lose characters
+/// between animation frames.
+#[wasm_bindgen_test]
+fn input_pushed_before_the_guest_reads_it_is_queued_not_dropped() {
+    let mut h = snemu_wasm::shell::Handle::new(&echo_elf(), 1024 * 1024, "").expect("loads");
+
+    // Three separate pushes with no stepping between them, as three keystrokes
+    // arriving inside one frame would.
+    h.push_input("a");
+    h.push_input("b");
+    h.push_input("c");
+    h.step_budget(4000).expect("steps");
+
+    assert_eq!(h.drain_uart(), "abc", "every keystroke survived, in order");
+}
+
 /// A workload selection must not stop a machine booting. The guest decides what an
 /// unknown name means; the shim's job is only to deliver it.
 #[wasm_bindgen_test]

@@ -201,6 +201,14 @@ runtime selection.
 **MUTATE**: `cargo mutants -p xtask-cmds --file "**/web.rs"`.
 **Done when**: Criteria met, report reviewed, human approves commit.
 
+**Outcome (2026-08-26): done.** `web_features()` returns `["kvetch-drivel"]`; the
+staged kernel went 2.09 MB → **6.37 MB** and its fingerprint moved
+`f1811c59…` → `3f63d515…`, which is the staleness detector demonstrating itself. Two
+tests pin the policy, and the second is the one that earns its keep: the kernel must
+**not** carry `itest-workloads`. "Add the feature that makes it work" is the reflex,
+and here it would cost megabytes of programs no visitor can select. Acceptance suite
+unchanged (4/4, 5.2s).
+
 ### Step 2: `Handle` boots a chosen workload
 
 **Acceptance criteria**: `Handle::new(elf, ram, workload)` patches
@@ -214,6 +222,27 @@ that a patched DTB still parses (`fdt::Fdt::new`) and carries the expected
 **MUTATE**: `cargo mutants -p snemu-wasm`.
 **Done when**: Criteria met, report reviewed, human approves commit.
 
+**Outcome (2026-08-26): done.** New `boot.rs` — `selection`, `bootargs_for`,
+`dtb_for` — and `Handle::new(elf, ram, workload)` patches `/chosen/bootargs` as QEMU's
+`-append` would. Patched trees are parsed back through `fdt`, the *guest's* reader,
+rather than trusting our writer. No workload registry in the browser: that mapping
+belongs to `kernel_boot::bootargs`, and a second copy is the shape `workload_features`
+exists to prevent.
+
+Two things worth carrying:
+
+- **The thinness guard passed something it should not have.** `(!workload.is_empty())
+  .then_some(workload)` sat in the shell — a conditional wearing a method call, which
+  a keyword scan cannot see. It is a *decision* about what an empty string means, so
+  it moved to `boot::selection` with tests. The guard is a ratchet, not a proof.
+- **Mutation testing found the A/B pair could not discriminate.** `Speedups::apply →
+  ()` survived, because every test around it asserts ON and OFF *agree* — which a
+  no-op satisfies perfectly. The consequence is not cosmetic: the browser would drop
+  from 38.9 MIPS back to the 11 MIPS interpreter with the suite green. Killed with the
+  one deterministic difference that does exist — with the block JIT on a `step()`
+  retires a whole compiled block, without it exactly one instruction. **41 mutants, 36
+  caught, 5 unviable, 0 survivors.**
+
 ### Step 3: `Handle` accepts keystrokes
 
 **Acceptance criteria**: `Handle::push_input(bytes)` reaches the guest's console.
@@ -224,6 +253,23 @@ confidence: there is no host-side seam between "bytes pushed" and "guest read th
 **GREEN**: The binding.
 **MUTATE**: N/A if the shell stays a single call; say so rather than skipping quietly.
 **Done when**: Criteria met, human approves commit.
+
+**Outcome (2026-08-26): done.** `Handle::push_input(text)` — one call into
+`push_console_input`, so no mutants to speak of, and the thinness guard still passes.
+
+**The plan's RED was not buildable as written.** It called for booting
+`workload=stitch-repl` and asserting the REPL's reply, but the REPL lives in the
+staged 6.37 MB `kernel.elf` — a gitignored build artifact, so the test would fail on a
+clean clone. Instead the guest is a hand-assembled ns16550a echo loop: poll LSR for
+the data-ready bit, read RBR, write THR. Same seam, nothing external.
+
+Two tests: what is typed comes back, and three pushes with no stepping between them
+all survive in order (a fast typist inside one animation frame).
+
+The hand-assembly is where the time went, and it is worth recording why: the loop
+first branched to offset 4 rather than 8, re-running `slli x6, x6, 28` and shifting
+the UART base out of the register. Exactly one character echoed and then it polled
+address 5 forever — which presents as "input is dropped", not "the jump is wrong".
 
 ### Step 4: The page sends keystrokes and offers a workload selector
 
