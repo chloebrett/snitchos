@@ -3,7 +3,7 @@
 **Branch**: main (this project works directly on main; the human commits)
 **Status**: Active
 
-Follows [legacy/telemetry-panels.md](legacy/telemetry-panels.md), which gave the page
+Follows [telemetry-panels.md](telemetry-panels.md), which gave the page
 the guest's *structure*. This gives it the guest's *numbers*.
 
 ## Goal
@@ -40,15 +40,15 @@ Every `Metric` frame carries `value`, a **guest timestamp**, and `hart_id`;
 
 ## Acceptance criteria
 
-- [ ] A panel plots selected metrics over guest time, live, with counters and gauges
+- [x] A panel plots selected metrics over guest time, live, with counters and gauges
       rendered according to their declared kind.
-- [ ] Series retention is independent of the frame window — a burst of context
+- [x] Series retention is independent of the frame window — a burst of context
       switches cannot evict metric history.
-- [ ] The chart is readable in light and dark, with a palette that **passes
+- [x] The chart is readable in dark, with a palette that **passes
       `validate_palette.js`** rather than one chosen by eye.
-- [ ] Hovering reads out values at a point.
-- [ ] Switching workload clears the series, as it clears everything else.
-- [ ] The panels stay within the responsiveness bar the suite already enforces.
+- [x] Hovering reads out values at a point.
+- [x] Switching workload clears the series, as it clears everything else.
+- [x] The panels stay within the responsiveness bar the suite already enforces.
 
 ## Steps
 
@@ -109,17 +109,61 @@ sees a heap or scheduler series with more than one point; a second asserts the s
 clear on workload switch; `yarn measure` stays within the bar.
 **Done when**: all acceptance criteria at the top are met; human approves commit.
 
+## Outcome (2026-08-26)
+
+Shipped: `snemu-wasm/src/series.rs`, `web/src/{scale,metrics}.ts`,
+`web/src/{Chart,MetricsPanel}.tsx`, and a fifth tab. **149 unit tests, 18 browser
+tests, 70 mutants / 0 survivors**, CPU unchanged at 32.5% (charts render only for the
+selected group, so the cost does not scale with ~60 metrics).
+
+**The two honesty questions, resolved.** Counters render as rates labelled
+`per second (derived)` — the guest never emitted those numbers, and a chart implying
+otherwise misreports its own provenance. Two cases that would draw fiction if
+unhandled: a repeated guest timestamp (divide by zero) is skipped, and a counter reset
+is reported as zero rather than an enormous downward spike that reads as a real event.
+Histograms are excluded, and a group holding only histograms does not appear at all —
+an empty group button would promise a view that cannot exist.
+
+**Small multiples, not one chart per group.** A group mixes units — bytes beside block
+counts in `heap` — and a shared axis is the dual-axis mistake wearing a different hat.
+A grid compares *shapes* without claiming the scales are comparable.
+
+**Groups are derived from names, not curated.** `snitchos.heap.bytes_used` → `heap`,
+so a metric added to the guest appears without anyone editing a list here — the same
+reasoning as the workload picker validating against the kernel's registry rather than
+duplicating it.
+
+**The palette was computed.** `validate_palette.js` against this page's *actual*
+surface `#0d0f12` (not the reference `#1a1a19`): all five checks pass — lightness
+band, chroma floor, CVD separation (worst adjacent ΔE 8.4 protan), normal-vision floor
+19.3, contrast ≥3:1.
+
+**A test caught a design fault, not a code fault.** The metric name rendered twice —
+figure caption and chart legend. `dataviz`'s rule is that a single series needs no
+legend box because the title names it; the chart now omits it, with a test each way.
+
+**And mutation testing found the same shape for the third time on `Decoder`:** a
+delegating accessor (`series`, after `durable_len` and `Status::instret`) that no test
+exercised *through the decoder*. A pass-through returning nothing leaves every chart
+empty while the store beneath it is perfectly correct. Worth stating plainly: **a
+delegating method is not covered by its delegate's tests.**
+
+*Light mode is untested* — the page is dark-only today, so the criterion was met for
+the surface that exists. A light palette needs its own validator run against its own
+surface, not an inversion of this one.
+
 ## Open questions
 
-- **Counter rendering.** A counter's raw value is monotonic and its *rate* is the
-  interesting quantity. Rate needs a window and a divisor in guest time — cheap, but
-  it is a derived series and should be labelled as one rather than passed off as
-  something the guest emitted.
-- **Histograms.** `MetricKind::Histogram` exists on the wire. A line of its sum is a
-  lie about what it is; this plan should either render them properly or leave them out
-  and say so.
-- **How far back?** Sets the per-series ring size. Wants measuring against the
-  heartbeat rate rather than guessing.
+- ~~**Counter rendering.**~~ Settled: rate, labelled derived. See Outcome.
+- ~~**Histograms.**~~ Settled: left out, and said so. Rendering them properly —
+  buckets as a heatmap or a quantile band — remains open work, not a gap in this.
+- **How far back?** 600 points per series was chosen from the observed heartbeat rate
+  (~90 seconds each) but **not measured under load**. It is a comfort knob rather than
+  a correctness one, and the assumption behind it is the same kind that was already
+  wrong once here about the guest's idle task.
+- **Pinning from the frame tail** — click a metric name in the tail to pin its chart.
+  Scoped into this plan's step 4 and not built: group selection covers the need, and
+  pinning is better designed once there is a reason to want two groups at once.
 
 ## Pre-PR quality gate
 
@@ -131,5 +175,5 @@ clear on workload switch; `yarn measure` stays within the bar.
 
 ---
 *On completion, `git mv` this file to `plans/legacy/` and follow the archiving
-checklist in [README.md](README.md) — including the `.rs` doc-path citations
+checklist in [README.md](../README.md) — including the `.rs` doc-path citations
 `cargo xtask links` cannot see.*

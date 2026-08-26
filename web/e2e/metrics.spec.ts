@@ -24,11 +24,9 @@ test("plots the guest's own metrics", async ({ page }) => {
   // A drawn line, not merely an axis frame: two samples are needed before a path
   // exists at all, so this also proves samples are accumulating over time rather
   // than each fold replacing the last.
-  await expect(page.locator("[data-testid=metric-charts] path[d]").first()).toHaveAttribute(
-    "d",
-    /^M.*L/,
-    { timeout: BOOT_TIMEOUT },
-  );
+  await expect(
+    page.locator("[data-testid=metric-charts] path[d]").first(),
+  ).toHaveAttribute("d", /^M.*L/, { timeout: BOOT_TIMEOUT });
 });
 
 test("groups are selectable", async ({ page }) => {

@@ -387,6 +387,30 @@ mod tests {
         assert_eq!(d.frames().len(), 2);
     }
 
+    /// Metric samples reach the series store as the decoder decodes them.
+    ///
+    /// Tested *through the decoder* rather than only on `SeriesStore`: the wiring
+    /// between them is its own claim, and a pass-through accessor that returned
+    /// nothing would leave every chart empty while the store beneath it was perfectly
+    /// correct. Mutation testing has now found this same shape three times on this
+    /// type — a delegating method is not covered by its delegate's tests.
+    #[test]
+    fn decoded_metrics_reach_the_series_store() {
+        let mut d = Decoder::new();
+        assert!(d.series().is_empty());
+
+        d.push(&wire(&[
+            register(5, "snitchos.heap.bytes_used"),
+            Frame::Metric { name_id: StringId(5), value: 4096, t: 100, hart_id: 0 },
+            Frame::Metric { name_id: StringId(5), value: 8192, t: 200, hart_id: 0 },
+        ]));
+
+        let series = d.series();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].name, "snitchos.heap.bytes_used");
+        assert_eq!(series[0].points, vec![(100, 4096), (200, 8192)]);
+    }
+
     /// The unbounded bucket is reportable through the decoder, not only the store.
     ///
     /// It is what the page displays so the "registrations are naturally few"

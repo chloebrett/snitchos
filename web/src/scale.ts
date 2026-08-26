@@ -82,8 +82,14 @@ export function scale(domain: Extent, size: number): (value: number) => number {
 export function linePath(points: readonly Point[], box: Box): string {
   if (points.length < 2) return "";
 
-  const x = scale(padded(extentOf(points.map((p) => p.t)) ?? { min: 0, max: 1 }), box.width);
-  const y = scale(padded(extentOf(points.map((p) => p.v)) ?? { min: 0, max: 1 }), box.height);
+  const x = scale(
+    padded(extentOf(points.map((p) => p.t)) ?? { min: 0, max: 1 }),
+    box.width,
+  );
+  const y = scale(
+    padded(extentOf(points.map((p) => p.v)) ?? { min: 0, max: 1 }),
+    box.height,
+  );
 
   return points
     .map((p, i) => {
@@ -106,7 +112,8 @@ export function ticks(extent: Extent, count = 4): number[] {
   const { min, max } = padded(extent);
   const rough = (max - min) / Math.max(1, count);
   const magnitude = 10 ** Math.floor(Math.log10(rough));
-  const step = [1, 2, 5, 10].map((m) => m * magnitude).find((s) => s >= rough) ?? magnitude * 10;
+  const step =
+    [1, 2, 5, 10].map((m) => m * magnitude).find((s) => s >= rough) ?? magnitude * 10;
 
   const out: number[] = [];
   for (let v = Math.ceil(min / step) * step; v <= max; v += step) {

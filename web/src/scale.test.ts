@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Box, extentOf, linePath, padded, type Point, scale, ticks } from "./scale";
+import { type Box, extentOf, linePath, type Point, padded, scale, ticks } from "./scale";
 
 const box: Box = { width: 100, height: 50 };
 const pt = (t: number, v: number): Point => ({ t, v });

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import type { Views } from "./frames";
 import { GraphView } from "./GraphView";
-import { MetricsPanel } from "./MetricsPanel";
 import type { Graph } from "./graph";
+import { MetricsPanel } from "./MetricsPanel";
 import { TelemetryPane } from "./TelemetryPane";
 import type { FrameRow } from "./tail";
 

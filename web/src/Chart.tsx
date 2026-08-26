@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { type Box, extentOf, linePath, padded, type Point, scale, ticks } from "./scale";
+import { type Box, extentOf, linePath, type Point, padded, scale, ticks } from "./scale";
 
 /**
  * The categorical palette, in fixed slot order.

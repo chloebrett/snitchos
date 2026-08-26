@@ -1,8 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { type MetricSeries, TIMEBASE_HZ } from "./metrics";
 import { MetricsPanel } from "./MetricsPanel";
+import { type MetricSeries, TIMEBASE_HZ } from "./metrics";
 
 const series = (name: string, over: Partial<MetricSeries> = {}): MetricSeries => ({
   name,
@@ -18,7 +18,11 @@ describe("MetricsPanel", () => {
   it("offers a button per group, with how many metrics it holds", () => {
     render(
       <MetricsPanel
-        series={[series("snitchos.heap.a"), series("snitchos.heap.b"), series("snitchos.sched.c")]}
+        series={[
+          series("snitchos.heap.a"),
+          series("snitchos.heap.b"),
+          series("snitchos.sched.c"),
+        ]}
       />,
     );
 
@@ -38,7 +42,9 @@ describe("MetricsPanel", () => {
   });
 
   it("switches group on click", async () => {
-    render(<MetricsPanel series={[series("snitchos.heap.a"), series("snitchos.sched.b")]} />);
+    render(
+      <MetricsPanel series={[series("snitchos.heap.a"), series("snitchos.sched.b")]} />,
+    );
 
     await userEvent.click(screen.getByTestId("group-sched"));
     expect(screen.getByTestId("group-sched")).toHaveAttribute("aria-pressed", "true");
@@ -56,7 +62,9 @@ describe("MetricsPanel", () => {
    * numbers, and a chart that implies otherwise is misreporting its own provenance.
    */
   it("marks a counter's axis as derived", () => {
-    render(<MetricsPanel series={[series("snitchos.sched.switches", { kind: "Counter" })]} />);
+    render(
+      <MetricsPanel series={[series("snitchos.sched.switches", { kind: "Counter" })]} />,
+    );
     expect(screen.getByText(/derived/)).toBeInTheDocument();
   });
 
