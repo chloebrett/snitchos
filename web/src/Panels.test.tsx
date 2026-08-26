@@ -17,6 +17,7 @@ const views = (over: Partial<Views> = {}): Views => ({
   caps: oneNode("a capability"),
   spans: oneNode("a span"),
   switches: oneNode("a switch"),
+  metrics: [],
   durableFrames: 12,
   ...over,
 });

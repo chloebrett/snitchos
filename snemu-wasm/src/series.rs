@@ -24,7 +24,10 @@ use std::collections::VecDeque;
 pub const MAX_POINTS_PER_SERIES: usize = 600;
 
 /// One metric's history: `(guest time, value)` in arrival order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` because this crosses to the page as JSON, and the shape is a contract
+/// with TypeScript, which has no compiler to notice a renamed field.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Series {
     pub name: String,
     /// From `MetricRegister`, or `None` if the guest has not described it yet.
@@ -232,6 +235,34 @@ mod tests {
 
         let order: Vec<String> = s.series().into_iter().map(|x| x.name).collect();
         assert_eq!(order, ["metric.2", "metric.1", "metric.3"]);
+    }
+
+    /// The JSON shape the page reads — pinned, because TypeScript has no compiler to
+    /// notice a renamed field or a re-spelled kind.
+    ///
+    /// `kind` in particular: serde writes a unit variant as its name, so the page
+    /// matches on the literal "Counter", and a rename on either side would silently
+    /// stop every counter being charted as a rate.
+    #[test]
+    fn the_serialized_shape_is_what_the_page_reads() {
+        let mut s = SeriesStore::new();
+        s.observe(&register(1, MetricKind::Counter), &names());
+        s.observe(&metric(1, 7, 100), &names());
+
+        assert_eq!(
+            serde_json::to_string(&s.series()).expect("serializes"),
+            r#"[{"name":"metric.1","kind":"Counter","points":[[100,7]]}]"#
+        );
+    }
+
+    /// An undescribed metric crosses as `null`, which the page must be able to tell
+    /// from a kind it does not recognise.
+    #[test]
+    fn an_unknown_kind_serializes_as_null() {
+        let mut s = SeriesStore::new();
+        s.observe(&metric(1, 1, 1), &names());
+
+        assert!(serde_json::to_string(&s.series()).expect("serializes").contains(r#""kind":null"#));
     }
 
     /// Anything that is not a metric is not this store's business.

@@ -8,6 +8,7 @@
 
 import type { FrameSource, FrameView, Slice, Status, Views } from "./frames";
 import type { Graph } from "./graph";
+import type { MetricSeries } from "./metrics";
 import init, { demo_workloads, Handle } from "./pkg/snemu_wasm.js";
 // The wasm is fetched as an asset, not imported as a module: it is several MB, and
 // this keeps it a separate file the browser can instantiate by streaming. See the
@@ -94,6 +95,7 @@ export class SnemuSource implements FrameSource {
       caps: JSON.parse(this.#handle.cap_tree()) as Graph,
       spans: JSON.parse(this.#handle.span_tree()) as Graph,
       switches: JSON.parse(this.#handle.switch_graph()) as Graph,
+      metrics: JSON.parse(this.#handle.series()) as MetricSeries[],
       durableFrames: this.#handle.durable_frames(),
     };
   }

@@ -135,6 +135,14 @@ impl Handle {
         diagram::switches::transition_graph(&self.decoder.frames()).to_json()
     }
 
+    /// Every metric's history, as JSON.
+    ///
+    /// # Errors
+    /// If the series cannot be serialized.
+    pub fn series(&self) -> Result<String, JsError> {
+        serde_json::to_string(&self.decoder.series()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// How many cumulative facts the decoder is holding.
     ///
     /// That bucket is unbounded by design — "bounded in practice" is an assumption

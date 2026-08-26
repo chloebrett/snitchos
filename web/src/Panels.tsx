@@ -1,12 +1,13 @@
 import { useState } from "react";
 import type { Views } from "./frames";
 import { GraphView } from "./GraphView";
+import { MetricsPanel } from "./MetricsPanel";
 import type { Graph } from "./graph";
 import { TelemetryPane } from "./TelemetryPane";
 import type { FrameRow } from "./tail";
 
 /** Which view the right-hand pane is showing. */
-export type PanelId = "caps" | "spans" | "switches" | "frames";
+export type PanelId = "caps" | "spans" | "switches" | "metrics" | "frames";
 
 /**
  * The folded views, each with what to say when it is empty.
@@ -39,6 +40,7 @@ const GRAPH_TABS: Array<{
 
 const TABS: Array<{ id: PanelId; label: string }> = [
   ...GRAPH_TABS.map(({ id, label }) => ({ id, label })),
+  { id: "metrics" as const, label: "metrics" },
   { id: "frames" as const, label: "frames" },
 ];
 
@@ -108,6 +110,13 @@ function Body({
   frames: readonly FrameRow[];
 }) {
   if (active === "frames") return <TelemetryPane rows={frames} />;
+  if (active === "metrics") {
+    return views === null ? (
+      <p className="px-3 py-2 text-neutral-600 text-xs italic">waiting for the guest…</p>
+    ) : (
+      <MetricsPanel series={views.metrics} />
+    );
+  }
 
   // "No source yet" is not "a source that produced nothing". Conflating them shows an
   // empty capability tree during boot, which reads as *this guest granted nothing*.

@@ -114,6 +114,9 @@ pub struct Decoder {
     strings: HashMap<StringId, String>,
     /// Decoded frames, kept for the folds that build the panels.
     store: crate::store::FrameStore,
+    /// Metric samples, kept per metric — see `crate::series` for why they cannot
+    /// share the frame window.
+    series: crate::series::SeriesStore,
 }
 
 impl Default for Decoder {
@@ -129,7 +132,14 @@ impl Decoder {
             pending: Vec::new(),
             strings: HashMap::new(),
             store: crate::store::FrameStore::new(FRAME_WINDOW),
+            series: crate::series::SeriesStore::new(),
         }
+    }
+
+    /// Every metric's history, in first-seen order.
+    #[must_use]
+    pub fn series(&self) -> Vec<crate::series::Series> {
+        self.series.series()
     }
 
     /// The frames retained so far, in arrival order, ready to fold.
@@ -187,6 +197,7 @@ impl Decoder {
                     }
                     let strings = &self.strings;
                     views.push(FrameView::of(&frame, &|id| strings.get(&id).cloned()));
+                    self.series.observe(&frame, &|id| strings.get(&id).cloned());
                     // Retained *after* projecting, so the borrow of `strings` above
                     // is done with before the frame moves into the store.
                     self.store.push(frame);

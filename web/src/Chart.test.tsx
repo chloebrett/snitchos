@@ -19,9 +19,20 @@ describe("Chart", () => {
    * Identity is never colour alone — a reader who cannot distinguish two hues still
    * has the names, and the numbers stay in text tokens rather than the series colour.
    */
-  it("names every series beside its swatch", () => {
+  it("names every series beside its swatch when there are several", () => {
+    render(<Chart series={[series("heap", [1, 2]), series("sched", [2, 3])]} />);
+    expect(screen.getByText("heap")).toBeInTheDocument();
+    expect(screen.getByText("sched")).toBeInTheDocument();
+  });
+
+  /**
+   * ...and no legend for a single series: the caller's title already names it, so
+   * repeating it below states the same fact twice. Caught by a panel test finding the
+   * name in two places at once.
+   */
+  it("does not repeat the name when there is only one series", () => {
     render(<Chart series={[series("snitchos.heap.bytes_used", [1, 2])]} />);
-    expect(screen.getByText("snitchos.heap.bytes_used")).toBeInTheDocument();
+    expect(screen.queryByText("snitchos.heap.bytes_used")).not.toBeInTheDocument();
   });
 
   /**

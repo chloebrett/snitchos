@@ -147,19 +147,29 @@ export function Chart({ series, unit, height = 150 }: Props) {
         )}
       </svg>
 
-      {/* Identity is never colour alone: every series is named beside its swatch, and
-          the text wears text tokens rather than the series colour. */}
-      <ul className="flex flex-wrap gap-x-3 gap-y-0.5 px-1 pb-1 text-[0.62rem]" data-testid="legend">
+      {/* A legend for two or more series, never for one: with a single line the
+          title already names it, and repeating the name below is the same fact twice.
+          Where a legend does appear, identity is never colour alone — the name sits
+          beside the swatch, and the text wears text tokens rather than the series
+          colour. */}
+      <ul
+        className="flex flex-wrap gap-x-3 gap-y-0.5 px-1 pb-1 text-[0.62rem]"
+        data-testid="legend"
+      >
         {series.map((s, i) => {
           const hit = readout?.find((r) => r.name === s.name)?.point;
           return (
             <li key={s.name} className="flex items-center gap-1 text-neutral-400">
-              <span
-                aria-hidden="true"
-                className="inline-block size-2 rounded-full"
-                style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }}
-              />
-              <span className="truncate">{s.name}</span>
+              {series.length > 1 && (
+                <>
+                  <span
+                    aria-hidden="true"
+                    className="inline-block size-2 rounded-full"
+                    style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }}
+                  />
+                  <span className="truncate">{s.name}</span>
+                </>
+              )}
               {hit && (
                 <span data-testid="readout" className="text-neutral-200 tabular-nums">
                   {hit.v}

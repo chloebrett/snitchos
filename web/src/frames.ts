@@ -10,6 +10,7 @@
  */
 
 import type { Graph as GraphData } from "./graph";
+import type { MetricSeries } from "./metrics";
 
 /** Mirrors `snemu_wasm::telemetry::FrameView`. Its shape is pinned Rust-side. */
 export interface FrameView {
@@ -94,6 +95,8 @@ export interface Views {
   spans: GraphData;
   /** Context-switch transitions between tasks. */
   switches: GraphData;
+  /** Every metric's history, for the charts. */
+  metrics: MetricSeries[];
   /**
    * How many cumulative facts the source is holding.
    *
