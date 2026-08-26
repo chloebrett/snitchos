@@ -129,7 +129,7 @@ mod tests {
         let json = super::demo_workloads_json();
         assert!(json.starts_with(r#"[{"name":"","label":"init (default)"}"#), "{json}");
         assert!(json.contains(r#"{"name":"stitch-drivel","#), "{json}");
-        assert!(json.ends_with("]"));
+        assert!(json.ends_with(']'));
     }
 
     /// The page says "default" by sending nothing.

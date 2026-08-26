@@ -69,6 +69,19 @@ exclude_re = [
   # host and can't be mutation-tested there — same situation as the kernel
   # crates and RuntimeTelemetry. Exercised by on-target itests instead.
   "RuntimePlatform",
+  # `cargo xtask web`'s orchestration: the functions that spawn `cargo`, `wasm-pack`,
+  # `git` and `yarn`, or that read the filesystem. Testing them would mean running a
+  # real toolchain inside the mutation loop, and each mutant is reported missed for
+  # that reason alone rather than because a test is weak.
+  #
+  # Scoped to those functions rather than excluding the file, because `web.rs` is
+  # deliberately split: every *decision* it makes is a pure function with tests —
+  # `web_features`, `fingerprint`, `manifest_json`, `can_run_web_tests`,
+  # `is_supported_yarn` — and those stay mutated and fully caught. If a decision ever
+  # migrates into the orchestration, it loses its coverage silently, so keep this list
+  # narrow.
+  "replace (workspace_root|git_rev|yarn_version|yarn_is_usable|yarn|web|test|e2e|web_toolchain_ready) ->",
+  "in (yarn|web|test)$",
   # Equivalent mutant in snemu-wasm's probe: the operand is a
   # `Vec::with_capacity` argument, and capacity is a performance hint with no
   # observable effect — the vector is filled by `extend_from_slice` either way,

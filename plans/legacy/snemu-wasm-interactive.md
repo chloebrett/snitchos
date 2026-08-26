@@ -3,7 +3,7 @@
 **Branch**: main (this project works directly on main; the human commits)
 **Status**: Active
 
-Follows [plans/legacy/snemu-wasm.md](legacy/snemu-wasm.md), which put a booting kernel
+Follows [plans/legacy/snemu-wasm.md](snemu-wasm.md), which put a booting kernel
 and live telemetry in a tab. This makes it a machine you can *use*: pick what it
 boots, and type at it.
 

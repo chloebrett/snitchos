@@ -1,6 +1,6 @@
 //! snemu in a browser tab: the shim between the emulator core and JS.
 //!
-//! The split this crate exists to enforce — see `plans/snemu-wasm.md`:
+//! The split this crate exists to enforce — see `plans/legacy/snemu-wasm.md`:
 //! every non-trivial behaviour is a **pure function tested on the host**, and
 //! the `#[wasm_bindgen]` layer is a shell too thin to hide a bug. `itest-harness`
 //! is the precedent to mirror: it is already a second embedder of

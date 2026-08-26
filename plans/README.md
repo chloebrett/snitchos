@@ -18,7 +18,7 @@ the first is work in progress:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| [In flight](#in-flight) | 17 | Real work, partially done. Only ~9 have moved this month. |
+| [In flight](#in-flight) | 16 | Real work, partially done. Only ~9 have moved this month. |
 | [Not started](#not-started) | 6 | Written down, zero code. A plan is cheap; that's deliberate. |
 | [Done bar a detail](#done-bar-a-detail) | 1 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
@@ -33,7 +33,6 @@ Recently active — the board/network cluster is the current front:
 | [uart-telemetry.md](uart-telemetry.md) | Frames off the board over a physical UART (M2) | Steps 0–4, 6, 8, 9 shipped. **Step 10a/10b** (collector `--serial`) is the critical path; 5b follows; step 7 deferred |
 | [network-telemetry.md](network-telemetry.md) | Telemetry over UDP (M2.5) | PRs 1–7 shipped and gate-green. **PR 8 is the GMAC driver** — its own plan, below |
 | [board-bridge.md](board-bridge.md) | Letting an agent drive the real board | Not started; **starts where uart-telemetry step 10 finishes** |
-| [legacy/snemu-wasm.md](legacy/snemu-wasm.md) | snemu in a browser tab | **Complete** (2026-08-25). Milestone 1 shipped: the kernel boots in a browser, telemetry decodes with interned names, the tab stays responsive, two loads are byte-identical. Follow-on: wall-clock pacing (an open tab burns a core — measured) then guest input |
 | [kvetch-next-measurements.md](kvetch-next-measurements.md) | What the ladder's nats actually buy | 7 steps, none done. Answers the batch11 gap: a 0.43-nat gain showed **no** perceivable output difference |
 | [stitch-native-tests.md](stitch-native-tests.md) | `test "…" { expect … }` in Stitch | **8 of 9 done.** Increment 9 only: tests never run on target |
 | [glitch-v2-async-ring.md](glitch-v2-async-ring.md) | The async audio RT ring | Increments 1–5 shipped; **the XRun observable is armed and proven firing** (2026-08-25, inc 9's prerequisite). **6–9 remain** — mixing, init-delegated AudioSink, snemu PCM capture, the last two acceptance itests |
