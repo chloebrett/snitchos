@@ -401,7 +401,7 @@ one of the things it reads is perishable.
 > doing, and stops.** Additive in the existing `workload=` registry, so production
 > builds compile none of it. Output is telemetry `Frame`s over the M2 UART channel.
 
-### Why first: U-Boot's configuration is a read-once resource
+### U-Boot's configuration is perishable *within a boot*
 
 The board is delivered over **TFTP**. That means U-Boot brought a GMAC and a PHY up,
 negotiated a link, and moved megabytes over it, *seconds before `booti`* — on this
@@ -414,9 +414,15 @@ The design note above guesses at four constants: the MDIO CSR clock-range divide
 strictly better than deriving them, and it collapses three of the four "genuinely still
 open" questions into a register dump.
 
-That state does not survive step 5. The moment bring-up asserts a reset, the answer is
-gone. So the probe is not merely "nice diagnostics ahead of the work" — **it is the
-only opportunity to take the measurement at all**, and it is available now.
+That state does not survive step 5: the moment bring-up asserts a reset, the answer is
+gone. But every TFTP boot re-establishes it, and the probe is its own workload — so the
+measurement stays available indefinitely, including long after the driver exists.
+
+**The constraint is therefore about *where the reads live*, not about a deadline.** They
+must sit in a read-only workload that runs *instead of* bring-up, never as a preamble
+inside it — a few reads bolted onto the front of step 5 would be clobbered by the reset
+three lines later, and would only ever be run when step 5 was already being debugged.
+The probe still goes first, but on the three grounds below rather than on urgency.
 
 (U-Boot may `eth_halt()` after the transfer, which stops the DMA engine. It does not
 wipe the clock tree, the syscon field, or the PHY's configuration — and it is the
@@ -457,7 +463,21 @@ the first thing the probe is for.
   DTB. The pre-MMU hazard in CLAUDE.md does not apply here. This also exercises the
   `collect_mmio_regions` path currently parked behind `#[expect(dead_code)]`.
 - **It does not need the board-bridge.** One human-attended boot. That decouples it
-  from the prerequisite chain entirely, which is why it can go first.
+  from the prerequisite chain entirely, which is why it can go first — and why the two
+  can be built in parallel.
+
+### It is also the board-bridge's best test target
+
+The dependency runs both ways, benignly. The bridge's step 6b (`board boot --workload
+X`) is exactly the mechanism that delivers `workload=gmac-probe` zero-touch, and its
+step 3 (two-phase decode: U-Boot text, then kernel frames) is what reads the probe's
+output. So the probe gets a better loop once the bridge lands.
+
+In return the probe is the **only workload in the tree that can legitimately hang the
+board** — a read of a possibly-gated peripheral is precisely the `PollUntilSet`-class
+silence the bridge's hang watchdog exists to catch. Without it, that watchdog has to be
+tested against a contrived hang. With it, the watchdog's acceptance test is a real
+failure mode from the work it was built to serve.
 
 ### What it does not buy
 

@@ -92,15 +92,20 @@ ask:
 board-bridge, before step 1. `workload=gmac-probe`: a read-only boot that dumps what
 U-Boot already configured and stops. See the design note's "Rung −1".
 
-The reason it goes first is that **U-Boot's configuration is perishable.** The board is
-delivered over TFTP, so U-Boot brought a GMAC and PHY up and moved megabytes over them
-seconds before `booti` — a working configuration for this exact board is sitting in the
-register file. It answers three of the four open questions below as *measured values*
-rather than derivations, and step 5's first reset destroys it. The measurement is
-available now and not later.
+The board is delivered over TFTP, so U-Boot brought a GMAC and PHY up and moved
+megabytes over them seconds before `booti` — a working configuration for this exact
+board is sitting in the register file, and it answers three of the four open questions
+below as *measured values* rather than derivations.
 
-It needs no bridge (one human-attended boot), so it is off the prerequisite chain
-entirely.
+That state is destroyed by step 5's first reset assert, but re-established by every
+TFTP boot — so this is a constraint on **where the reads live** (their own read-only
+workload, never a preamble bolted onto bring-up) rather than a deadline.
+
+It needs no bridge — one human-attended boot — so it is off the prerequisite chain
+entirely, and it can be built **in parallel with the bridge**. The two improve each
+other: bridge step 6b (`board boot --workload X`) is what makes the probe zero-touch,
+and the probe is the only workload that can legitimately hang the board, which is what
+the bridge's hang watchdog needs to be tested against.
 
 What it must answer, and each item is minutes not days:
 
