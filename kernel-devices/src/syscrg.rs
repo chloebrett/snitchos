@@ -36,25 +36,25 @@ const RESET_STATUS_BASE: usize = 0x308;
 
 /// Byte offset (from [`BASE`]) of the control register for the clock at `index`.
 #[must_use]
-pub fn clock_reg_offset(index: u32) -> usize {
+pub const fn clock_reg_offset(index: u32) -> usize {
     4 * index as usize
 }
 
 /// Byte offset (from [`BASE`]) of the assert register holding reset `id`.
 #[must_use]
-pub fn reset_assert_offset(id: u32) -> usize {
+pub const fn reset_assert_offset(id: u32) -> usize {
     RESET_ASSERT_BASE + (id / 32) as usize * 4
 }
 
 /// Byte offset (from [`BASE`]) of the status register for reset `id`.
 #[must_use]
-pub fn reset_status_offset(id: u32) -> usize {
+pub const fn reset_status_offset(id: u32) -> usize {
     RESET_STATUS_BASE + (id / 32) as usize * 4
 }
 
 /// The single-bit mask for reset `id` within its assert/status register.
 #[must_use]
-pub fn reset_bit(id: u32) -> u32 {
+pub const fn reset_bit(id: u32) -> u32 {
     1 << (id % 32)
 }
 
