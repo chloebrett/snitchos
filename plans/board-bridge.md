@@ -1,7 +1,13 @@
 # Plan: the board bridge — driving the VisionFive 2 from the host
 
-**Status**: 📐 **NOT STARTED.** Two phases — the host bridge (steps 1–6b, including the
-U-Boot layer that makes netboot zero-touch) and the ESP32 transport (steps 7–9).
+**Status (2026-08-27)**: 🚧 **STARTED — Step 1 is done; steps 2–9 are open.** The
+`xtask-board` crate exists and is a workspace member, carrying `reach.rs` (the
+"could not reach the board" vs "reached it and it said nothing" failure taxonomy)
+— that is Step 1's port-open policy and failure classification. **No `board`
+subcommand is wired into `xtask` yet** (`cargo xtask board` is an unrecognised
+subcommand), so Step 4's CLI is genuinely unstarted. Two phases — the host bridge
+(steps 1–6b, including the U-Boot layer that makes netboot zero-touch) and the
+ESP32 transport (steps 7–9).
 **Unblocked 2026-08-25**: its prerequisite, [uart-telemetry.md](uart-telemetry.md)
 **Step 10** (collector `--serial`), has landed and is gate-green — though not yet run
 against a board.

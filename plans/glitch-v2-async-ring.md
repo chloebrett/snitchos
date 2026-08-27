@@ -1,6 +1,6 @@
 # `glitch` v2 — the async RT ring (the keystone)
 
-**Status:** 🚧 **IN PROGRESS — Increments 1–5 shipped; 6–9 remain.** The async ring is
+**Status (2026-08-27)**: 🚧 **IN PROGRESS — Increments 1–5 shipped; 6–9 remain.** The async ring is
 **live end to end**: `workload=glitch-beep` now feeds the DAC through the ring —
 `AudioEnqueue` (non-blocking) → `SampleRing` → the `TimerWheel`-multiplexed drain →
 `WDATA` — with `samples_emitted` coming off the timer drain, not a blocking syscall.

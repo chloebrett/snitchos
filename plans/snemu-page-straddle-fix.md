@@ -1,6 +1,6 @@
 # Plan — snemu page-straddling access fix + fidelity-debugging robustness
 
-**Status:** Fix 1 (fetch) **SHIPPED**; frame-scramble stress mode = follow-up **D,
+**Status (2026-08-27)**: Fix 1 (fetch) **SHIPPED**; frame-scramble stress mode = follow-up **D,
 SHIPPED** and wired into the gate. Open: Fix 2 (data load/store straddle,
 defensive), debugging-robustness follow-ups **A/B/C**, and the sweep clock-skew
 verdict.

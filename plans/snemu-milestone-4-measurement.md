@@ -1,7 +1,8 @@
 # snemu milestone 4 — the measurement spine
 
-**Status (2026-07-17): PARTIAL — steps 2/3/4 shipped, step 5 shipped in substance,
-steps 6 and 7 not built. Step 1 deferred.**
+**Status (2026-08-27)**: 🟡 **PARTIAL — steps 2/3/4 shipped, step 5 shipped in
+substance, steps 6 and 7 not built. Step 1 deferred.** Verified against the tree:
+no dashboard exists in `snemu/` or `xtask-snemu/` (step 6).
 
 - **Step 5 — hot-block/dispatch profiling: shipped as `cargo xtask snemu-profile`**
   (`xtask/src/snemu_profile.rs`), though not under this plan's name. It is a **per-PC**

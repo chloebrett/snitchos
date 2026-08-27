@@ -1,6 +1,6 @@
 # Porting SnitchOS to the VisionFive 2 (StarFive JH7110)
 
-**Status:** 🎉 **M1 FIRST LIGHT ACHIEVED ON HARDWARE — 2026-07-24.** SnitchOS boots
+**Status (2026-08-27)**: 🎉 **M1 FIRST LIGHT ACHIEVED ON HARDWARE — 2026-07-24.** SnitchOS boots
 on the VisionFive 2, brings up all four U74s, realises userspace, and heartbeats.
 All four blockers shipped and are now **hardware-proven**, not just QEMU-green:
 **B4 (console) ✓, B1 (SBI timer) ✓, B6 (multi-hart) ✓, B2 (RAM base) ✓.**

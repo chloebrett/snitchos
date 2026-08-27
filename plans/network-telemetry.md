@@ -1,6 +1,6 @@
 # Plan: Network telemetry (M2.5 — UDP frame transport)
 
-**Status**: 🟡 **PRs 1–7 SHIPPED and gate-green; PR 8 (the JH7110 GMAC driver) is all
+**Status (2026-08-27)**: 🟡 **PRs 1–7 SHIPPED and gate-green; PR 8 (the JH7110 GMAC driver) is all
 that remains — and it is its own project, not a step here.**
 **Design**: [docs/network-telemetry-design.md](../docs/network-telemetry-design.md)
 **Milestone**: M2.5 in [plans/visionfive2-port.md](visionfive2-port.md)

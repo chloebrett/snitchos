@@ -1,7 +1,7 @@
 # Userspace runtime maturity — alloc → `main()` → growable heap → std
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md)
-**Status (2026-07-17): steps 1–3 SHIPPED; 4a in progress; 4 is the north star.**
+**Status (2026-08-27)**: **Steps 1–3 SHIPPED; 4a in progress; 4 is the north star.**
 This plan is **live** — `user/std/src/lib.rs` names it as the tracker for what's
 left of std, so it should not be retired while that pointer stands.
 

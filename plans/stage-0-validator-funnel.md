@@ -1,6 +1,6 @@
 # Stage 0 — the validator funnel (TDD plan)
 
-**Status:** 🟡 **PARTLY DELIVERED — the funnel is built and in daily use; the diversity
+**Status (2026-08-27)**: 🟡 **PARTLY DELIVERED — the funnel is built and in daily use; the diversity
 and augmentation half is not.** Stage 0 of the bootstrap table in
 [../docs/generative-ladder.md](../docs/generative-ladder.md). Pure host work, no
 model calls, no GPU: the harness that decides whether a generated candidate is a

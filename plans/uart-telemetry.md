@@ -1,6 +1,6 @@
 # Plan: B3 — Telemetry over UART (M2)
 
-**Status**: 🟡 **Steps 0–4, 6, 8, 9, 10a and 10b are landed and gate-green — but
+**Status (2026-08-27)**: 🟡 **Steps 0–4, 6, 8, 9, 10a and 10b are landed and gate-green — but
 Step 10b is NOT yet verified against the board, so B3 is not done.** The remaining
 work is one hardware run (see 10b), then Step 5b (interactive relay); Step 7
 (programming the baud) is deferred as optional headroom — Step 6 measured

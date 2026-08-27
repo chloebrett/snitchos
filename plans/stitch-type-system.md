@@ -1,6 +1,6 @@
 # Plan: Stitch type system (bidirectional, gradual)
 
-**Status**: Active — **Stage 6 (capabilities-as-effects) complete; generics are
+**Status (2026-08-27)**: Active — **Stage 6 (capabilities-as-effects) complete; generics are
 what's left.** Done: Stage 1 (skeleton + nominal checks), Stage 2 (exhaustive
 `match`), Stage 3 (`@` self-type), method-body checking, Stage 5 (contract
 subtyping), Stage 4's G1–G2 (type-argument annotations, generic constructor

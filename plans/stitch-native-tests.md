@@ -1,6 +1,6 @@
 # Native Stitch tests (TDD plan)
 
-**Status:** 🟡 **Increments 1–8 DONE (2026-07-26 → 07-29). Increment 9 is all
+**Status (2026-08-27)**: 🟡 **Increments 1–8 DONE (2026-07-26 → 07-29). Increment 9 is all
 that remains.** Implements
 [../docs/stitch-testing-design.md](../docs/stitch-testing-design.md): `test` and
 `expect` as structural keywords, the runner, and the migration of the suites

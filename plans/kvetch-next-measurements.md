@@ -1,6 +1,6 @@
 # Plan: kvetch — what the nats actually buy
 
-**Status**: Active
+**Status (2026-08-27)**: 📐 **Active — none of the 7 steps is marked done.**
 
 ## Goal
 
