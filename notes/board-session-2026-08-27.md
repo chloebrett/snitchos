@@ -51,7 +51,7 @@ Root cause, verified rather than inferred:
   the "long ethernet cable" carries the *board*, not the Mac.
 - `en0`'s permanent MAC is `bc:d0:74:08:62:fd`, but the address **in use** is
   `96:5f:c7:25:91:03` — locally-administered, i.e. **Private Wi-Fi Address is on**
-  for SSID `coogee flip flops 🌊`.
+  for home wifi ssid.
 
 That is the whole mechanism: a DHCP reservation cannot pin a rotating MAC, so
 `serverip=192.168.0.7` was correct when written and became wrong without any
@@ -135,10 +135,31 @@ Awaiting a power cycle.
 
 ## Follow-ups for a desk session (no board needed)
 
-- Turn **off** Private Wi-Fi Address for `coogee flip flops 🌊`, then pin the
-  DHCP reservation to `bc:d0:74:08:62:fd` and restore `serverip=192.168.0.7`.
-  Until then `bootcmd` hardcodes today's address and will drift again.
-- Correct item 1's status in `docs/next-board-session.md` — it is provisioned.
+- ~~Turn **off** Private Wi-Fi Address for network, then pin the
+  DHCP reservation to `bc:d0:74:08:62:fd` and restore `serverip=192.168.0.7`.~~
+  **Done 2026-08-28, by a better route than this note proposed.** Private Wi-Fi
+  Address was set to **Fixed** rather than off, and the DHCP reservation pinned to
+  the resulting stable per-SSID MAC (`96:5f:c7:25:91:03`). `en0` holds
+  `192.168.0.7/24` — a real lease, not the `/32` alias, since only one `inet` line
+  is present.
+
+  **Correcting this session's own diagnosis:** the notes above conclude "Private
+  Wi-Fi Address is on" and treat that as the fault. The fault was **rotation**, not
+  privacy — macOS offers Off / Fixed / Rotating, and Fixed gives a locally-
+  administered MAC that is stable per SSID, which a reservation *can* pin. So the
+  fix keeps the privacy feature and needs neither the permanent MAC nor turning
+  anything off. (A first pass at this update mis-read `ifconfig` still showing a
+  locally-administered MAC as "the change hasn't applied yet" — under Fixed that is
+  the expected steady state.)
+
+  Residual, and genuinely small: the MAC is per-SSID, so another network needs its
+  own reservation; and `serverip` is still hardcoded in `bootcmd`, so a network
+  change still drifts. The `ifconfig alias` remains the fallback that depends on
+  neither router nor UART.
+- ~~Correct item 1's status in `docs/next-board-session.md` — it is provisioned.~~
+  **Done 2026-08-28.** Item 1 now records the saved environment verbatim, the three
+  U-Boot facts (`dhcp` overwrites `serverip`; `dhcp` does not set `ipaddr`; `md.l`
+  counts are hex), and the drift hazard with its ICMP signature.
 - Add input echo-to-stderr (below), plus optional `exec --input-file`.
 
 ## Board liveness settled by tcpdump — the UART is the only fault

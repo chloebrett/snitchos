@@ -45,37 +45,69 @@ is exclusive and will make a working setup look dead.
 
 ---
 
-## 1. Provision zero-touch netboot (one U-Boot session)
+## 1. Provision zero-touch netboot — ✅ DONE 2026-08-27
 
-⏳ **Written down, never run.** Nobody has typed this at the board — do not assume
-the environment is provisioned. A downstream plan once assumed it was, and the
-wrong assumption propagated.
+**This item used to say "written down, never run". That was false**, and finding
+out cost the first hour of the 2026-08-27 session. The environment was already
+provisioned, in a *better* form than this file recorded — and both parser traps
+warned about below had already been avoided.
 
-Do this **first**, before anything else, because it makes every later item in this
-list cheap: after it, `cargo xtask image` → reset → fresh kernel, with no typing.
-Items 3 and 4 below are many flash-reset cycles each, and they are the reason this
-goes first rather than last.
-
-With the Mac's IP pinned by DHCP reservation (`192.168.0.7`):
+The saved environment, as `printenv` reports it:
 
 ```
-setenv serverip 192.168.0.7
-setenv bootdelay 3
-setenv bootcmd 'dhcp; tftpboot 0x40200000 snitchos.img; booti 0x40200000 - ${fdtcontroladdr}'
-saveenv
+bootcmd=dhcp; setenv serverip 192.168.0.7; tftpboot 0x40200000 snitchos.img; cp.b ${fdtcontroladdr} 0x46000000 0x100000; booti 0x40200000 - 0x46000000
+bootdelay=2
+serverip=192.168.0.7
 ```
 
-**Then verify with `printenv bootcmd` before trusting it.** Two parser-dependent
-things fail silently here, and both look like a successful `setenv` right up until
-the next reset:
+Verified end to end: `run bootcmd` → DHCP → TFTP (1778208 bytes, an exact match for
+the local image) → `booti` → banner, 4 U74 harts, 85+ heartbeats. `saveenv`
+persisted. **`cargo xtask image` → reset → fresh kernel now needs no typing.**
 
-- **`${fdtcontroladdr}` must be stored literally, not expanded.** It resolves at
-  boot time, not at `setenv` time. If `printenv` shows an address where the
-  literal should be, the quotes did not protect it — re-set with
-  `\${fdtcontroladdr}`.
-- **The semicolons must survive as one string.** Whether `'…'` groups the chain
-  depends on whether this U-Boot was built with the hush parser or the simple one.
-  `printenv` shows whether the whole chain landed in one variable.
+Three U-Boot facts that cost time and are worth keeping:
+
+- **`dhcp` overwrites `serverip`** with the DHCP server (the router). That is why
+  the saved `bootcmd` orders it `dhcp` *then* `setenv serverip` — the sequence is
+  load-bearing, not stylistic.
+- **`dhcp` does not set `ipaddr`** in this U-Boot (2025.10, lwIP-based); it binds
+  the lease internally, so a stale `ipaddr` never refreshes and must be *deleted*.
+  It is cosmetic — `our IP address is <NULL>` still transfers fine. It looked like
+  the fault and was not.
+- **`md.l <addr> 16` dumps 22 words** — U-Boot parses the count as hex.
+
+### ⚠ What can still break it: `serverip` drift
+
+The one hazard that remains, and it is not hypothetical — it *did* break, silently,
+between sessions. `serverip` is hardcoded in the saved `bootcmd`, so it is only
+correct while the Mac actually holds that address.
+
+**Fixed 2026-08-28.** Private Wi-Fi Address is set to **Fixed** — a
+locally-administered MAC that is *stable per SSID* (`96:5f:c7:25:91:03` here) — and
+the router's reservation is pinned to that. Verified: `en0` holds `192.168.0.7/24`,
+matching the saved `serverip`, and it survives rejoins without exposing the
+permanent MAC.
+
+The distinction is **Fixed vs Rotating**, not private vs not: a locally-administered
+MAC in `ifconfig` is the expected steady state here, not a warning sign. Rotation
+was what broke the original setup; Fixed removes it.
+
+Still true, and the reason to keep checking: the MAC is **per-SSID**, and `serverip`
+is hardcoded in the saved `bootcmd`, so a *different network* still drifts.
+
+**Before booting, check `ipconfig getifaddr en0` agrees with the board's saved
+`serverip`.** If it does not, the fix that needs no router and no working UART:
+
+```
+sudo ifconfig en0 alias 192.168.0.7 255.255.255.255
+```
+
+Make the Mac answer where the board already looks, rather than editing `bootcmd`.
+
+**How the drift presents**, so it is recognisable rather than mysterious: TFTP fails
+with repeated `ICMP destination unreachable (port unreachable)`. That message is
+itself evidence the Mac *received* the datagram and had no listener — so it also
+catches the second failure this session hit, a `dnsmasq` left running since 11 Aug
+bound to addresses that no longer existed. `sudo pkill dnsmasq` and restart it.
 
 Full context: [../plans/visionfive2-port.md](../plans/visionfive2-port.md),
 *Making netboot zero-touch*.

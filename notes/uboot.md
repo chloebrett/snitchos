@@ -44,7 +44,10 @@ macOS's built-in `tftpd` is the other option, but it serves `/private/tftpboot` 
 nothing else — the image has to be copied there every build, which is why this note
 uses dnsmasq.
 
-U-Boot, from fresh:
+U-Boot, from fresh. Note `dhcp` **overwrites** `serverip` with the router's
+address, so the `setenv` must come after it — the order is load-bearing. Check
+`ipconfig getifaddr en0` still says `.7` first; it has drifted before (see
+[board-session-2026-08-27.md](board-session-2026-08-27.md)).
 ```
 dhcp
 setenv serverip 192.168.0.7
