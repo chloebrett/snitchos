@@ -86,6 +86,7 @@ Kernel internals (read before touching the matching code):
 ## Designed, not built
 
 - [Manifest](manifest-design.md) — the authority-description language. The highest-fan-out unbuilt design.
+- [kitsch](kitsch-design.md) — the desktop. A window is a process, a surface is a capability, wiring two windows together *is* granting one. → [../plans/kitsch-v1.md](../plans/kitsch-v1.md)
 - [Shell surface & TUI](shell-surface-and-tui-design.md) · [Shell primitives](shell-primitives-design.md) · [stim](stim-design.md) — the editor.
 - [Userland text streams & the actor model](userland-text-streams-and-the-actor-model-design.md) — typed pipes; foundations shipping.
 - [Accounts & login](accounts-and-login-design.md) · [Clipboard](clipboard-design.md) · [Physics desktop](physics-desktop-design.md) · [Grafana capture](grafana-capture-design.md)

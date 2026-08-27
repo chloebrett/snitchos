@@ -1,7 +1,15 @@
 # Design: the physics desktop
 
-**Status**: Vision / design note (unbuilt). A candidate showcase feature that falls
-out of the OS's existing convictions rather than a new mechanism. Depends on the
+**Status**: Vision / design note — **parked (2026-08-27).** The desktop direction is
+now [kitsch](kitsch-design.md), which takes the display, input and authority story
+in a more legible direction and explicitly declines a physics engine. The ideas here
+that survived arrive there without a solver: authority as geometry became
+drop-target highlighting, and visible backpressure became wire activity. Kept
+unarchived because the *mapping* below is still the most interesting thing anyone
+has proposed for this screen, and the ASCII spike remains cheap if it is ever wanted.
+
+Originally: a candidate showcase feature that falls out of the OS's existing
+convictions rather than a new mechanism. Depends on the
 [framebuffer milestone](framebuffer-design.md) as a hard prerequisite — a screen has
 to exist before objects can live on it.
 

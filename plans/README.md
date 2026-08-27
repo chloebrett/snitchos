@@ -19,7 +19,7 @@ the first is work in progress:
 | Bucket | Count | What it means |
 |---|---|---|
 | [In flight](#in-flight) | 17 | Real work, partially done. |
-| [Not started](#not-started) | 5 | Written down, zero code. A plan is cheap; that's deliberate. |
+| [Not started](#not-started) | 6 | Written down, zero code. A plan is cheap; that's deliberate. |
 | [Done bar a detail](#done-bar-a-detail) | 1 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
 
@@ -59,6 +59,7 @@ Written down, nothing built. Ordered roughly by what unblocks what:
 | Plan | What it is |
 |---|---|
 | [board-image-opt-level.md](board-image-opt-level.md) | Debt #19: the board image's opt level |
+| [kitsch-v1.md](kitsch-v1.md) | The desktop: surfaces as caps, cell-mode tiling on real pixels ([../docs/kitsch-design.md](../docs/kitsch-design.md)). Increment 0 is four numbers; increment 1 is memory-object capabilities, which several other things want |
 | [vf2-display.md](vf2-display.md) | JH7110 DC8200/HDMI — capture a vendor MMIO trace and replay it |
 | [corpus-mvp-spike.md](corpus-mvp-spike.md) | Increment 0 of corpus-mvp: a decision and four numbers, not code |
 | [stim-grammar.md](stim-grammar.md) | Post-v1 grammar follow-up for stim |
