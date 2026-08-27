@@ -19,7 +19,7 @@ the first is work in progress:
 | Bucket | Count | What it means |
 |---|---|---|
 | [In flight](#in-flight) | 16 | Real work, partially done. Only ~9 have moved this month. |
-| [Not started](#not-started) | 6 | Written down, zero code. A plan is cheap; that's deliberate. |
+| [Not started](#not-started) | 7 | Written down, zero code. A plan is cheap; that's deliberate. |
 | [Done bar a detail](#done-bar-a-detail) | 1 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
 
@@ -62,6 +62,7 @@ Written down, nothing built. Ordered roughly by what unblocks what:
 | [corpus-mvp-spike.md](corpus-mvp-spike.md) | Increment 0 of corpus-mvp: a decision and four numbers, not code |
 | [stim-grammar.md](stim-grammar.md) | Post-v1 grammar follow-up for stim |
 | [open-sourcing-extractables.md](open-sourcing-extractables.md) | Which pieces could stand alone outside the repo |
+| [tour-v1.md](tour-v1.md) | The tour's tracer chapter: prose beside a live guest, its claims gated |
 
 ## Done bar a detail
 
