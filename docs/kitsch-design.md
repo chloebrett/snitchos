@@ -687,7 +687,21 @@ they are not re-litigated.
   the implementation (§5).
 - **No pointer in v1** — the model covers it, milestone 1 is keyboard-only. Tiling
   is chosen partly because it is drivable with the input that exists.
-- **No programmable effects.** A fixed enum; shaders are a different conversation.
+- **No effects code running inside kitsch.** The enum (greyscale, dim, tint) is
+  fixed and kitsch-implemented. What is excluded is *foreign code in the
+  compositor's address space* — a client-supplied shader executed by the process
+  holding the scanout cap and read caps on every surface would be the most
+  over-privileged thing on the machine, which is a worse objection than the (also
+  disqualifying) cost of an interpreter per pixel.
+
+  **This is not "effects can never be extended".** The extensible form already has a
+  shape here: an effect is a **process holding an insert** on a surface — read the
+  content, write it back transformed — cap-mediated and sandboxed by being a
+  separate address space, exactly the mechanism §6 defines for IMEs and agents.
+  Colour-blindness filters, a redaction filter that blurs credential fields, an
+  overlay highlighting what an agent is reading: all want to be programs held by
+  processes. On cells (~7,200) rather than pixels (~921,600) that is roughly 100×
+  off budget rather than 10,000×, so it is deferred on cost, not ruled out.
 - **No split-tree layout in v1** — master-stack first, and both fit
   `fn layout(&Tree, Rect) -> Vec<(WindowId, Rect)>`, so split-tree is additive.
 - **No shared mixing engine with `glitch`** — shared vocabulary, not shared code
