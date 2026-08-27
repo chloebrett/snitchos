@@ -1,6 +1,7 @@
 # Plan: a native JH7110 display driver for the VisionFive 2
 
-**Status:** Proposed — nothing built. Supersedes the "Not planned — framebuffer"
+**Status (2026-08-27)**: 📐 **Proposed — nothing built** (verified: no DC8200/HDMI
+code in `kernel/` or `kernel-devices/`). Supersedes the "Not planned — framebuffer"
 line in [visionfive2-port.md](visionfive2-port.md#dropped-for-now--framebuffer-fw_cfg--ramfb).
 
 ## Why this is in scope after all

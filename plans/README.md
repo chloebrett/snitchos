@@ -18,8 +18,8 @@ the first is work in progress:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| [In flight](#in-flight) | 15 | Real work, partially done. Only ~9 have moved this month. |
-| [Not started](#not-started) | 7 | Written down, zero code. A plan is cheap; that's deliberate. |
+| [In flight](#in-flight) | 17 | Real work, partially done. |
+| [Not started](#not-started) | 5 | Written down, zero code. A plan is cheap; that's deliberate. |
 | [Done bar a detail](#done-bar-a-detail) | 1 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
 
@@ -32,9 +32,11 @@ Recently active — the board/network cluster is the current front:
 | [visionfive2-port.md](visionfive2-port.md) | The VF2 hardware port, M0–M4 | M1 achieved on hardware; **M3 shipped** (B6 ✓, all four U74s). M0 bar the TFTP loop. **M2 is code-complete but board-unverified** (uart step 10b), **M2.5** waits on the GMAC, **M4** (B5, DTB-driven MMIO) deferred — `collect_mmio_regions` still parked |
 | [uart-telemetry.md](uart-telemetry.md) | Frames off the board over a physical UART (M2) | Steps 0–4, 6, 8, 9, **10a and 10b all landed and gate-green**. The critical path is now **one hardware run** to verify 10b — until it passes, B3/M2 are not done; 5b (interactive relay) follows; step 7 deferred |
 | [network-telemetry.md](network-telemetry.md) | Telemetry over UDP (M2.5) | PRs 1–7 shipped and gate-green. **PR 8 is the GMAC driver** — its own plan, below |
-| [board-bridge.md](board-bridge.md) | Letting an agent drive the real board | **Step 1 done** — `xtask-board` + `reach.rs` (the failure taxonomy) exist; no `board` subcommand wired up yet, so steps 2–9 are open. Two phases: host bridge (1–6b) then ESP32 transport (7–9). **On the critical path** — [vf2-gmac-driver.md](vf2-gmac-driver.md) names both phases as prerequisites |
+| [board-bridge.md](board-bridge.md) | Letting an agent drive the real board | **Steps 1–2 done** — `xtask-board` carries `reach.rs` (failure taxonomy) and `stop.rs` (stop-condition evaluator), both pure host logic; no `board` subcommand wired up yet, so steps 3–9 are open. Two phases: host bridge (1–6b) then ESP32 transport (7–9). **On the critical path** — [vf2-gmac-driver.md](vf2-gmac-driver.md) names both phases as prerequisites |
 | [kvetch-next-measurements.md](kvetch-next-measurements.md) | What the ladder's nats actually buy | 7 steps, none done. Answers the batch11 gap: a 0.43-nat gain showed **no** perceivable output difference |
 | [stitch-native-tests.md](stitch-native-tests.md) | `test "…" { expect … }` in Stitch | **8 of 9 done.** Increment 9 only: tests never run on target |
+| [vf2-gmac-driver.md](vf2-gmac-driver.md) | The JH7110 GMAC driver (M2.5) | **Started** — `kernel-devices/src/gmac.rs` has the pure register model; no kernel MMIO glue yet. **Not a small one**: the plan calls it "the monster — weeks", bigger than the rest of the port combined. Phase 0's desk half is done ([../docs/vf2-gmac-design.md](../docs/vf2-gmac-design.md)); five board-side checks remain. **Gated on [board-bridge.md](board-bridge.md)** |
+| [tour-v1.md](tour-v1.md) | The tour's tracer chapter: prose beside a live guest | **Started** — the `tour` crate owns the chapter schema + anchor predicate, host-tested and linked into `snemu-wasm`. Prose, chapters and the gate assertions remain |
 | [glitch-v2-async-ring.md](glitch-v2-async-ring.md) | The async audio RT ring | Increments 1–5 shipped; **the XRun observable is armed and proven firing** (2026-08-25, inc 9's prerequisite). **6–9 remain** — mixing, init-delegated AudioSink, snemu PCM capture, the last two acceptance itests |
 
 Parked — nothing since mid-July:
@@ -56,13 +58,11 @@ Written down, nothing built. Ordered roughly by what unblocks what:
 
 | Plan | What it is |
 |---|---|
-| [vf2-gmac-driver.md](vf2-gmac-driver.md) | The JH7110 GMAC driver. The single *item* between network-telemetry and done, but **not a small one** — the plan calls it "the monster — weeks", bigger than the rest of the port combined. **Phase 0's desk half is done** ([../docs/vf2-gmac-design.md](../docs/vf2-gmac-design.md) — register map, GMAC1-over-GMAC0, no RX ring, IO-coherent so no cache layer); what's left of Phase 0 is five board-side checks. Steps 5–7's sketches are now a six-rung tracer-bullet ladder. **Gated on [board-bridge.md](board-bridge.md)** — a deliberate 2026-08-25 sequencing call |
 | [board-image-opt-level.md](board-image-opt-level.md) | Debt #19: the board image's opt level |
 | [vf2-display.md](vf2-display.md) | JH7110 DC8200/HDMI — capture a vendor MMIO trace and replay it |
 | [corpus-mvp-spike.md](corpus-mvp-spike.md) | Increment 0 of corpus-mvp: a decision and four numbers, not code |
 | [stim-grammar.md](stim-grammar.md) | Post-v1 grammar follow-up for stim |
 | [open-sourcing-extractables.md](open-sourcing-extractables.md) | Which pieces could stand alone outside the repo |
-| [tour-v1.md](tour-v1.md) | The tour's tracer chapter: prose beside a live guest, its claims gated |
 
 ## Done bar a detail
 
@@ -103,7 +103,20 @@ Living documents that happen to live here. They will never be archived:
    historical finding is correct as written; don't rewrite it.
 6. `cargo xtask links` to confirm.
 
-Then update this index — which is the one step nothing checks. **This file goes stale
-the same way the individual status headers do.** Generating it from the headers
-(and failing the gate on drift, as `docs/generated/` already does) is the obvious
-fix, and needs the headers to share a parseable convention first.
+Then update this index. **Two of those steps are now gated**, by `cargo xtask
+plan-status` (inside `cargo xtask test`, beside `links` and `counters`):
+
+- every plan carries a **dated** `**Status (YYYY-MM-DD)**:` header, and
+- every plan is linked from this file — so an archive that forgets step 2, or a
+  new plan nobody indexed, fails the gate instead of going quiet.
+
+Run it alone for a staleness readout: it prints every plan sorted by status date,
+oldest first. It deliberately does **not** fail on age — a gate that reddens by
+the passage of time gets ignored, and the only way to green it without doing the
+work would be to lie about the date, corrupting the one signal the convention
+carries.
+
+**What is still unchecked is the prose in the tables above** — the "State" column
+is human judgement no parser can derive from a status header, and it goes stale
+the same way it always did. The date beside each plan is what tells you how far
+to trust it.

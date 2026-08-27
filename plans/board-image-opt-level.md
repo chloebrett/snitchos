@@ -1,6 +1,7 @@
 # Plan: `cargo xtask image --opt` — optimized board images
 
-**Status**: 📐 PLAN — not started
+**Status (2026-08-27)**: 📐 **PLAN — not started.** Verified: the opt-level-1
+pin for the embedded userspace is still in `kernel/build.rs`.
 
 ## Goal
 

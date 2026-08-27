@@ -1,6 +1,11 @@
 # Plan: the JH7110 GMAC driver — `NetDevice` on real hardware
 
-**Status**: 📐 **NOT STARTED.** Phase 0's *desk* half is now done — see the design
+**Status (2026-08-27)**: 🚧 **STARTED — the pure register model has landed.**
+`kernel-devices/src/gmac.rs` (144 lines) transcribes the dwmac-5.20 register
+layout from mainline, in the same pure-`Op` shape as `syscrg.rs`. There is **no
+kernel MMIO glue yet** — `kernel/src/device/gmac.rs`, which its doc comment
+names, does not exist — so nothing has touched a board.
+Phase 0's *desk* half is done — see the design
 note — which closes three open questions, retires a risk nobody had asked about
 (DMA coherency), and replaces the step 5–7 sketches with a six-rung tracer-bullet
 ladder. What remains of Phase 0 is board-side and cheap.

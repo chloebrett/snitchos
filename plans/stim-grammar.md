@@ -1,6 +1,7 @@
 # Design: the stim grammar
 
-**Status**: Design (post-v1 follow-up). Phases below are the natural commit/review
+**Status (2026-08-27)**: 📐 **Design (post-v1 follow-up) — nothing built.** Gated
+on [stim-v1.md](stim-v1.md). Phases below are the natural commit/review
 milestones; not all will be built, and the later ones are gated on other axes landing.
 
 ## The insight

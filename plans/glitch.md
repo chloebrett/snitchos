@@ -1,6 +1,6 @@
 # `glitch` — the userspace audio server (v1)
 
-**Status:** ✅ **v1 COMPLETE — all eight increments done, and the in-kernel beep retired.**
+**Status (2026-08-27)**: ✅ **v1 COMPLETE — all eight increments done, and the in-kernel beep retired.**
 `Object::AudioSink` + `Rights::AUDIO` + `authorize_audio`, the `AudioWrite` syscall +
 cap-gated handler + `pwmdac::play_samples`, the `glitch-proto` `Play`/`Reply` codec, the
 extracted `synth` crate (5a — `user/` no longer depends on `kernel-devices`), the server,

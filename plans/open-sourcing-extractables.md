@@ -1,6 +1,7 @@
 # Open-sourcing SnitchOS extractables
 
-Status: proposal / planning. No code changes yet.
+**Status (2026-08-27)**: 📐 **Proposal / survey — nothing extracted.** No crate
+here has been split out to a standalone repo.
 
 SnitchOS is a learning project, but several pieces inside it have grown
 into things with standalone value. This plan inventories every credible

@@ -1,6 +1,6 @@
 # Corpus MVP — Increment 0, the spike
 
-**Status: 📐 PLAN — not started.** Increment 0 of
+**Status (2026-08-27)**: 📐 **PLAN — not started.** Increment 0 of
 [corpus-mvp.md](legacy/corpus-mvp.md). Related:
 [corpus-recipe-axes.md](corpus-recipe-axes.md) (the recipes used below),
 [../docs/language-design.md](../docs/language-design.md) (source for the

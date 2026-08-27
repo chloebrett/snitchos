@@ -1,6 +1,9 @@
 # Plan: A Tour of SnitchOS — the tracer chapter
 
-**Status:** 📝 **PLANNED — not started.** Written 2026-08-27.
+**Status (2026-08-27)**: 🚧 **STARTED — the chapter schema exists.** Written
+2026-08-27; the `tour` crate (`tour/src/{lib,anchor,search}.rs`) now owns the
+chapter schema and the anchor predicate, host-tested and linked into
+`snemu-wasm` so the browser stops at the frame the gate asserts at.
 
 Implements stage 3 of [../docs/tour-and-user-docs-design.md](../docs/tour-and-user-docs-design.md)
 (snapshot-pinned chapters + the CI contract), with two of that design's calls
