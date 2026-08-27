@@ -79,6 +79,38 @@ Stitch generation will never produce that. Pretraining is not an optimisation he
 is the difference between cliché/ballad/saga being trainable and being shapes we can
 allocate but not fill.
 
+### Prior art
+
+Both halves of this are trodden ground; the combination at this scale is not.
+
+- **TinyStories** (Eldan & Li, 2023, arXiv 2305.07759 — already cited by
+  [../docs/prattle-design.md](../docs/prattle-design.md)). The narrow-distribution
+  half: 1M–33M models produce fluent coherent English when the *distribution* shrinks
+  rather than the job. This is the evidence that TinyNerd is a shape that works at
+  drivel/quip size.
+- **phi-1 — "Textbooks Are All You Need"** (Gunasekar et al., 2023), plus phi-1.5 /
+  phi-2. The closest prior art to this plan: a 1.3B model trained on *synthesized
+  textbook-quality prose interleaved with code*, beating models ~10× larger on
+  HumanEval. Its headline claim is this plan's params argument — curated data buys an
+  order of magnitude of parameters.
+- **Domain-adaptive pretraining** ("Don't Stop Pretraining", Gururangan et al., 2020).
+  The staged half: general → continued pretraining on domain text → task, paying even
+  when the domain corpus is small. At ~110M BERT scale, not 1M.
+
+**What has no precedent I can find** is the cell this project is in: sub-100M params,
+synthetic technical English as the pretrain, fine-tuned onto a language with **zero
+presence in the wild**. Every code-LM result above benefits from the target language
+being all over GitHub — the model arrives already knowing Python. Stitch has ~292 KB
+of real code in existence. That is why the tok/param table bites as hard as it does,
+and it is the reason the step-3 gate exists rather than an appeal to precedent.
+
+Likewise unstudied at this scale: **comment↔code binding**, step 7's question.
+TinyStories says 1M buys grammar; nothing says what it costs to align a prose span
+with the code span beneath it.
+
+⚠️ **These citations are from memory, offline, and unverified — check them before
+leaning on any of it.** Newer work almost certainly exists.
+
 ### Two divergences to settle first
 
 **`generative-ladder.md` describes a loss mask that does not exist.** Lines 51 and
@@ -204,6 +236,20 @@ gate.** If code-token NLL does not move, stop here and record the negative resul
 steps 4–7 are days of generation compute.
 
 ### Step 4: Specify the TinyNerd corpus
+
+**Read phi-1's data-synthesis methodology first.** "Textbooks Are All You Need"
+(Gunasekar et al., 2023) is the nearest published attempt at exactly this artifact —
+synthesized textbook-quality prose built to train a code model — and it is the one
+piece of prior art likely to *change what this step writes* rather than merely
+justify it. Specifically: how they enforced topic/vocabulary diversity without
+hand-listing domains (the failure mode this step's exclusion list courts), how they
+interleaved prose with code rather than keeping them in separate files, what their
+filtering/classifier stage rejected, and what diversity collapse looked like when
+generating at volume from one model. batch9 already hit the volume-diversity problem
+from the other side — 45 degenerate files, repetition pathologies — so this is a known
+sharp edge here, not a hypothetical. **Do not write the recipe before reading it**;
+budget a literature pass as part of this step, and record what was adopted and what
+was deliberately not.
 
 **Acceptance criteria**: A recipe in the shape of `batch9.toml`
 (`cram-gen/src/recipe.rs`) that pins: a controlled core vocabulary target (~1 500

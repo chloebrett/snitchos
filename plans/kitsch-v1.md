@@ -48,10 +48,35 @@ both directions.
 
 #### Findings so far (2026-08-27)
 
-**(4) Resolution: already decided — 1024×768 XRGB8888**, no row padding, exactly
-3 MiB / 768 frames, mapped at `FB_VA_BASE` (root PTE slot 258). Shipped in
-`kernel/src/device/ramfb.rs`. At 8×16 that is a **128×48 cell grid**, which is a
-good desktop. No decision needed; inherited.
+**(4) Resolution: changed to 1280×720 XRGB8888** (was 1024×768 — an arbitrary pin,
+which `docs/framebuffer-design.md` explicitly said to revisit). No row padding,
+3,600 KiB, exactly **900 frames**, mapped at `FB_VA_BASE` (root PTE slot 258). At
+8×16 that is a **160×45 cell grid**.
+
+The first reason is aesthetic and that is fine: **4:3 looks wrong on every monitor
+made this century**, and the desktop is a thing people look at. Three more that
+happen to agree: 720p is a standard CEA mode a real HDMI sink will accept, which the
+VF2 display driver will need; its bytes divide evenly into frames; and **160 columns
+is exactly two 80-column panes**, where 1024's 128 splits into a cramped 64+64.
+
+Rejected, with numbers, in case the blit cost ever forces a smaller mode:
+
+| | pages | cols × rows @8×16 | blit | real mode? |
+|---|---|---|---|---|
+| 960×540 | 506.25 ✗ | 120 × 33.75 ✗ | 5.70M | no |
+| 854×480 (FWVGA) | 400.31 ✗ | 106.75 ✗ × 30 | 4.51M | video, not display |
+| **1024×576** | **576 ✓** | **128 × 36 ✓** | 6.49M | no |
+| **1280×720** | **900 ✓** | **160 × 45 ✓** | 10.14M | **yes** |
+
+**1024×576 is the fallback** if 720p proves too expensive — clean on every axis,
+exactly 16:9, 36% cheaper — and its only flaw (not a standard display mode) costs
+nothing under snemu. Nothing in the design depends on the choice.
+
+**Landed 2026-08-27**, with a bug fixed on the way: `FRAMES` was
+`SIZE_BYTES / FRAME_SIZE`, truncating division, so any mode whose bytes did not fill
+whole pages would have under-allocated and left the device DMA-ing past the
+allocation. Now `kernel_devices::ramfb::frames_needed`, host-tested on both the
+ragged and exact cases. Gate: 132/132 itests plain **and** `--scramble`.
 
 **(1) Full-screen blit: 8.65M guest instructions.** Measured by disassembling the
 emitted riscv code rather than by timing — a claim about what a compiler emits is

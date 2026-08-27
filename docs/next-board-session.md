@@ -143,34 +143,90 @@ not inherit it.
 
 ---
 
-## 4. GMAC Phase 0 — five board-side checks
+## 4. GMAC Phase 0 — boot the probe, then three DTB questions
 
 From [../plans/vf2-gmac-driver.md](../plans/vf2-gmac-driver.md). The desk half of
-Phase 0 is done ([vf2-gmac-design.md](vf2-gmac-design.md) settles the register
-map, GMAC1-over-GMAC0, no RX ring, and IO-coherency). **Each of these is minutes,
-not days** — and answering them unblocks weeks of desk work on the driver.
+Phase 0 is done ([vf2-gmac-design.md](vf2-gmac-design.md) settles the register map,
+GMAC1-over-GMAC0, no RX ring, and IO-coherency), and **most of what used to be five
+manual checks is now one boot**: `workload=gmac-probe` reads the GMAC1, SYSCRG and
+`sys_syscon` registers and reports each over the UART.
+
+### 4a. Run the probe
+
+```
+setenv bootargs 'workload=gmac-probe'
+```
+
+then reset. (Until board-bridge step 6b lands, the workload rides `bootargs` and is
+typed by hand — `cargo xtask image` prints the line to retype. A bare reset picks up
+a fresh *image* but the *old* bootargs.)
+
+**Once step 6b lands this whole item collapses to one command** —
+`cargo xtask board boot --workload gmac-probe` — and at that point the item stops
+being an instruction to a human and becomes a script, or something an agent runs
+unattended. That is worth designing *for* rather than discovering later, so:
+
+> **The probe's output lines are a parse contract, not prose.** Every register
+> report is `gmac-probe: <region>.<label> = 0x<8 hex digits>`, every access is
+> preceded by `gmac-probe: read <region>.<label> @ 0x<addr>`, and the run is
+> bracketed by `gmac-probe: start` / `gmac-probe: done`. A missing `done` with a
+> trailing `read` line is the hang signature. Reword those lines and you break
+> whatever the bridge asserts on — the verdict sentences after them are free text
+> and safe to edit, the `key = value` lines are not.
+
+**Read the version line first.** The dump opens with
+
+```
+gmac-probe: core version 0x52 — expected dwmac-5.20; the rest of this dump can be believed
+```
+
+and if it says `NOT dwmac-5.20`, stop reading the rest — the base or the offset is
+wrong and every later word is noise. The `0x0110` version offset is transcribed from
+mainline and **has never been confirmed against a datasheet**, so a mismatch is at
+least as likely to be our transcription as the board's state.
+
+**⚠ This code has never run anywhere.** Nothing answers at `0x1604_0000` under QEMU
+or snemu, so unlike every other kernel path there is no emulated counterpart and no
+itest — its first execution is its first test. Two failure shapes to expect:
+
+| What you see | What it means |
+|---|---|
+| `read gmac1.version @ 0x16040110` and then **nothing** | Bus hang reading a gated peripheral. That is itself the answer to "is the clock ungated / megapage mapped" — and it is why the breadcrumb precedes the read. |
+| `version = 0x00000000` or `0xffffffff` | Reset still asserted, or wrong base. Both are refused by the self-check, so the dump will say so. |
+
+What it answers without any further typing: whether the megapage needs its own
+`insert` (old item 3), whether U-Boot ungated the clocks and released the resets,
+the `phy_intf_sel` field, the MDC divider in the MDIO CSR field, the station MAC
+address, and whether U-Boot left a TX descriptor ring behind (old item 5).
+
+### 4b. Still manual — three DTB questions
+
+The probe reads MMIO, not the device tree, so these stay hand-work this session:
 
 1. **Is `dma-noncoherent` absent from the board's *live* DTB?** One grep. Mainline
    says it is; confirm on the actual board. **If present, stop and re-scope** — the
    U74 has no `Zicbom`, so a cache-maintenance layer would be a different plan.
 2. **Which physical RJ45 is GMAC1?** Plug one jack and see which PHY links, or read
    U-Boot's `ethact`.
-3. **Does `0x1600_0000` need its own megapage `insert`?** Expected yes. Two-line
-   answer, needed before the first MMIO read.
-4. **Is there a PHY reset GPIO?** Not in the mainline VF2 DTS; check the board's
+3. **Is there a PHY reset GPIO?** Not in the mainline VF2 DTS; check the board's
    own DTB.
-5. **Does U-Boot leave anything usable behind?** Worth *measuring*, worth nothing
-   to plan around — inheriting U-Boot's framebuffer was already a dead end for the
-   display work. Its *source*, though, is a known-good sequence for this board.
+
+Capturing the live DTB (see below) answers 1 and 3 at the desk afterwards, so they
+never need the board twice.
 
 ---
 
 ## Why this order
 
-Item 1 makes 2–4 cheap, and 3–4 are cycle-heavy. Item 2 is the only one that closes
-a milestone, and it is a single boot. Items 3 and 4 are both "validate assumptions
+Item 1 makes 2–4 cheap, and 3 is cycle-heavy. Item 2 is the only one that closes a
+milestone, and it is a single boot. Items 3 and 4 are both "validate assumptions
 before building more on them," and both are cheap *per question* but only
 answerable here.
+
+Item 4 got much cheaper since this file was written — it used to be five manual
+checks and is now one boot plus three DTB greps. That is the probe doing its job:
+it exists to move questions off the board, and it did so before ever running on
+one. Which also means its own correctness is now the thing riding on this session.
 
 If the session is cut short, the priority is **1, then 2**. Item 1 pays for every
 future session; item 2 unblocks the port's headline milestone.
@@ -181,7 +237,10 @@ Board sessions end abruptly. Capture enough that the following desk session does
 not need the board again:
 
 - **The console transcript**, whole. Not the interesting part — the whole thing.
-- **The live DTB**, for item 4.1 and 4.4, so DTB questions never need the board twice.
+- **The `gmac-probe` dump specifically**, even if it looks like a hang. A dump that
+  stops after one breadcrumb is a *result*, and the last line names the register
+  that stopped it.
+- **The live DTB**, for items 4b.1 and 4b.3, so DTB questions never need the board twice.
 - **`printenv`** in full, once provisioned.
 - **The exact device path and baud** that worked.
 - **Which RJ45 linked**, and its PHY.

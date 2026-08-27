@@ -171,7 +171,9 @@ code for each step.
 **Acceptance criteria**: A Rust test in `xtask-itest` boots each manifest chapter under snemu, replays to its anchor, and asserts its claims against the decoded frames. Deliberately falsifying one claim turns `cargo xtask test` red with a message naming the chapter and the claim.
 **RED**: The test against the real chapter, plus a case proving a falsified claim fails.
 **GREEN**: The harness loop over chapters.
-**Note**: `cargo xtask test` already carries more than its name suggests — the loom checks, the generated-diagram drift, the doc links. This is the same kind of contract artifact; it belongs in the same gate.
+**Note**: the check runs inside **`cargo xtask itest`**, not the nextest phase, and the plan was wrong about this. A chapter check boots a kernel, and `cargo xtask test` is host checks — putting it there forced a riscv kernel build into the host phase (measured: 3 minutes on a cold tree) *before* `itest` has built anything. The repo's own shape says the same: the telemetry diagram targets are deliberately not `--check`-gated for exactly this reason. itest has already built the kernel, so the marginal cost is one boot. The gate is `test && itest && itest --scramble`, so "docs drift fails the gate" still holds.
+
+**And the boot must stop at the anchor, not at quiescence.** The first version reused `collect_frames_until_cap_quiescence` (what `diagram caps` uses) and took ~57M steps / ~64s — while the whole itest suite runs in 7s. A chapter's claims are read over the frames *up to its anchor*, so everything after it is wasted. `collect_frames_until` takes a stop predicate instead.
 **Done when**: As above.
 
 ### Step 7: The SPA shell routes, and back/forward works

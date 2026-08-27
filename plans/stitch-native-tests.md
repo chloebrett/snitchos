@@ -1,7 +1,8 @@
 # Native Stitch tests (TDD plan)
 
-**Status (2026-08-27)**: 🟡 **Increments 1–8 DONE (2026-07-26 → 07-29). Increment 9 is all
-that remains.** Implements
+**Status (2026-08-27)**: 🟡 **Increments 1–8 DONE (2026-07-26 → 07-29); increment
+9 is split and part-done — 9a (the `stitch test` verb) landed 2026-08-27, 9b
+(telemetry) and 9c (on-target) remain.** Implements
 [../docs/stitch-testing-design.md](../docs/stitch-testing-design.md): `test` and
 `expect` as structural keywords, the runner, and the migration of the suites
 that were Stitch-in-Rust-strings.
@@ -260,12 +261,39 @@ Each tranche is green in Stitch before its Rust file goes.
 `tests/{print,memory_churn,expressions}.rs` **stay in Rust**: their subject is
 the runtime, not a Stitch program.
 
-### 9. On-target + telemetry
+### 9. On-target + telemetry — **9a DONE; 9b and 9c remain**
 
-- A span per test, an event per assertion — the collector already decodes them.
-- A `stitch test` verb, and an itest scenario running the canon's suites under a
-  booted kernel. This is what makes "validated by use, on the metal" cover the
-  test suite too.
+Three separable pieces. The verb landed first because the other two build on it.
+
+**9a. The `stitch test` verb — ✅ DONE (2026-08-27).**
+`stitch test <file.st>` runs a file's `test` declarations and reports them.
+`runner::test_program_source` parses the file as **one program, exactly as
+`stitch/tests/canon.rs` does** — deliberately, so the host gate and the verb
+cannot become two different answers to "did this file's tests pass".
+`runner::report_tests` is the formatting, split out so it is testable without an
+interpreter and so an on-target `stitch test` (9c) shares one report.
+
+- Exit codes join the runner's existing vocabulary: 0 all passed, 1 something did
+  not, 2 load/parse failure. A parse failure is **not** an empty suite — that
+  would be a green run over a file nobody parsed.
+- `Verdict::Exhausted` stays distinct all the way to the report. "Never finished"
+  and "was wrong" are different diagnoses; folding them here would undo the
+  reason `Verdict` separates them.
+- **An empty suite is not a pass.** It exits 0 (a file may legitimately carry no
+  tests, and the anti-vacuity ratchet guarding the *canon* lives in the gate) but
+  prints "no tests" rather than a summary that reads like success.
+- 10 tests in `runner.rs`. Verified end to end both ways: `stitch test
+  fs-image/stim/stim.st` → `57/57 passed`; a deliberately failing file → exit 1
+  with `fails: expect failed: 2 == 999` and the passing test still listed.
+
+**9b. Telemetry — ⏳ NOT STARTED.** A span per test, an event per assertion; the
+collector already decodes them.
+
+**9c. On-target — ⏳ NOT STARTED.** An itest scenario running the canon's suites
+under a booted kernel — what makes "validated by use, on the metal" cover the
+test suite too. Note the blocker increment 7 already recorded: `test` items are
+**inert on the target** because the registry binds no name for them, so this
+needs the on-target runner wired before a scenario can assert anything.
 
 ## Deferred
 

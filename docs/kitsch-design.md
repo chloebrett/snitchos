@@ -147,10 +147,34 @@ same pattern the FS server uses for badged file endpoints
 cannot defeat them because it never holds a cap on the scanout — it writes its
 own buffer, kitsch reads, transforms, and writes the framebuffer.
 
-> **The cost, stated as chosen rather than discovered: kitsch always copies.**
-> Zero-copy direct scanout from a client buffer is foreclosed *forever*, because a
-> surface scanned out directly is a surface that cannot be greyscaled. This is a
-> permanent performance ceiling accepted in exchange for the guarantee.
+> **A client's surface is a texture, not a piece of the screen.** Its content is in
+> **surface-local coordinates**; where it lands is kitsch's state, and a client is
+> never told (Wayland works the same way). Three consequences that answer "how do
+> effects coexist with shared memory":
+>
+> - **Moving a window touches no memory.** Position is an integer in kitsch, not an
+>   offset into the buffer. Shifting the mapping instead would copy pointlessly,
+>   invalidate the client's pointers, and make position client-visible — which
+>   breaks `CONFIGURE` staying with kitsch.
+> - **Animation and effects composite the client's *last committed frame*** while
+>   applying a transform, with the client not running. This is how a hung app still
+>   minimises smoothly on macOS. **kitsch owning the last committed frame unifies
+>   three features**: animating a transition, rendering a hung window, and §9's
+>   tombstones are one mechanism — compositing without consulting the client. The
+>   frames outlive the client's death because kitsch holds a `READ` cap on the
+>   memory object, so tombstone persistence falls out of the cap model.
+> - **The composite *is* the copy.** Not a tax paid for effects: reading each client
+>   buffer once per frame is what compositing means. What compositors call zero-copy
+>   direct scanout is a narrow optimisation for a single fullscreen surface with no
+>   transform — exactly the case where no effect applies — so nothing otherwise
+>   available is given up.
+>
+> **Cells make effects nearly free.** Greyscale on a grid is an attribute rewrite
+> over ~7,200 cells rather than 921,600 pixels, applied during a pass that has to
+> happen anyway. Pixel-domain effects (blur, magnify) sit *after* rasterization and
+> are genuinely expensive — a further reason programmable effects stay a non-goal.
+> A magnifier is better built as an ordinary client holding a scanout tap; only
+> full-display zoom would be a kitsch effect.
 
 **Taps** come in two modes, and both are needed:
 

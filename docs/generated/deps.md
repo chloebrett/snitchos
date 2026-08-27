@@ -159,6 +159,8 @@ graph LR
     xtask --> xtask_cmds
     xtask --> xtask_qemu
     xtask_board --> collector
+    xtask_board --> protocol
+    xtask_board --> snitchos_abi
     xtask_cmds --> protocol
     xtask_cmds --> snip
     xtask_cmds --> xtask_qemu
@@ -182,6 +184,7 @@ graph LR
     xtask_itest --> snemu
     xtask_itest --> snitchos_abi
     xtask_itest --> stitch
+    xtask_itest --> tour
     xtask_itest --> xtask_qemu
     xtask_itest --> xtask_snemu
     xtask_qemu --> kernel_boot

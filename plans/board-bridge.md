@@ -1,13 +1,15 @@
 # Plan: the board bridge — driving the VisionFive 2 from the host
 
-**Status (2026-08-27)**: 🚧 **STARTED — Steps 1 and 2 are done; steps 3–9 are open.**
+**Status (2026-08-27)**: 🚧 **STARTED — Steps 1–3 are done; steps 4–9 are open.**
 The `xtask-board` crate exists and is a workspace member, carrying `reach.rs` (the
-"could not reach the board" vs "reached it and it said nothing" failure taxonomy)
-— that is Step 1's port-open policy and failure classification — and `stop.rs` (the
-composed stop-condition evaluator, Step 2). Both are pure host logic; neither has
-touched a board. **No `board` subcommand is wired into `xtask` yet** (`cargo xtask
-board` is an unrecognised subcommand), so Step 4's CLI is genuinely unstarted. Two
-phases — the host bridge
+"could not reach the board" vs "reached it and it said nothing" failure taxonomy,
+Step 1), `stop.rs` (the composed stop-condition evaluator, Step 2) and `split.rs`
+(text/frame separation, Step 3). All three are pure host logic; none has touched a
+board. **No `board` subcommand is wired into `xtask` yet** (`cargo xtask board` is
+an unrecognised subcommand), so Step 4's CLI is genuinely unstarted — which is why
+the Phase 1 acceptance boxes below stay unticked even where the *behaviour* they
+name is built and tested: they are criteria on the shipped command, and nothing
+ships until step 4 wires it. Two phases — the host bridge
 (steps 1–6b, including the U-Boot layer that makes netboot zero-touch) and the
 ESP32 transport (steps 7–9).
 **Unblocked 2026-08-25**: its prerequisite, [uart-telemetry.md](uart-telemetry.md)
@@ -321,7 +323,93 @@ test.
 
 ---
 
-### Step 3: Two-phase decoding — U-Boot text, then kernel frames
+### Step 3: Two-phase decoding — U-Boot text, then kernel frames — ✅ DONE
+
+**Result** (`xtask-board/src/split.rs`, 11 tests, mutants 9 caught / 3 unviable /
+0 survivors): `split(&[u8]) -> Split { io_text, frames, resyncs }`.
+
+**The specification collapsed to one sentence: *text is the bytes that aren't
+frames*.** Extract every frame, concatenate the leftovers. That rule is uniform —
+it does not care whether the leftover is U-Boot's banner, a kernel `println!`
+between two frames, or a second boot after a mid-capture reset.
+
+**This step was designed wrong twice before it was designed right**, and both
+errors are worth keeping because both are easy to repeat:
+
+1. **Emitting one item per text *line*.** A line is a display concept. Committing
+   to it meant finding line boundaries in a half-binary stream — and COBS strips
+   `0x00` **and only** `0x00`, so `0x0A` rides through a frame body freely.
+   Measured: `SpanId(10)` *is* a newline byte, and 2.7% of `SpanEnd` frames carry
+   one from the timestamp varint alone. A newline-delimited splitter cuts those
+   frames in half and reports both halves as text, silently, correlated with the
+   data rather than randomly. **The plan's own "try-COBS-with-text-fallback per
+   line" says to do this. Don't.**
+2. **Using `\n` to enumerate candidate frame starts.** Less wrong, still the wrong
+   layer. Swept over every offset in a real handoff chunk: the schema alone
+   identifies the true start, and the newline candidates *miss it entirely* when
+   the text before a frame has no newline (`=> booti …`), which the U-Boot log
+   happens to avoid by luck of its formatting.
+
+**What the frame-start search actually is.** A `0x00`-delimited chunk that fails
+to decode is searched backwards from its terminator, bounded by `MAX_FRAME_BYTES`
+(520, from `ENCODE_SCRATCH` in `kernel-obs/src/uart_sink.rs` — the sink refuses to
+emit anything larger, so no frame can start further back). Two filters: it must
+decode, and everything before it must still look like text. Where several
+candidates survive — `CapEvent`'s NUL-padded name admits a few — **the latest
+wins**: swept over 96 mixed chunks (16 frame shapes × 6 text prefixes),
+latest-wins was wrong 0 times and earliest-wins 3.
+
+**⚠ Why the search is not optional — and a bug it found in shipped code.** U-Boot's
+log contains no `0x00`, so the first terminator on the wire belongs to the
+kernel's *first frame*: the whole boot log and that frame land in one chunk. Drop
+it and you lose `Hello`, which `open_stream` sends exactly once per boot
+(`kernel/src/obs/tracing.rs`) and which carries the `timebase_hz` every later
+timestamp is relative to.
+
+**`collector --serial` does exactly that today.** Measured by feeding a realistic
+mixed stream through the collector's own decoder and policy
+(`Source::Serial → OnDecodeError::Resync`, `collector/src/source.rs:106`):
+
+```
+sent:    Hello, BuildInfo, StringRegister, SpanStart
+decoded: BuildInfo, StringRegister(kernel.boot), SpanStart
+resyncs: 1
+Hello reached the host: false
+```
+
+and `collector/src/state.rs:240` then drops every frame that arrives without an
+anchor, after one warning, exiting 0. So a real `--serial` session would report
+success having recorded nothing. It is latent rather than observed — `--serial` is
+marked board-unverified in [uart-telemetry.md](uart-telemetry.md), and it cannot
+happen over virtio-console, where telemetry has its own channel. **Not fixed here:
+`collector/` is out of this plan's lane.** The cheapest real fix is probably a
+`Hello`-seeking resync inside `protocol::stream`, which would fix the collector,
+this bridge, and anything else on a UART at once.
+
+**REFACTOR — the collector's resync policy is *agreed with*, not shared.**
+`decode_stream` owns its own read loop and has no notion of text; there is nothing
+to reuse but `try_decode_frame`, which this does. The policy names match
+(`OnDecodeError::Resync`) because they are the same idea, not the same code.
+
+**Two corrections mutation testing forced**, both worth reading before writing the
+next step:
+
+- **A guard documented as "the load-bearing half" was tautological.** It compared
+  `consumed` against the chunk length to reject a partial-span decode — but
+  `try_decode_frame` derives `consumed` from the *delimiter's position*, not from
+  what postcard read, so it is always equal. The check was deleted and the doc
+  comment corrected to say what the layer genuinely cannot know.
+- **An index loop advancing past each terminator carried a `+ 1` whose mutant
+  hangs the splitter.** Rewritten over `split_inclusive`, which expresses the same
+  chunking with no arithmetic to mutate. A splitter that hangs on a capture is a
+  worse failure than one that mis-splits it, and the mutant count fell 19 → 12.
+
+**Process note, recorded rather than glossed:** the split tests were written before
+the implementation but the RED run picked up the new module mid-flight, so they
+were never *observed* failing. Mutation testing stood in as that evidence. Writing
+tests first is not the same as watching them fail.
+
+### Step 3 (as originally written): Two-phase decoding — U-Boot text, then kernel frames
 
 **Acceptance criteria**: a byte stream containing U-Boot's line-oriented text,
 then the `booti` handoff, then COBS-framed kernel telemetry, splits into an ordered
