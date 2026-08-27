@@ -11,6 +11,9 @@ publish = false
 # the commands here via `cargo run -p xtask-itest --`.
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# The tour's chapter contract. This crate boots; `tour` judges — so there is one
+# definition of what a chapter claims, shared with the browser.
+tour = { path = "../tour" }
 magnitude = { path = "../magnitude" }
 # `diagram_cmd` lives here: its telemetry targets fold snemu frames and its
 # itest-matrix target reads the `itest::SCENARIOS` registry, both of which are in

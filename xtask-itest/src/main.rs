@@ -1286,6 +1286,65 @@ mod diagram_drift_tests {
     }
 }
 
+#[cfg(test)]
+mod tour_drift_tests {
+    /// Guest instructions to allow before giving up on a chapter's anchor. The
+    /// ceiling, not the expectation — the run stops early once cap emission goes
+    /// quiescent, which on an `init` boot is a few million in.
+    const MAX_STEPS: u64 = 60_000_000;
+    /// Idle steps after the last `CapEvent` before calling the graph complete.
+    /// Matched to `diagram caps`, so the drift check reads the same window the
+    /// committed derivation tree was folded from.
+    const QUIESCENCE_STEPS: u64 = 10_000_000;
+
+    /// **Every chapter still describes the machine it is about.**
+    ///
+    /// This is the contract the tour is built on: a chapter is prose plus a
+    /// falsifiable claim about a real boot, and a kernel change that makes the prose
+    /// wrong fails the build instead of leaving a page quietly lying to a reader.
+    ///
+    /// The boot happens here, where snemu is linked. The *judgement* is
+    /// `tour::verify::check`, which is pure and host-tested — so the gate and the
+    /// browser cannot come to different conclusions about what a chapter claims.
+    #[test]
+    fn every_chapter_describes_the_machine() {
+        // The snemu boot path resolves the kernel ELF relative to the working
+        // directory, and a test runs from its crate dir rather than the workspace
+        // root. Safe because nextest runs each test in its own process — which this
+        // repo mandates anyway (CLAUDE.md, "use nextest"). Under plain `cargo test`
+        // this would be a process-global change shared with parallel tests.
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+            .expect("the workspace root is one level up from this crate");
+
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../tour/chapters"));
+        let chapters = tour::Chapter::load_dir(dir).expect("the tour's chapters load");
+        assert!(!chapters.is_empty(), "the tour has at least one chapter to check");
+
+        for chapter in &chapters {
+            let workload =
+                (!chapter.workload.is_empty()).then_some(chapter.workload.as_str());
+            let (frames, steps) = crate::snemu_diff::collect_frames_until_cap_quiescence(
+                workload,
+                MAX_STEPS,
+                QUIESCENCE_STEPS,
+            )
+            .unwrap_or_else(|e| panic!("chapter {:?}: boot failed: {e}", chapter.slug));
+
+            if let Err(failures) = tour::verify::check(chapter, &frames) {
+                let detail =
+                    failures.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n  ");
+                panic!(
+                    "the tour no longer describes the machine (after {steps} steps, \
+                     {} frames):\n  {detail}\n\nEither the kernel changed and the \
+                     chapter needs rewriting, or this is the regression the chapter \
+                     was written to catch.",
+                    frames.len()
+                );
+            }
+        }
+    }
+}
+
 fn baseline(cmd: BaselineCmd) -> ExitCode {
     use itest::baseline as bl;
     match cmd {
