@@ -10,6 +10,7 @@
 //! decisions behind it.
 
 pub mod anchor;
+pub mod search;
 
 use serde::Deserialize;
 
