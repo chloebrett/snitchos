@@ -163,6 +163,17 @@ workloads! {
         /// observable nobody has watched fail is indistinguishable from a healthy
         /// system. `itest-workloads` only. See `plans/glitch-v2-async-ring.md`.
         GlitchStarve,
+        /// JH7110 GMAC reconnaissance (M2.5): a **read-only** boot that dumps what
+        /// U-Boot already left configured — clock gates, reset status, the MAC's own
+        /// registers and the `phy_intf_sel` syscon field — then stops. It writes
+        /// nothing, because the state it reads is destroyed by the driver's first
+        /// reset assert, so the reads cannot live inside bring-up.
+        ///
+        /// Answers Phase 0's board-side questions in one boot, and de-risks the first
+        /// MMIO read of a possibly-gated peripheral — which can hang the bus — away
+        /// from any code that has other suspects. See `docs/vf2-gmac-design.md`
+        /// ("Rung −1") and `plans/vf2-gmac-driver.md`. `itest-workloads` only.
+        GmacProbe,
         /// Userspace heap-growth probe: runs the `heap-grow` program, which
         /// allocates far past the runtime's per-region map size — forcing the
         /// `talc` allocator to `map_anon` more frames from the kernel on demand.
@@ -793,6 +804,11 @@ mod tests {
     #[test]
     fn selects_glitch_starve() {
         assert_eq!(select("workload=glitch-starve"), Some(WorkloadKind::GlitchStarve));
+    }
+
+    #[test]
+    fn selects_gmac_probe() {
+        assert_eq!(select("workload=gmac-probe"), Some(WorkloadKind::GmacProbe));
     }
 
     #[test]

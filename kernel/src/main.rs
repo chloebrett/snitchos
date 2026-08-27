@@ -594,6 +594,9 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::Shell
             | WorkloadKind::FrameOom
             | WorkloadKind::HeapOom
+            // Spawns nothing: the GMAC probe is read-only reconnaissance that runs
+            // off the heartbeat, not a task layout. Inert until its dispatch lands.
+            | WorkloadKind::GmacProbe
             // smp4's workers are placed on the secondaries post-bring-up (below).
             | WorkloadKind::Smp4,
         )
@@ -712,6 +715,9 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::Fs
                     | WorkloadKind::GlitchBeep
                     | WorkloadKind::GlitchStarve
+                    // Reconnaissance is single-hart and reads MMIO that may hang the
+                    // bus; a demo probe on hart 1 would only add noise to the dump.
+                    | WorkloadKind::GmacProbe
                     // smp4 places its own workers on every secondary (below);
                     // it doesn't want the single-hart demo probe on hart 1.
                     | WorkloadKind::Smp4
