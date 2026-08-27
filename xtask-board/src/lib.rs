@@ -4,6 +4,7 @@
 //! serial-linked half; lean `xtask` forwards to it.
 
 pub mod reach;
+pub mod stop;
 
 // # Releasing the port
 //
@@ -129,5 +130,227 @@ mod reach_tests {
     fn a_malformed_lsof_row_yields_no_holder_rather_than_panicking() {
         assert_eq!(holder_pid("COMMAND PID\nscreen not-a-number\n"), None);
         assert_eq!(holder_pid("COMMAND PID\nscreen\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::stop::{Capture, StopCondition, StopReason};
+    use std::time::Duration;
+
+    /// Elapsed-since-capture-start, the only clock this layer knows.
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// Every capture has a deadline; the other two conditions are optional. That
+    /// asymmetry is deliberate — it makes "a capture that never returns"
+    /// unrepresentable, which is the property an *unattended* bridge needs most.
+    fn until(marker: &[u8]) -> StopCondition {
+        StopCondition::new(ms(10_000)).marker(marker)
+    }
+
+    #[test]
+    fn a_marker_fires_on_the_first_match() {
+        let mut c = Capture::new(until(b"=> "));
+        assert_eq!(c.observe(ms(10), b"Hit any key to stop autoboot\r\n"), None);
+        assert_eq!(c.observe(ms(20), b"=> "), Some(StopReason::Marker));
+    }
+
+    /// The straddle case, and the reason this evaluator holds any state at all: a
+    /// serial read boundary falls wherever the OS says it does, so a marker split
+    /// across two reads is the *normal* case, not an adversarial one. Missing it
+    /// leaves step 4b sitting at the U-Boot prompt believing it never arrived.
+    #[test]
+    fn a_marker_split_across_two_arrivals_still_fires() {
+        let mut c = Capture::new(until(b"=> "));
+        assert_eq!(c.observe(ms(10), b"boot\r\n="), None);
+        assert_eq!(c.observe(ms(20), b"> "), Some(StopReason::Marker));
+    }
+
+    /// The degenerate end of the same case — one byte per read, which a slow or
+    /// congested link really does produce.
+    #[test]
+    fn a_marker_delivered_one_byte_at_a_time_still_fires() {
+        let mut c = Capture::new(until(b"=> "));
+        assert_eq!(c.observe(ms(10), b"="), None);
+        assert_eq!(c.observe(ms(11), b">"), None);
+        assert_eq!(c.observe(ms(12), b" "), Some(StopReason::Marker));
+    }
+
+    /// Substring semantics would match the empty marker at offset zero and stop
+    /// every capture on its first byte. "Never fires" is the safe reading; step
+    /// 4's CLI rejects an empty `--until` at the surface rather than relying on it.
+    #[test]
+    fn an_empty_marker_never_fires() {
+        let mut c = Capture::new(StopCondition::new(ms(100)).marker(b""));
+        assert_eq!(c.observe(ms(10), b"anything at all"), None);
+        assert_eq!(c.tick(ms(99)), None);
+    }
+
+    /// The wrong-moment hazard, stated as behaviour: a 300 ms window must not cut
+    /// off a board that takes 800 ms to begin answering. Quiescence means "it
+    /// spoke and then stopped", so it cannot be armed before the first byte.
+    #[test]
+    fn quiescence_is_armed_by_the_first_byte_not_by_capture_start() {
+        let mut c = Capture::new(StopCondition::new(ms(10_000)).quiet_after(ms(300)));
+        assert_eq!(c.tick(ms(800)), None, "silence before the first byte is not quiescence");
+        assert_eq!(c.observe(ms(800), b"first output"), None);
+        assert_eq!(c.tick(ms(1099)), None);
+        assert_eq!(c.tick(ms(1100)), Some(StopReason::Quiet));
+    }
+
+    /// A read that returned zero bytes is a timer tick, not new data. Getting this
+    /// wrong is subtle and total: a polling capture loop would refresh the quiet
+    /// clock on every empty read, and quiescence would never fire at all.
+    #[test]
+    fn a_zero_byte_read_does_not_refresh_the_quiet_clock() {
+        let mut c = Capture::new(StopCondition::new(ms(10_000)).quiet_after(ms(300)));
+        assert_eq!(c.observe(ms(100), b"output"), None);
+        assert_eq!(c.observe(ms(200), b""), None);
+        assert_eq!(c.observe(ms(400), b""), Some(StopReason::Quiet));
+    }
+
+    #[test]
+    fn a_stream_still_producing_never_goes_quiet() {
+        let mut c = Capture::new(StopCondition::new(ms(10_000)).quiet_after(ms(300)));
+        for tenth_second in 1..50u64 {
+            assert_eq!(
+                c.observe(ms(tenth_second * 100), b"chatter\r\n"),
+                None,
+                "bytes every 100 ms can never satisfy a 300 ms window"
+            );
+        }
+    }
+
+    /// ⚠ The condition that does not survive the move to Wi-Fi. Over a UART,
+    /// silence means the board is silent; over Phase 2's TCP transport it may be a
+    /// few-hundred-millisecond stall in the radio. A window that false-fires on
+    /// that reports a wedged board that is fine — the exact failure this tool
+    /// exists to prevent. Encoded now, while it is free.
+    #[test]
+    fn a_stall_shorter_than_the_window_does_not_stop_the_capture() {
+        let mut c = Capture::new(StopCondition::new(ms(10_000)).quiet_after(ms(500)));
+        assert_eq!(c.observe(ms(100), b"before the stall"), None);
+        assert_eq!(c.tick(ms(400)), None, "a 300 ms stall is not a 500 ms silence");
+        assert_eq!(c.observe(ms(599), b"after the stall"), None);
+        assert_eq!(c.tick(ms(1000)), None, "the window restarts from the later bytes");
+    }
+
+    #[test]
+    fn quiescence_fires_at_the_window_boundary_exactly() {
+        let mut c = Capture::new(StopCondition::new(ms(10_000)).quiet_after(ms(300)));
+        assert_eq!(c.observe(ms(100), b"output"), None);
+        assert_eq!(c.tick(ms(399)), None, "one millisecond short of the window must not fire");
+        assert_eq!(c.tick(ms(400)), Some(StopReason::Quiet), "the window is inclusive");
+    }
+
+    /// The answer to "the board said nothing at all", and why the timeout is
+    /// mandatory: with quiescence armed only by a first byte that never came, this
+    /// is the only condition left, and it reports as itself.
+    #[test]
+    fn a_silent_board_stops_at_the_timeout_not_at_quiescence() {
+        let mut c = Capture::new(StopCondition::new(ms(5_000)).quiet_after(ms(300)));
+        assert_eq!(c.tick(ms(4_999)), None);
+        assert_eq!(c.tick(ms(5_000)), Some(StopReason::Timeout));
+    }
+
+    #[test]
+    fn the_timeout_fires_at_its_boundary_exactly() {
+        let mut c = Capture::new(StopCondition::new(ms(1_000)));
+        assert_eq!(c.tick(ms(999)), None, "one millisecond short of the deadline must not fire");
+        assert_eq!(c.tick(ms(1_000)), Some(StopReason::Timeout), "the deadline is inclusive");
+    }
+
+    /// The timeout is an outer bound on the whole capture, not a silence detector,
+    /// so a stream that never stops talking must still hit it.
+    #[test]
+    fn the_timeout_fires_on_a_stream_still_producing() {
+        let mut c = Capture::new(StopCondition::new(ms(500)));
+        assert_eq!(c.observe(ms(200), b"chatter"), None);
+        assert_eq!(c.observe(ms(500), b"more chatter"), Some(StopReason::Timeout));
+    }
+
+    /// Precedence, when two conditions come due on the same event. A marker found
+    /// in bytes that genuinely arrived within the capture is a *success*;
+    /// reporting it as a timeout would make a working round-trip look like a
+    /// wedged board.
+    #[test]
+    fn a_marker_wins_over_a_timeout_due_on_the_same_event() {
+        let mut c = Capture::new(StopCondition::new(ms(100)).marker(b"OK"));
+        assert_eq!(c.observe(ms(100), b"OK"), Some(StopReason::Marker));
+    }
+
+    /// The other collision, and not a degenerate one: quiescence came due at 400
+    /// ms but nobody polled until 1000 ms, by which point the deadline had passed
+    /// too. The outer bound is the more informative answer.
+    #[test]
+    fn a_timeout_wins_over_quiescence_when_both_are_due() {
+        let mut c = Capture::new(StopCondition::new(ms(1_000)).quiet_after(ms(300)));
+        assert_eq!(c.observe(ms(100), b"output"), None);
+        assert_eq!(c.tick(ms(1_000)), Some(StopReason::Timeout));
+    }
+
+    /// The three conditions are one composed value, not three call sites choosing
+    /// between them: the same `StopCondition` stops on whichever comes first, and
+    /// the reason says which. That is what lets step 4 pass a single condition
+    /// down and still tell a prompt from a wedge.
+    #[test]
+    fn one_condition_value_stops_on_whichever_fires_first() {
+        let all = || StopCondition::new(ms(5_000)).quiet_after(ms(300)).marker(b"=> ");
+
+        let mut on_marker = Capture::new(all());
+        assert_eq!(on_marker.observe(ms(10), b"=> "), Some(StopReason::Marker));
+
+        let mut on_quiet = Capture::new(all());
+        assert_eq!(on_quiet.observe(ms(10), b"some output"), None);
+        assert_eq!(on_quiet.tick(ms(400)), Some(StopReason::Quiet));
+
+        let mut on_timeout = Capture::new(all());
+        assert_eq!(on_timeout.tick(ms(5_000)), Some(StopReason::Timeout));
+    }
+
+    /// The memory bound, made checkable rather than merely asserted in a comment.
+    /// A capture may run for minutes over a serial line; it must hold straddle
+    /// context, not history. `marker.len() - 1` is the most that can ever be
+    /// needed — a full match spanning more than that would already have fired.
+    ///
+    /// Asserted as an **equality**, not a ceiling. A ceiling is satisfied by
+    /// retaining nothing at all, which is a different bug wearing the same number:
+    /// it costs no memory and silently breaks every split match. Mutation testing
+    /// found exactly that — a `retained_bytes -> 0` mutant survived the `<` form.
+    #[test]
+    fn exactly_the_straddle_context_is_retained_never_more_and_never_less() {
+        let straddle = b"=> ".len() - 1;
+        let mut c = Capture::new(until(b"=> "));
+        assert_eq!(c.retained_bytes(), 0, "nothing is retained before the first read");
+        for tick in 1..200u64 {
+            assert_eq!(c.observe(ms(tick), b"a kilobyte of boot log would go here"), None);
+            assert_eq!(
+                c.retained_bytes(),
+                straddle,
+                "retention is pinned to the marker, neither growing with the stream \
+                 nor dropping the context a split match needs"
+            );
+        }
+    }
+
+    /// The bound is the marker's, so a longer marker holds more — the same
+    /// property stated where a hardcoded constant could not be mistaken for it.
+    #[test]
+    fn a_longer_marker_retains_proportionally_more_context() {
+        let marker = b"Hit any key to stop autoboot";
+        let mut c = Capture::new(until(marker));
+        assert_eq!(c.observe(ms(10), b"U-Boot SPL 2021.10\r\n"), None);
+        assert_eq!(c.retained_bytes(), b"U-Boot SPL 2021.10\r\n".len());
+        assert_eq!(c.observe(ms(20), &vec![b'x'; 4096]), None);
+        assert_eq!(c.retained_bytes(), marker.len() - 1);
+    }
+
+    #[test]
+    fn a_capture_with_no_marker_retains_nothing() {
+        let mut c = Capture::new(StopCondition::new(ms(10_000)).quiet_after(ms(300)));
+        assert_eq!(c.observe(ms(10), b"plenty of output to not remember"), None);
+        assert_eq!(c.retained_bytes(), 0);
     }
 }

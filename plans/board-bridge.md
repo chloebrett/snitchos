@@ -1,11 +1,13 @@
 # Plan: the board bridge — driving the VisionFive 2 from the host
 
-**Status (2026-08-27)**: 🚧 **STARTED — Step 1 is done; steps 2–9 are open.** The
-`xtask-board` crate exists and is a workspace member, carrying `reach.rs` (the
+**Status (2026-08-27)**: 🚧 **STARTED — Steps 1 and 2 are done; steps 3–9 are open.**
+The `xtask-board` crate exists and is a workspace member, carrying `reach.rs` (the
 "could not reach the board" vs "reached it and it said nothing" failure taxonomy)
-— that is Step 1's port-open policy and failure classification. **No `board`
-subcommand is wired into `xtask` yet** (`cargo xtask board` is an unrecognised
-subcommand), so Step 4's CLI is genuinely unstarted. Two phases — the host bridge
+— that is Step 1's port-open policy and failure classification — and `stop.rs` (the
+composed stop-condition evaluator, Step 2). Both are pure host logic; neither has
+touched a board. **No `board` subcommand is wired into `xtask` yet** (`cargo xtask
+board` is an unrecognised subcommand), so Step 4's CLI is genuinely unstarted. Two
+phases — the host bridge
 (steps 1–6b, including the U-Boot layer that makes netboot zero-touch) and the
 ESP32 transport (steps 7–9).
 **Unblocked 2026-08-25**: its prerequisite, [uart-telemetry.md](uart-telemetry.md)
@@ -234,7 +236,58 @@ here or in the glue; it shells out, so probably the glue.
 
 ---
 
-### Step 2: The capture loop's stop conditions
+### Step 2: The capture loop's stop conditions — ✅ DONE
+
+**Result** (`xtask-board/src/stop.rs`, 18 tests, mutants 15 caught / 4 unviable / 0
+survivors): one `StopCondition` value carries all three conditions and `Capture`
+reports which fired. The plan's REFACTOR question — do they want to compose? — was
+answered yes up front rather than at the end, so there is no per-condition call site
+to unify later.
+
+**Three decisions the tests now pin, each of which could have been the quiet bug
+this step exists to prevent:**
+
+- **The timeout is mandatory; the other two are optional.** That asymmetry makes "a
+  capture that never returns" unrepresentable, which is the property an *unattended*
+  bridge needs most. Consequence for step 4: `--until-quiet` and `--until` are not
+  alternatives to `--timeout`, they are additions to a default one.
+- **Quiescence is armed by the first byte, never by capture start.** A 300 ms window
+  measured from `t=0` cuts off a board that takes 800 ms to answer — the "clock
+  starts at the wrong moment" failure the step names. Total silence is the
+  *timeout's* answer, and it reports as itself.
+- **A zero-byte read is a tick, not data.** A capture loop polling a quiet port sees
+  far more empty reads than arrivals; refreshing the quiet clock on each would stop
+  quiescence from ever firing. `observe(t, &[])` and `tick(t)` are the same call.
+
+Precedence when two come due on the same event is `Marker` > `Timeout` > `Quiet`: a
+marker found in bytes that genuinely arrived is a success, and reporting it as a
+timeout would make a working round-trip look like a wedged board.
+
+**Two deviations from this step as written, both approved before coding:**
+
+- **No `WallClock`; `observe` takes elapsed-since-start as a parameter.** More
+  deterministic than a fake with hidden state, and it keeps the layer a pure
+  function of its arguments. The single real `Instant::now()` lands in step 4's
+  capture loop, where the I/O already is.
+- **`retained_bytes()` is public.** The memory bound — straddle context, never
+  history — is a requirement for a capture that may run for minutes, and an
+  invariant nothing can observe is an invariant nothing checks.
+
+**What mutation testing actually caught**, since it was not the predicted target:
+the `>=` boundaries were all killed by the tests as written, but a
+`retained_bytes -> 0` mutant survived. The retention test asserted a *ceiling*
+(`< marker.len()`), which retaining nothing satisfies — a different bug wearing the
+same number, costing no memory and silently breaking every split match. Fixed by
+asserting the exact value. **A bound needs both of its sides.**
+
+**REFACTOR — the tail buffer is *not* shared with step 3's resync scanner.**
+Assessed and declined: they retain for incompatible reasons. Step 2 holds a bounded
+window (`marker.len() - 1`) because the marker is the only thing it looks for and
+everything older is provably useless. Step 3 must hold *every* byte since the last
+delimiter, unbounded, until a frame either completes or is abandoned. Same word,
+different lifetime — sharing them would mean the looser bound wins.
+
+### Step 2 (as originally written): The capture loop's stop conditions
 
 **Acceptance criteria**: given a sequence of `(timestamp, bytes)` arrivals and a
 `StopCondition`, the evaluator reports stop-or-continue and **which** condition
