@@ -81,6 +81,18 @@ impl StopCondition {
         let marker = marker.into();
         Self { marker: (!marker.is_empty()).then_some(marker), ..self }
     }
+
+    /// Was the caller waiting for the board to *do* something, or just watching
+    /// it for a fixed window?
+    ///
+    /// This is what makes a timeout meaningful. Reaching the deadline is success
+    /// for "capture for three seconds" and failure for "wait for the `=>`
+    /// prompt", and the two are the same [`StopReason::Timeout`] — only the
+    /// request tells them apart. See `crate::outcome::exit_code`.
+    #[must_use]
+    pub const fn awaits_an_event(&self) -> bool {
+        self.marker.is_some() || self.quiet_after.is_some()
+    }
 }
 
 /// Evaluates a [`StopCondition`] against a stream of arrivals.

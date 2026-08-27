@@ -55,6 +55,28 @@ pub fn check_device(device: &str) -> Result<(), Unreachable> {
     }
 }
 
+/// The `std::io` kind behind a `serialport` error.
+///
+/// `serialport` wraps real I/O errors in `Io(kind)` — which is where
+/// `ResourceBusy` and `PermissionDenied` arrive, the two that
+/// [`classify_open_failure`] turns into actionable advice — and adds three of its
+/// own.
+///
+/// **`NoDevice` is ambiguous by the crate's own admission**: its documentation
+/// says it covers both "in use by another process" *and* "disconnected while
+/// performing I/O", which are opposite diagnoses. It maps to `NotFound` because
+/// absence is the commoner cause; the caller is expected to resolve the ambiguity
+/// with evidence, since a port `lsof` can name a holder for is held, not missing.
+#[must_use]
+pub fn io_kind(kind: serialport::ErrorKind) -> ErrorKind {
+    match kind {
+        serialport::ErrorKind::Io(kind) => kind,
+        serialport::ErrorKind::NoDevice => ErrorKind::NotFound,
+        serialport::ErrorKind::InvalidInput => ErrorKind::InvalidInput,
+        serialport::ErrorKind::Unknown => ErrorKind::Other,
+    }
+}
+
 /// Classify a failed serial open into an [`Unreachable`].
 ///
 /// Takes the [`ErrorKind`] rather than the error so it stays pure and total —

@@ -3,9 +3,154 @@
 //! See [plans/board-bridge.md](../../plans/board-bridge.md). This crate is the
 //! serial-linked half; lean `xtask` forwards to it.
 
+pub mod outcome;
 pub mod reach;
 pub mod split;
 pub mod stop;
+
+#[cfg(test)]
+mod io_kind_tests {
+    use super::reach::io_kind;
+    use std::io::ErrorKind;
+
+    /// The interesting mapping. `serialport::ErrorKind::Io` carries a real
+    /// `io::ErrorKind`, which is where `ResourceBusy` and `PermissionDenied`
+    /// arrive — the two that `classify_open_failure` turns into actionable
+    /// advice. Flattening them would undo that whole layer.
+    #[test]
+    fn an_io_error_passes_its_kind_through_unchanged() {
+        assert_eq!(io_kind(serialport::ErrorKind::Io(ErrorKind::ResourceBusy)), ErrorKind::ResourceBusy);
+        assert_eq!(
+            io_kind(serialport::ErrorKind::Io(ErrorKind::PermissionDenied)),
+            ErrorKind::PermissionDenied
+        );
+    }
+
+    /// `NoDevice` is **ambiguous by the crate's own admission** — its docs say it
+    /// covers both "in use by another process" and "disconnected while performing
+    /// I/O". Those are opposite diagnoses. It maps to `NotFound` because absence
+    /// is the commoner cause, and the caller resolves the ambiguity with evidence:
+    /// if `lsof` names a holder, the port is held, not missing.
+    #[test]
+    fn no_device_maps_to_not_found_pending_evidence() {
+        assert_eq!(io_kind(serialport::ErrorKind::NoDevice), ErrorKind::NotFound);
+    }
+
+    /// Unknown stays unknown rather than being guessed into a specific remedy.
+    #[test]
+    fn an_unknown_failure_is_not_guessed_at() {
+        assert_eq!(io_kind(serialport::ErrorKind::Unknown), ErrorKind::Other);
+        assert_eq!(io_kind(serialport::ErrorKind::InvalidInput), ErrorKind::InvalidInput);
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::outcome::condition_from;
+    use std::time::Duration;
+
+    /// `stop::StopCondition::marker` silently drops an empty marker, because
+    /// substring semantics would otherwise match at offset zero and stop every
+    /// capture on its first byte. That backstop must never be what catches this:
+    /// silently ignoring `--until ""` would hand back a capture that runs to its
+    /// timeout for reasons the operator cannot see. Refuse it where it was typed.
+    #[test]
+    fn an_empty_marker_is_refused_at_the_surface_not_silently_dropped() {
+        let e = condition_from(3000, Some(""), None)
+            .expect_err("--until \"\" must be a usage error, not a no-op");
+        assert!(e.contains("--until"), "the message must name the flag: {e}");
+    }
+
+    #[test]
+    fn a_timeout_alone_awaits_nothing() {
+        let c = condition_from(3000, None, None).expect("a bare timeout is valid");
+        assert!(
+            !c.awaits_an_event(),
+            "with no marker and no quiet window, reaching the deadline is the request"
+        );
+    }
+
+    #[test]
+    fn a_marker_and_a_quiet_window_both_reach_the_condition() {
+        let c = condition_from(3000, Some("=> "), Some(200)).expect("valid");
+        assert!(c.awaits_an_event());
+        let mut cap = super::stop::Capture::new(c);
+        assert_eq!(
+            cap.observe(Duration::from_millis(10), b"=> "),
+            Some(super::stop::StopReason::Marker),
+            "the marker must have survived the mapping, not just the flag"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::outcome::{Outcome, exit_code};
+    use super::reach::Unreachable;
+    use super::stop::{StopCondition, StopReason};
+    use std::time::Duration;
+
+    fn window_only() -> StopCondition {
+        StopCondition::new(Duration::from_millis(3000))
+    }
+
+    fn awaiting_a_marker() -> StopCondition {
+        StopCondition::new(Duration::from_millis(3000)).marker(b"=> ")
+    }
+
+    /// The distinction an unattended loop is built on: **a board that never said
+    /// what you were waiting for is a failure; a board you only watched for three
+    /// seconds is not.** Same `StopReason::Timeout`, opposite meanings, and the
+    /// difference is entirely in what the caller asked for.
+    #[test]
+    fn a_timeout_fails_when_something_specific_was_awaited() {
+        assert_eq!(
+            exit_code(&awaiting_a_marker(), &Outcome::Stopped(StopReason::Timeout)),
+            1,
+            "the marker never arrived — the thing the caller waited for did not happen"
+        );
+    }
+
+    #[test]
+    fn a_timeout_succeeds_when_the_window_itself_was_the_request() {
+        assert_eq!(
+            exit_code(&window_only(), &Outcome::Stopped(StopReason::Timeout)),
+            0,
+            "`--timeout` with no marker means 'capture for this long' — it did"
+        );
+    }
+
+    #[test]
+    fn a_matched_marker_succeeds() {
+        assert_eq!(exit_code(&awaiting_a_marker(), &Outcome::Stopped(StopReason::Marker)), 0);
+    }
+
+    #[test]
+    fn going_quiet_succeeds_when_quiet_was_the_request() {
+        let c =
+            StopCondition::new(Duration::from_millis(3000)).quiet_after(Duration::from_millis(200));
+        assert_eq!(exit_code(&c, &Outcome::Stopped(StopReason::Quiet)), 0);
+    }
+
+    /// Never reaching the board gets its **own** code, distinct from reaching it
+    /// and not hearing what you wanted. Collapsing the two is the exact confusion
+    /// [`super::reach`] exists to prevent, and an unattended loop would retry the
+    /// wrong thing: rebooting a board whose port is merely held by a stray
+    /// `screen` fixes nothing and burns a boot cycle every iteration.
+    #[test]
+    fn being_unable_to_reach_the_board_is_not_the_same_failure_as_a_timeout() {
+        let unreachable = Outcome::Unreachable(Unreachable::PortHeld {
+            device: "/dev/cu.usbserial-1".into(),
+            holder: Some(4242),
+        });
+        assert_eq!(exit_code(&awaiting_a_marker(), &unreachable), 2);
+        assert_ne!(
+            exit_code(&awaiting_a_marker(), &unreachable),
+            exit_code(&awaiting_a_marker(), &Outcome::Stopped(StopReason::Timeout)),
+            "a held port and a silent board must not share an exit code"
+        );
+    }
+}
 
 // # Releasing the port
 //

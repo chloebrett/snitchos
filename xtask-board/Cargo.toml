@@ -18,6 +18,15 @@ collector = { path = "../collector", default-features = false }
 # The wire format. `features = ["std"]` is what turns on `protocol::stream` —
 # `try_decode_frame` and `OwnedFrame`, which the two-phase splitter is built on.
 protocol = { path = "../protocol", features = ["std"] }
+# The `board exec` surface. Its own parser, not lean `xtask`'s — the delegated
+# crates each own their flags so the tool that runs `cargo xtask test` does not
+# grow them (same shape as `xtask-itest`).
+clap = { version = "4", features = ["derive"] }
+# Opening the board's UART. `default-features = false` drops the `libudev`
+# enumeration backend: the operator names a device path, we never scan for ports,
+# so the feature buys nothing and would add a Linux system dependency. Same call
+# as the collector's `--serial` source.
+serialport = { version = "4", default-features = false }
 
 [dev-dependencies]
 # Test fixtures are built with `protocol::wire_encode` over real `Frame`s rather
