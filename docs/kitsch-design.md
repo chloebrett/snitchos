@@ -5,9 +5,12 @@
 mapping was an exploration, and the ideas of it that survive (authority as
 geometry, backpressure you can see) arrive here without a solver. Hard
 prerequisite: [framebuffer milestone 0](framebuffer-design.md), which shipped.
-Hard prerequisite that has *not* shipped: memory-object capabilities, §3.
 
-Implementation increments: [../plans/kitsch-v1.md](../plans/kitsch-v1.md).
+Implementation increments: [../plans/kitsch-v1.md](../plans/kitsch-v1.md), which
+carries three decisions taken after this note was first written: kitsch's policy is
+a **Stitch** program calling natives at a **one-call-per-frame** boundary; the
+**shell is the first GUI app**, before the WM; and **memory objects are deferred**
+(§3) because cell surfaces fit through IPC.
 
 ## 1. The thesis
 
@@ -92,7 +95,20 @@ instance proves the shape. If they diverge on naming for no reason, it never
 happens. Extraction waits for the third instance; this is the repo's own
 precedent (the `kernel-core` split happened after the grab-bag existed).
 
-## 3. Memory objects — the kernel prerequisite
+## 3. Memory objects — wanted, but not a prerequisite
+
+> **Revised.** This section originally called memory objects a hard prerequisite.
+> They are not, for v1: **a full 160×45 cell grid is 28.8 KB**, and damage-limited
+> a few hundred bytes, which crosses IPC without strain. Cell surfaces need no new
+> kernel primitive, so the hardest kernel work stops gating the first screenshot.
+>
+> The security argument below is also weaker than first stated. For a **scanout**
+> tap it is vacuous — kitsch composites the scanout, so a scanout-tap holder trusts
+> kitsch inherently and no mapping changes that. For a **per-surface** tap a mapping
+> does remove kitsch from the middle, but kitsch is the party granting the tap
+> anyway. What survives is the part that was never about security: **avoiding large
+> copies for pixel surfaces**, and completing the object set. Both stand. Neither is
+> urgent, and the trigger is [`Surface::Pixels`](#5-three-projections).
 
 Today `MapAnon` is the entire memory story: a process can get fresh anonymous
 pages and nothing else. There is no way for two processes to see the same frames,
@@ -214,6 +230,39 @@ for, and each is a feature every other OS retrofitted badly:
 
 A **read+write tap is an insert** — a process in the signal path. Remote assist,
 pair-programming, an overlay debugger, an IME (§6), or an agent driving a window.
+
+### kitsch's own implementation
+
+**kitsch's policy is a Stitch program.** Not Rust — the interpreter is mature enough
+on target, and where it is not, kitsch is the thing that lifts it. The leak risk is
+accepted deliberately, because a long-running Stitch process's heap growth appears
+in per-process `snitchos.heap.*` on the wire and on kitsch's own back-of-window view
+(§8): a leak here reports itself rather than being discovered.
+
+**The native boundary is at compose-rasterize-present**, and its granularity is what
+makes this viable at all:
+
+| boundary | interpreter→native transitions per full frame | verdict |
+|---|---|---|
+| per glyph | 7,200 | dead on arrival |
+| per span | tens | viable |
+| **per present** | **1** | **Stitch cost is O(events), independent of resolution** |
+
+So Stitch owns the **scene** — window list, rects, focus, z-order, effects,
+accumulated damage, all of which change on events at tens per second — and hands it
+across once per frame. Native owns the ~7,200 cell-picks and ~921,600 pixel writes.
+**Stitch never touches a cell.**
+
+Damage is a **dirty-bit bitmap plus row-run spans**, not a tree: 7,200 cells is 900
+bytes, 113 `u64` words to mark and scan, and coalescing each row's runs matters only
+because the framebuffer is row-major so a horizontal run is contiguous. This is what
+pixman's banded regions do and what every real compositor converged on.
+
+**kitsch must be restartable.** Clients are separate processes holding their own
+surfaces, so a compositor crash need not end the session — the supervisor restarts
+kitsch and clients re-commit. Cheap to design in, very expensive to retrofit, and it
+is what makes the interpreter risk tolerable: the failure mode becomes a flicker
+rather than a lost session.
 
 ## 5. Three projections
 
