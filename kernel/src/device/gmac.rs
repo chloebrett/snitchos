@@ -15,8 +15,59 @@
 //! no emulated counterpart, which is why no itest scenario selects it.
 
 use kernel_devices::gmac::{
-    gmac1_resets_released, is_expected_core, snps_version, Region, Target, PROBE_REGIONS,
+    gmac1_resets_released, is_expected_core, snps_version, Descriptor, GmacTransport, Region,
+    Target, TxError, TxRing, BASE, DMA_CH0_TX_BASE_ADDR, DMA_CH0_TX_BASE_ADDR_HI,
+    DMA_CH0_TX_CONTROL, DMA_CH0_TX_END_ADDR, DMA_CH0_TX_RING_LEN, DMA_CONTROL_ST, PROBE_REGIONS,
+    TDES3_ERROR_SUMMARY, TDES3_OWN,
 };
+
+/// Descriptor ring depth. Telemetry is bursty at heartbeat cadence; 8 is slack, and
+/// `TxRing`'s usable capacity is one fewer. A tuning knob, not a design decision.
+const TX_SLOTS: usize = 8;
+
+/// Per-slot TX buffer. One MTU plus the Ethernet header, rounded up.
+const TX_BUF_BYTES: usize = 1536;
+
+/// The ring **and** the buffers it points at, in one `static`.
+///
+/// **Both must live here, not on the heap.** `mmu::va_to_pa` only translates
+/// `KERNEL_OFFSET`-range addresses and passes anything else through *unchanged* —
+/// so a heap-allocated ring or buffer would hand the device a kernel VA where it
+/// expects a physical address, and it would DMA whatever physical memory happens to
+/// sit at that number. Silently. This is the same trap that made `virtio_console`
+/// stage through a static `TX_STAGING` buffer; the GMAC has two address-bearing
+/// structures rather than one, so it is the same mistake available twice.
+///
+/// `repr(C)` with `ring` first because the device is handed this struct's address
+/// as the descriptor-list base, and `TxRing`'s own `repr(C)` puts its descriptor
+/// array first in turn.
+#[repr(C, align(64))]
+struct TxMemory {
+    ring: TxRing<TX_SLOTS>,
+    buffers: [[u8; TX_BUF_BYTES]; TX_SLOTS],
+}
+
+static mut TX: TxMemory =
+    TxMemory { ring: TxRing::new(), buffers: [[0; TX_BUF_BYTES]; TX_SLOTS] };
+
+/// The MAC's register file over volatile MMIO at [`BASE`].
+struct Mmio;
+
+impl GmacTransport for Mmio {
+    fn read_reg(&self, offset: usize) -> u32 {
+        // SAFETY: `offset` comes from `kernel_devices::gmac`'s register constants,
+        // every one of which `every_target_lies_inside_its_region` proves is inside
+        // the GMAC window `kmain` mapped. A 32-bit MMIO register read is naturally
+        // aligned and side-effect-free on this device.
+        unsafe { ((BASE + offset) as *const u32).read_volatile() }
+    }
+
+    fn write_reg(&mut self, offset: usize, value: u32) {
+        // SAFETY: as above; the window is mapped writable and these offsets are
+        // device registers, not RAM.
+        unsafe { ((BASE + offset) as *mut u32).write_volatile(value) };
+    }
+}
 
 /// Read one register and report it. The breadcrumb is emitted **before** the access,
 /// never after: the failure this guards is a bus hang on a gated peripheral, which
@@ -94,4 +145,166 @@ pub fn probe(dtb: &fdt::Fdt) {
     }
 
     crate::tracing::emit_log("gmac-probe: done");
+}
+
+/// `fence w, w` — order every prior store before every later one. RISC-V orders no
+/// two plain stores, so this is what makes the publish sequence in [`transmit`] real
+/// rather than aspirational.
+fn fence_w() {
+    // SAFETY: a fence has no operands and no memory effects of its own.
+    unsafe { core::arch::asm!("fence w, w", options(nostack, preserves_flags)) };
+}
+
+/// Physical address of the descriptor ring — what the device is told to walk.
+fn ring_pa() -> u64 {
+    let va = (&raw const TX).cast::<u8>() as usize;
+    crate::mmu::va_to_pa(va) as u64
+}
+
+/// Physical address of slot `slot`'s TX buffer.
+fn buffer_pa(slot: usize) -> u64 {
+    let base = (&raw const TX).cast::<u8>() as usize;
+    let offset = core::mem::offset_of!(TxMemory, buffers) + slot * TX_BUF_BYTES;
+    crate::mmu::va_to_pa(base + offset) as u64
+}
+
+/// Program the ring's base and length into the MAC and start the TX DMA engine.
+fn init_tx(mmio: &mut Mmio) {
+    let base = ring_pa();
+    // High half first, then low — the low write is the one the device latches, so
+    // the pair is never observed half-updated. Same order the fw_cfg DMA path uses.
+    mmio.write_reg(DMA_CH0_TX_BASE_ADDR_HI, (base >> 32) as u32);
+    mmio.write_reg(DMA_CH0_TX_BASE_ADDR, (base & 0xFFFF_FFFF) as u32);
+    mmio.write_reg(DMA_CH0_TX_RING_LEN, TX_SLOTS as u32);
+    mmio.write_reg(DMA_CH0_TX_CONTROL, DMA_CONTROL_ST);
+}
+
+/// Hand one complete Ethernet frame to the MAC.
+///
+/// The ordering is the correctness story, and none of it is expressible in the pure
+/// ring: copy the body, fence, write the descriptor with `OWN` clear, fence, publish,
+/// fence, kick the tail pointer. Without those fences the device can observe `OWN`
+/// over a half-written descriptor, or a descriptor naming a buffer whose bytes have
+/// not landed — both transmit garbage, intermittently, from a site nowhere near the
+/// symptom.
+pub fn transmit(frame: &[u8]) -> Result<(), TxError> {
+    let len = u32::try_from(frame.len()).map_err(|_| TxError::BadLength)?;
+    if frame.len() > TX_BUF_BYTES {
+        return Err(TxError::BadLength);
+    }
+
+    // SAFETY: single-hart boot-path use — `tx_smoke` is the only caller and does not
+    // re-enter. `&mut *(&raw mut …)` is the required idiom for a `static mut`; a
+    // direct `&mut TX` is forbidden and clippy's autofix would rewrite it to one.
+    #[allow(clippy::deref_addrof, reason = "the &raw mut idiom for a static mut")]
+    let tx = unsafe { &mut *(&raw mut TX) };
+
+    // The slot has to be known before the copy: the descriptor names *this* slot's
+    // buffer, so the frame must already be in it.
+    let slot = tx.ring.next_free_slot().ok_or(TxError::Full)?;
+    tx.buffers[slot][..frame.len()].copy_from_slice(frame);
+    fence_w();
+
+    let submitted = tx.ring.submit(buffer_pa(slot), len)?;
+    debug_assert_eq!(submitted, slot, "next_free_slot disagreed with submit");
+    fence_w();
+    tx.ring.publish(slot);
+    fence_w();
+
+    let tail = ring_pa() + (slot as u64 + 1) * core::mem::size_of::<Descriptor>() as u64;
+    Mmio.write_reg(DMA_CH0_TX_END_ADDR, (tail & 0xFFFF_FFFF) as u32);
+    Ok(())
+}
+
+/// Reclaim every descriptor the device has returned, stopping at the first it still
+/// owns. Returns how many were freed.
+///
+/// The ownership read is **volatile**: the device clears `OWN` by DMA, so a plain
+/// read is a read of memory the compiler believes nothing writes — it may hoist it
+/// out of the loop and spin forever on a stale word.
+pub fn reclaim() -> Reclaimed {
+    // SAFETY: as in `transmit`.
+    #[allow(clippy::deref_addrof, reason = "the &raw mut idiom for a static mut")]
+    let tx = unsafe { &mut *(&raw mut TX) };
+
+    let mut freed = 0;
+    let mut failed = 0;
+    while let Some(slot) = tx.ring.peek_reclaimable() {
+        let tdes3_va = (&raw const TX).cast::<u8>() as usize
+            + slot * core::mem::size_of::<Descriptor>()
+            + core::mem::offset_of!(Descriptor, tdes3);
+        // SAFETY: inside the `TX` static, naturally aligned, and volatile because
+        // the device writes it behind the compiler's back.
+        let tdes3 = unsafe { (tdes3_va as *const u32).read_volatile() };
+        if tdes3 & TDES3_OWN != 0 {
+            break;
+        }
+        if tdes3 & TDES3_ERROR_SUMMARY != 0 {
+            // The device took the descriptor and failed the transmit — the shape a
+            // wrong buffer address makes. Reported, never silently reclaimed.
+            crate::tracing::emit_log(&alloc::format!(
+                "gmac: transmit failed on slot {slot} (tdes3={tdes3:#010x}) — buffer PA \
+                 unreachable? check va_to_pa on a non-KERNEL_OFFSET address"
+            ));
+            failed += 1;
+        }
+        tx.ring.release_one();
+        freed += 1;
+    }
+    Reclaimed { freed, failed }
+}
+
+/// What one [`reclaim`] pass found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reclaimed {
+    /// Descriptors the device handed back.
+    pub freed: usize,
+    /// How many of those reported a failed transmit.
+    pub failed: usize,
+}
+
+/// `workload=gmac-tx`: program the ring, hand the MAC one frame, report whether the
+/// engine took it. T3 and T4 of the design note's ladder — against snemu's model at
+/// the desk, against silicon on the board.
+pub fn tx_smoke() {
+    crate::tracing::emit_log("gmac-tx: start");
+    init_tx(&mut Mmio);
+
+    // Broadcast so no switch can drop it, custom ethertype so nothing else claims
+    // it. The payload is deliberately **not** a valid IP packet: T3 asks whether the
+    // engine *took* the descriptor, and conflating that with "is the frame
+    // well-formed" is what gives a silent tcpdump a dozen causes instead of three.
+    let mut frame = [0u8; 64];
+    frame[..6].copy_from_slice(&[0xFF; 6]);
+    frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    frame[12..14].copy_from_slice(&0x88B5u16.to_be_bytes());
+    frame[14..18].copy_from_slice(b"SNCH");
+
+    if let Err(e) = transmit(&frame) {
+        crate::tracing::emit_log(&alloc::format!("gmac-tx: submit refused: {e:?}"));
+        return;
+    }
+    crate::tracing::emit_log("gmac-tx: submitted 1 frame");
+
+    // Bounded for the same reason MDIO's poll is: an engine that never answers must
+    // say so rather than wedge the boot.
+    let mut result = Reclaimed::default();
+    for _ in 0..100_000u32 {
+        result = reclaim();
+        if result.freed > 0 {
+            break;
+        }
+    }
+
+    if result.freed > 0 && result.failed == 0 {
+        crate::tracing::emit_log("gmac-tx: engine transmitted the frame");
+    } else if result.failed > 0 {
+        crate::tracing::emit_log("gmac-tx: engine returned the descriptor but reported failure");
+    } else {
+        crate::tracing::emit_log(
+            "gmac-tx: engine never cleared OWN — descriptor PA wrong (va_to_pa on a \
+             non-KERNEL_OFFSET address?), ring base not programmed, or ST not set",
+        );
+    }
+    crate::tracing::emit_log("gmac-tx: done");
 }

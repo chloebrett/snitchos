@@ -618,6 +618,8 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
         // registers, inline on the boot path, then fall through to the idle loop.
         // Board-only — nothing answers at 0x1604_0000 under QEMU or snemu.
         Some(WorkloadKind::GmacProbe) => device::gmac::probe(&dtb),
+        // Writes, unlike the probe — see the `GmacTx` variant's note.
+        Some(WorkloadKind::GmacTx) => device::gmac::tx_smoke(),
     }
 
     // DTB physical region lives in the identity gigapage we're about

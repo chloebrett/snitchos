@@ -26,6 +26,45 @@ const EID_HSM: u64 = 0x48534D;
 /// SBI TIME extension id ("TIME" packed as ASCII).
 const EID_TIME: u64 = 0x5449_4D45;
 
+/// SBI SRST (System Reset) extension id ("SRST" packed as ASCII).
+const EID_SRST: u64 = 0x5352_5354;
+
+/// `sbi_system_reset` `reset_type`: cold reboot — the platform restarts as if
+/// power-cycled, which is what makes the board pick up a freshly TFTP'd image.
+const RESET_TYPE_COLD_REBOOT: u64 = 1;
+
+/// `sbi_system_reset` `reset_reason`: no reason, i.e. an orderly request rather
+/// than a system failure.
+const RESET_REASON_NONE: u64 = 0;
+
+/// Cold-reboot the platform. SBI SRST extension, FID 0 (`sbi_system_reset`).
+///
+/// **Does not return on success** — the firmware resets before the `ecall`
+/// retires. A return value therefore always means failure, most usefully
+/// `SBI_ERR_NOT_SUPPORTED` on a platform whose firmware lacks SRST (QEMU `virt`
+/// with older OpenSBI, and snemu until it models the call). Callers should treat
+/// a return as "reboot unavailable" and say so rather than hanging.
+///
+/// The caller is responsible for getting any final telemetry *onto the wire*
+/// first: a reset that fires while bytes are still queued produces a truncated
+/// frame and an unexplained silence, which is precisely the diagnostic vacuum this
+/// exists to avoid. See `console::flush_tx_blocking`.
+pub fn system_reset_cold_reboot() -> i64 {
+    let error: i64;
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") EID_SRST,
+            in("a6") 0_u64, // FID 0 = sbi_system_reset
+            // Both are arguments *and* return slots — see `send_ipi`.
+            inlateout("a0") RESET_TYPE_COLD_REBOOT => error,
+            inlateout("a1") RESET_REASON_NONE => _,
+            options(nostack),
+        );
+    }
+    error
+}
+
 /// Arm the supervisor timer to fire at absolute time `deadline` (in `time`-CSR
 /// units). SBI TIME extension, FID 0 (`sbi_set_timer`) — portable to cores without
 /// Sstc (the JH7110 U74): the firmware programs the timer and delivers `STIP`.

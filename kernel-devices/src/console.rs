@@ -18,6 +18,67 @@
 //!
 //! See `plans/legacy/console-tier0-polled-rx.md`.
 
+/// The console line that asks the kernel to reboot itself via SBI SRST.
+///
+/// Newline-terminated on purpose: it is a *committed line*, not a prefix someone
+/// is halfway through typing. The leading run of `~` cannot begin a Stitch
+/// expression, so the token cannot be reached by editing real source.
+///
+/// **Unauthenticated by construction** — anyone holding the UART can reboot the
+/// board. Correct for a bench dev board, and recorded here so it is a decision
+/// rather than an oversight. See `plans/board-bridge.md` Step 5.
+pub const REBOOT_TOKEN: &[u8] = b"~~~reboot\n";
+
+/// Watches a console byte stream for [`REBOOT_TOKEN`], across arbitrary read
+/// boundaries.
+///
+/// **Why a sliding window and not a match cursor.** The obvious implementation
+/// keeps "how many bytes of the token match so far" and resets it to zero on a
+/// mismatch. That is wrong whenever the token's opening bytes repeat: given
+/// `~~~~reboot\n`, the fourth `~` fails to match `r`, the cursor resets, and the
+/// `~` that *begins* the real token is consumed by the reset rather than
+/// re-examined. The window compares the last `N` bytes seen and so cannot have
+/// that bug — no fallback table, and correctness that is obvious by inspection.
+///
+/// Ten bytes of state; this runs in the RX interrupt path.
+pub struct RebootDetector {
+    window: [u8; REBOOT_TOKEN.len()],
+    /// Bytes seen so far, saturating at the window size — below it the window is
+    /// not yet meaningful and must never compare equal.
+    seen: usize,
+}
+
+impl RebootDetector {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { window: [0; REBOOT_TOKEN.len()], seen: 0 }
+    }
+
+    /// Feed freshly-read console bytes. Returns `true` on the read that completes
+    /// the token.
+    ///
+    /// Scans the whole slice rather than returning early, so the window is left
+    /// consistent with every byte the console actually received.
+    pub fn feed(&mut self, bytes: &[u8]) -> bool {
+        let mut hit = false;
+        for &byte in bytes {
+            self.window.rotate_left(1);
+            self.window[REBOOT_TOKEN.len() - 1] = byte;
+            self.seen = self.seen.saturating_add(1);
+            if self.seen >= REBOOT_TOKEN.len() && self.window == REBOOT_TOKEN {
+                hit = true;
+            }
+        }
+        hit
+    }
+}
+
+impl Default for RebootDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A byte FIFO of fixed capacity `N`. `head` is the next byte to read, `tail`
 /// the next slot to write; `len` tracks occupancy so a full ring (`len == N`) is
 /// unambiguous from an empty one (`len == 0`) even when `head == tail`.
@@ -183,6 +244,76 @@ mod tests {
     fn pop_from_empty_is_none() {
         let mut r = ConsoleRing::<4>::new();
         assert_eq!(r.pop(), None);
+    }
+
+    /// The happy path: the whole token arrives in one read.
+    #[test]
+    fn the_reboot_token_is_recognised_in_a_single_read() {
+        let mut d = RebootDetector::new();
+        assert!(d.feed(REBOOT_TOKEN));
+    }
+
+    /// **The case that matters.** The RX ring hands over whatever arrived, so a
+    /// token typed at a terminal almost never lands in one read — it arrives a
+    /// keystroke at a time. A detector that only matches a contiguous buffer
+    /// passes every casual test and never fires in practice.
+    #[test]
+    fn the_reboot_token_is_recognised_when_split_across_reads() {
+        let mut d = RebootDetector::new();
+        let (head, tail) = REBOOT_TOKEN.split_at(4);
+        assert!(!d.feed(head), "not yet — only part of the token has arrived");
+        assert!(d.feed(tail));
+    }
+
+    /// One byte per read is the terminal-typing case, and the extreme of the split.
+    #[test]
+    fn the_reboot_token_is_recognised_one_byte_at_a_time() {
+        let mut d = RebootDetector::new();
+        let (last, rest) = REBOOT_TOKEN.split_last().expect("token is non-empty");
+        for &byte in rest {
+            assert!(!d.feed(&[byte]));
+        }
+        assert!(d.feed(&[*last]));
+    }
+
+    /// Ordinary console traffic must never reboot the board.
+    #[test]
+    fn ordinary_input_does_not_trigger_a_reboot() {
+        let mut d = RebootDetector::new();
+        assert!(!d.feed(b"let x = 1\nprint(x)\n"));
+        assert!(!d.feed(b"reboot\n"), "the bare word is not the token");
+        assert!(!d.feed(b"~~~reboot"), "no trailing newline — not a committed line");
+    }
+
+    /// A near-miss must not leave the detector primed. Without this, a partial
+    /// match followed by unrelated input could complete a token that was never
+    /// typed.
+    #[test]
+    fn an_aborted_token_does_not_prime_the_detector() {
+        let mut d = RebootDetector::new();
+        assert!(!d.feed(b"~~~rebo"));
+        // Unrelated bytes land in between: the prefix is abandoned, not merely
+        // paused. (Contrast the split-read test, where the halves are adjacent in
+        // the stream and *must* match.)
+        assert!(!d.feed(b"XYZ"));
+        assert!(!d.feed(b"ot\n"), "the abandoned prefix must not complete");
+    }
+
+    /// Overlap: the token's own opening bytes repeat, so a run of them followed by
+    /// a real token must still match. A detector that resets its match position to
+    /// zero on mismatch — the obvious implementation — drops the `~` that begins
+    /// the true token and misses this.
+    #[test]
+    fn a_run_of_leading_bytes_before_the_token_still_matches() {
+        let mut d = RebootDetector::new();
+        assert!(d.feed(b"~~~~~~reboot\n"));
+    }
+
+    /// The token buried in a longer read, with traffic on both sides.
+    #[test]
+    fn the_reboot_token_is_found_amid_surrounding_traffic() {
+        let mut d = RebootDetector::new();
+        assert!(d.feed(b"noise before ~~~reboot\nand after"));
     }
 
     /// A whole encoded frame goes in, or none of it does. Telemetry is a COBS

@@ -174,6 +174,14 @@ workloads! {
         /// from any code that has other suspects. See `docs/vf2-gmac-design.md`
         /// ("Rung −1") and `plans/vf2-gmac-driver.md`. `itest-workloads` only.
         GmacProbe,
+        /// JH7110 GMAC transmit smoke (M2.5): programs the TX descriptor ring, hands
+        /// the MAC one hand-built Ethernet frame, and reports whether the engine
+        /// took it — the `T3`/`T4` rungs of the design note's tracer-bullet ladder.
+        ///
+        /// Unlike [`GmacProbe`](Self::GmacProbe) this **writes**, so it is a separate
+        /// workload rather than a phase of the probe: the probe's value is that it
+        /// cannot perturb the state it reads. `itest-workloads` only.
+        GmacTx,
         /// Userspace heap-growth probe: runs the `heap-grow` program, which
         /// allocates far past the runtime's per-region map size — forcing the
         /// `talc` allocator to `map_anon` more frames from the kernel on demand.
@@ -809,6 +817,11 @@ mod tests {
     #[test]
     fn selects_gmac_probe() {
         assert_eq!(select("workload=gmac-probe"), Some(WorkloadKind::GmacProbe));
+    }
+
+    #[test]
+    fn selects_gmac_tx() {
+        assert_eq!(select("workload=gmac-tx"), Some(WorkloadKind::GmacTx));
     }
 
     #[test]

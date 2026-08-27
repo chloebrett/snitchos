@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use kernel_boot::bootargs::ConsoleMode;
 
 use crate::uart::Uart16550;
-use kernel_devices::console::ConsoleRing;
+use kernel_devices::console::{ConsoleRing, REBOOT_TOKEN, RebootDetector};
 
 /// The kernel's console UART, initialized lazily from the DTB at boot.
 ///
@@ -156,7 +156,77 @@ pub fn drain_rx() {
   let uart = unsafe { emergency_uart_at(emergency_uart_base()) };
   let mut ring = CONSOLE_RX.lock();
   while let Some(byte) = uart.read_byte() {
+    // Watch for the reboot line as the bytes go past. Deliberately *observed*
+    // here and *acted on* elsewhere: this runs in the external-interrupt handler,
+    // and the reset path emits a telemetry frame, which can intern a string and
+    // allocate. Doing that from an ISR is the re-entry deadlock this kernel has
+    // already paid for once (see the frame-allocator and IRQ notes in
+    // `.claude/CLAUDE.md`). So the ISR raises a flag; the heartbeat acts.
+    if REBOOT_DETECTOR.lock().feed(&[byte]) {
+      REBOOT_REQUESTED.store(true, Ordering::Release);
+    }
     ring.push(byte); // drop-on-full is handled inside the ring
+  }
+}
+
+/// Watches console input for [`REBOOT_TOKEN`]. Locked rather than per-call so the
+/// match survives across reads — the token arrives a keystroke at a time.
+static REBOOT_DETECTOR: crate::sync::Mutex<RebootDetector> =
+  crate::sync::Mutex::new(RebootDetector::new());
+
+/// Set when [`drain_rx`] has seen the reboot line. Read by the heartbeat, which
+/// owns the actual reset (see [`drain_rx`] for why the ISR does not).
+static REBOOT_REQUESTED: core::sync::atomic::AtomicBool =
+  core::sync::atomic::AtomicBool::new(false);
+
+/// Whether someone has asked the board to reboot over the console.
+pub fn reboot_requested() -> bool {
+  REBOOT_REQUESTED.load(Ordering::Acquire)
+}
+
+/// Withdraw a reboot request. For the one case that survives the reset call:
+/// firmware without SRST returns instead of rebooting, and a request left standing
+/// would re-attempt on every tick, burning a flush and a log line each time.
+pub fn clear_reboot_request() {
+  REBOOT_REQUESTED.store(false, Ordering::Release);
+}
+
+/// Push every queued TX byte out of the ring and wait for the UART to finish
+/// shifting them, polling rather than waiting on the THRE interrupt.
+///
+/// **For the moment before a reset.** The ring normally drains from the THRE
+/// interrupt, but a reset stops that machinery, and bytes still in the ring or the
+/// FIFO when the platform resets are simply lost — leaving a truncated frame and
+/// an unexplained silence, exactly the diagnostic vacuum a reason frame exists to
+/// prevent.
+///
+/// Bounded on purpose: a wedged UART must not turn "reboot" into "hang forever",
+/// which would be a strictly worse failure than the one being escaped. The budget
+/// is generous next to a 512-byte ring at 115200 baud (~44 ms) and still finite.
+pub fn flush_tx_blocking() {
+  /// Polling iterations before giving up. Each iteration writes at most one byte,
+  /// so this covers many ring-fulls; a UART that has not made progress by then is
+  /// not going to.
+  const MAX_SPINS: usize = 1_000_000;
+
+  // A fresh handle, like `drain_tx` — no println `UART` mutex to deadlock on.
+  let uart = unsafe { emergency_uart_at(emergency_uart_base()) };
+  let mut spins = 0usize;
+  loop {
+    if spins >= MAX_SPINS {
+      return;
+    }
+    spins += 1;
+    if !uart.thre() {
+      continue;
+    }
+    let popped = crate::trap::without_interrupts(|| TX_RING.lock().pop());
+    match popped {
+      Some(byte) => uart.write_thr(byte),
+      // Ring empty and the holding register is free: everything we queued has at
+      // least reached the shift register.
+      None => return,
+    }
   }
 }
 

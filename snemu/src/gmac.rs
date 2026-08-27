@@ -54,6 +54,9 @@ const TX_END_ADDR: u64 = 0x1120;
 
 /// `TDES3_OWN`.
 const TDES3_OWN: u32 = 1 << 31;
+/// `TDES3_ERROR_SUMMARY`, in the writeback format — the device's way of saying the
+/// transmit failed.
+const TDES3_ERROR_SUMMARY: u32 = 1 << 15;
 /// `TDES2_BUFFER1_SIZE_MASK`.
 const TDES2_SIZE_MASK: u32 = (1 << 14) - 1;
 /// One descriptor is four 32-bit words.
@@ -142,10 +145,22 @@ impl Gmac {
             let hi = u64::from(ram.read_u32(desc + 4).unwrap_or(0));
             let len = ram.read_u32(desc + 8).unwrap_or(0) & TDES2_SIZE_MASK;
             let buf = (hi << 32) | lo;
-            let frame =
-                (0..u64::from(len)).map(|i| ram.read_u8(buf + i).unwrap_or(0)).collect();
-            self.frames.push(frame);
-            let _ = ram.write_u32(desc + 12, tdes3 & !TDES3_OWN);
+            let fetched: Option<Vec<u8>> =
+                (0..u64::from(len)).map(|i| ram.read_u8(buf + i).ok()).collect();
+
+            // A descriptor whose buffer address does not resolve is a failed DMA
+            // fetch, and real silicon reports that in the writeback's error-summary
+            // bit rather than transmitting silently. Modelling it as success would
+            // make `OWN` cleared mean "the buffer address was fine", which it does
+            // not — the whole reason a bad `va_to_pa` is a *silent* bug.
+            let writeback = match fetched {
+                Some(frame) => {
+                    self.frames.push(frame);
+                    tdes3 & !TDES3_OWN
+                }
+                None => (tdes3 & !TDES3_OWN) | TDES3_ERROR_SUMMARY,
+            };
+            let _ = ram.write_u32(desc + 12, writeback);
         }
     }
 }
@@ -200,6 +215,34 @@ mod tests {
         let mut g = armed(ring_pa);
         g.service_tx(&mut mem);
         assert_eq!(g.frames(), &[b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn a_descriptor_naming_an_unreachable_buffer_reports_an_error() {
+        // The bug this exists to catch: `va_to_pa` passing a non-KERNEL_OFFSET
+        // address through unchanged, so the descriptor names an address that is not
+        // the frame. Clearing OWN alone would report that as success — it only ever
+        // proved the *descriptor* was fetched, never the buffer.
+        let ring_pa = RAM_BASE + 0x1000;
+        let mut mem = Memory::new(0x10000);
+        rig(&mut mem, ring_pa, RAM_BASE + 0x2000, b"hello");
+        mem.write_u32(ring_pa, 0xDEAD_0000u32).unwrap(); // buffer address nowhere
+        let mut g = armed(ring_pa);
+        g.service_tx(&mut mem);
+        let writeback = mem.read_u32(ring_pa + 12).unwrap();
+        assert_eq!(writeback & 0x8000_0000, 0, "still handed back");
+        assert_ne!(writeback & 0x8000, 0, "but flagged as an error");
+        assert!(g.frames().is_empty(), "and nothing was transmitted");
+    }
+
+    #[test]
+    fn a_successful_transmit_leaves_the_error_bit_clear() {
+        let (ring_pa, buf_pa) = (RAM_BASE + 0x1000, RAM_BASE + 0x2000);
+        let mut mem = Memory::new(0x10000);
+        rig(&mut mem, ring_pa, buf_pa, b"hello");
+        let mut g = armed(ring_pa);
+        g.service_tx(&mut mem);
+        assert_eq!(mem.read_u32(ring_pa + 12).unwrap() & 0x8000, 0);
     }
 
     #[test]

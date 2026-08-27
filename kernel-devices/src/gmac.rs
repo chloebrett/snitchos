@@ -37,8 +37,15 @@ pub const DMA_CH0_TX_CONTROL: usize = 0x1104;
 /// `DMA_CHAN_TX_BASE_ADDR` (channel 0) — a non-zero ring base means U-Boot left a
 /// descriptor ring behind, which says where its buffers live.
 pub const DMA_CH0_TX_BASE_ADDR: usize = 0x1114;
+/// `DMA_CHAN_TX_BASE_ADDR_HI` (channel 0) — the ring base's high half.
+pub const DMA_CH0_TX_BASE_ADDR_HI: usize = 0x1110;
+/// `DMA_CHAN_TX_END_ADDR` (channel 0) — the tail pointer. **Writing it is the
+/// transmit kick**: the device walks from wherever it is to here.
+pub const DMA_CH0_TX_END_ADDR: usize = 0x1120;
 /// `DMA_CHAN_TX_RING_LEN` (channel 0).
 pub const DMA_CH0_TX_RING_LEN: usize = 0x112C;
+/// `DMA_CONTROL_ST` — start the channel's transmit engine.
+pub const DMA_CONTROL_ST: u32 = 1 << 0;
 
 /// One register the probe reads and reports. **There is no value or write field**:
 /// the probe is read-only by construction rather than by convention, because the
@@ -195,6 +202,15 @@ pub const TDES3_FD: u32 = 1 << 29;
 pub const TDES3_CTXT: u32 = 1 << 30;
 /// `TDES3_OWN` — set means the device owns the descriptor. **Written last, always.**
 pub const TDES3_OWN: u32 = 1 << 31;
+/// `TDES3_ERROR_SUMMARY`, in the **writeback** format — the device's report that the
+/// transmit failed.
+///
+/// Checking this is not optional. `OWN` being cleared proves only that the device
+/// read the *descriptor*; a descriptor naming a buffer address that does not resolve
+/// is handed back exactly the same way. The error bit is the only thing that
+/// separates "transmitted" from "tried and failed", which is precisely the shape of
+/// a `va_to_pa` mistake.
+pub const TDES3_ERROR_SUMMARY: u32 = 1 << 15;
 
 /// One `dwmac4` transmit descriptor: four little-endian words the device reads by
 /// DMA. `#[repr(C)]` because the layout is the hardware's, not Rust's.
@@ -257,11 +273,23 @@ impl Descriptor {
     }
 
     /// Whether the device still owns this descriptor. Clearing `OWN` is how the MAC
-    /// reports completion — the reclaim signal, and (at T3) the first proof the DMA
-    /// engine read anything at all.
+    /// reports completion — the reclaim signal, and the first proof the DMA engine
+    /// read the *descriptor*. It says nothing about the buffer; see
+    /// [`transmit_failed`].
+    ///
+    /// [`transmit_failed`]: Descriptor::transmit_failed
     #[must_use]
     pub fn is_owned_by_device(&self) -> bool {
         self.tdes3 & TDES3_OWN != 0
+    }
+
+    /// Whether the device reported a failed transmit in its writeback. Only
+    /// meaningful once [`is_owned_by_device`] is false.
+    ///
+    /// [`is_owned_by_device`]: Descriptor::is_owned_by_device
+    #[must_use]
+    pub fn transmit_failed(&self) -> bool {
+        self.tdes3 & TDES3_ERROR_SUMMARY != 0
     }
 }
 
@@ -466,6 +494,22 @@ impl<const N: usize> TxRing<N> {
     #[must_use]
     pub const fn outstanding(&self) -> usize {
         self.outstanding
+    }
+
+    /// The slot [`submit`] will use next, or `None` when the ring is full.
+    ///
+    /// Callers need this *before* submitting: a descriptor names a per-slot buffer,
+    /// so the frame has to be copied into that slot's buffer to know what address to
+    /// put in the descriptor.
+    ///
+    /// [`submit`]: TxRing::submit
+    #[must_use]
+    pub const fn next_free_slot(&self) -> Option<usize> {
+        if self.outstanding >= self.capacity() {
+            None
+        } else {
+            Some(self.head)
+        }
     }
 
     /// Write a frame's descriptor body into the next free slot and return that slot.
@@ -751,6 +795,27 @@ mod tests {
         assert_eq!(r.submit(0x4020_0000, 64), Ok(0));
         assert_eq!(r.submit(0x4020_1000, 64), Ok(1));
         assert_eq!(r.outstanding(), 2);
+    }
+
+    #[test]
+    fn the_next_free_slot_is_the_one_submit_will_use() {
+        // The caller needs the slot *before* submitting, because the descriptor's
+        // buffer address is per-slot — it has to copy the frame into that slot's
+        // buffer to know what address to name. Two sources of "which slot" that
+        // disagreed would point a descriptor at another frame's bytes.
+        let mut r = ring();
+        assert_eq!(r.next_free_slot(), Some(0));
+        assert_eq!(r.submit(0x4020_0000, 64), Ok(0));
+        assert_eq!(r.next_free_slot(), Some(1));
+    }
+
+    #[test]
+    fn a_full_ring_has_no_next_free_slot() {
+        let mut r = ring();
+        for _ in 0..3 {
+            r.submit(0x4020_0000, 64).expect("within capacity");
+        }
+        assert_eq!(r.next_free_slot(), None);
     }
 
     #[test]

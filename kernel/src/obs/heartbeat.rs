@@ -176,6 +176,12 @@ pub fn run(metrics: Metrics) -> ! {
             sched::yield_now();
             continue;
         }
+        // Serviced before the tick's own work: once a reboot has been asked for,
+        // the remaining metrics are noise, and every frame emitted after the
+        // request is one more thing to flush before the reset can fire.
+        if crate::console::reboot_requested() {
+            reboot_now();
+        }
         {
             span!("kernel.heartbeat");
             count += 1;
@@ -278,6 +284,29 @@ fn heap_smoke_pattern(count: i64) {
             core::mem::forget(v);
         }
     }
+}
+
+/// Say why, get it on the wire, then cold-reboot via SBI SRST.
+///
+/// **The order is the whole point.** Emitting after the reset is impossible and
+/// emitting without flushing is nearly as bad: the ring drains from the THRE
+/// interrupt, so a reset that fires while bytes are queued truncates the very
+/// frame that explains the reboot, and the host sees an unexplained silence — the
+/// failure this is built to prevent. Emit, flush to the shift register, then act.
+/// Same shape the panic path already proved.
+///
+/// Returns only if the firmware refuses. That is a real case — SRST is optional,
+/// and snemu does not model it — so it must announce itself rather than hang, and
+/// the request is cleared so a refusal doesn't retry every tick forever.
+fn reboot_now() {
+    crate::tracing::emit_log("reboot: requested over console, resetting");
+    crate::console::flush_tx_blocking();
+
+    let error = crate::sbi::system_reset_cold_reboot();
+
+    // Unreachable when the firmware honours the call.
+    crate::console::clear_reboot_request();
+    crate::println!("reboot: SBI SRST refused (error={error}) — continuing");
 }
 
 fn emit_core(m: &Metrics, count: i64) {
