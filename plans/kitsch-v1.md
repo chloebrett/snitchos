@@ -1,9 +1,9 @@
 # `kitsch` v1 — the desktop
 
-**Status (2026-08-27)**: 🚧 **INCREMENT 0 IN PROGRESS.** Two of four numbers in
-hand, and the mode change they prompted has **landed and is gate-green** (132/132
-itests plain and `--scramble`). No kitsch code yet. Design:
-[../docs/kitsch-design.md](../docs/kitsch-design.md).
+**Status (2026-08-27)**: 🚧 **INCREMENT 0 COMPLETE; increment 1 next.** All four
+numbers measured, and the mode change they prompted has **landed and is gate-green**
+(132/132 itests plain and `--scramble`, host gate 149 passed). No kitsch code yet.
+Design: [../docs/kitsch-design.md](../docs/kitsch-design.md).
 
 **Scope of v1**: a keyboard-driven tiling desktop on real framebuffer pixels, with
 cell-mode surfaces, telemetry-derived window furniture, and three apps. Explicitly
@@ -88,15 +88,15 @@ No code beyond throwaway benchmarks. Three questions whose answers change what g
 built, and this repo's record on estimating them unaided is bad in both directions.
 
 1. **Full-screen blit cost.** ✅ measured, below.
-2. **Interpreter cost per event** — the `view`-per-message question, now load-bearing
-   for kitsch itself and not just for the app framework: how expensive is one Stitch
-   event handler, and how many can a frame afford?
+2. **Interpreter cost per event.** ✅ measured, below — ~24k instructions per list
+   element; the boundary holds.
 3. **Font budget.** ✅ answered, below — 4,096 bytes, one page, CP437 8×16.
 4. **Resolution.** ✅ decided and landed, below.
 
-**Status: 3 of 4 done.** Only (2) remains, and it needs a probe harness rather than
-a command — see below. It should not be skipped, because kitsch's policy layer
-running on the interpreter is a decision that rests on it.
+**Status: increment 0 COMPLETE.** All four answered below. The headline: the
+interpreter costs ~24k guest instructions per list element, which **validates the
+native boundary** rather than threatening it — Stitch may iterate over windows,
+never over cells.
 
 #### Findings so far (2026-08-27)
 
@@ -174,14 +174,59 @@ The itest kernel image's shared budget is a non-issue at this size — the conce
 bytes) is possible but pointless: it would save 2.5 KB and cost the box-drawing the
 window furniture needs. **Take the whole page.**
 
-**(2) Interpreter cost per event: NOT MEASURED — needs a purpose-built probe.**
-Neither existing instrument can see it (below). The harness it needs: a scenario that
-boots `workload=stitch-repl`, uses `View::send_input` to inject a probe line, and
-reads `stitch.eval.duration_ticks` (which the REPL already emits as a histogram) off
-the wire — subtracting a trivial line's cost to separate per-operation cost from the
-REPL's per-line parse + prelude re-registration. Since Stitch has no loop keywords,
-the probe iterates by fold or recursion. **This number now gates a design decision
-(kitsch's policy layer runs on the interpreter), so it should not be skipped.**
+**(2) Interpreter cost: ~24,000 guest instructions per list element.** Measured with
+a throwaway itest scenario (since removed; reproduce per *Method* below).
+
+| | 500 elems | 2500 elems | **slope** | fixed per-line |
+|---|---|---|---|---|
+| `--opt mid` (default: opt-1 userspace) | 15,146,228 | 64,887,843 | **24,871 / elem** | 2,771,135 |
+| `--opt max` (opt-3 userspace) | 13,838,063 | 60,544,196 | **23,353 / elem** | 2,220,101 |
+
+**Ticks are instructions.** snemu advances its clock `self.time += 1` per retired
+instruction (`snemu/src/machine.rs`), so the REPL banner's "~277 ms" is fictional
+here — the tick counts are guest instruction counts, 1:1. Quoting the milliseconds
+would have overstated the cost by whatever ratio snemu runs at.
+
+**The opt-1 userspace pin is not the explanation**: opt-3 buys **6%**. The cost is
+real at any optimisation level, which kills the obvious hypothesis before it could be
+used as a reason to defer.
+
+Each element is one lazy-range step, one `take` step, one list append (allocating),
+one closure call and one add — so roughly **5k instructions per interpreter
+operation**. Slow for a tree-walker, and consistent with `Rc`-based environments and
+no GC.
+
+**The rule that falls out, and it is not a preference:**
+
+> **Stitch may iterate over windows (tens). Stitch must never iterate over cells
+> (7,200).** 7,200 × 24k = **173M instructions** — about **85×** a full-screen native
+> clear post-optimisation. The compose-rasterize-present boundary was not merely
+> prudent; at this cost it is mandatory.
+
+Budget guidance: keep policy under **~100 interpreter operations per frame** (~0.5M
+instructions, well inside a frame that already spends ~2M on a worst-case native
+clear). An event handler of ~50 operations is ~1.2M instructions ≈ **0.8 ms on a
+1.5 GHz U74** — about 5% of a 60 Hz frame, for a handler that runs once per *event*
+rather than once per frame. Comfortable.
+
+**The REPL's 2.2M fixed per-line cost is prelude re-registration**, which a
+long-running kitsch pays once at startup rather than per event — which is exactly why
+the two-point slope method was used instead of subtracting a trivial baseline.
+
+**Method** (to reproduce): a scenario boots `workload=stitch-repl`, waits for the
+`stitch.demo` span, then for each size injects
+`emit("probe.N", 1.. |> take(N) |> toList |> fold(0, (a, b) -> a + b))` via
+`View::send_input`. It is **self-synchronising**: the line `emit`s its own result from
+*inside* the eval and the interpreter emits `stitch.eval.duration_ticks` at the *end*
+of that eval, so the first duration frame after the marker is unambiguously the right
+one — no reliance on draining boot self-test emissions. Two sizes; the slope cancels
+the fixed per-line cost exactly. Note `Seq` is **not** in REPL scope; use the range
+syntax `1..`.
+
+**Worth considering**: promoting this to a permanent guard. snemu is deterministic,
+so the number is exactly reproducible and a bound would never flake — and a silent
+10× interpreter regression is precisely the kind of thing that would kill kitsch
+without anyone noticing. Cost: ~8s of suite time.
 
 #### Two instrument gaps, same family
 
@@ -208,14 +253,50 @@ Both found while measuring, both worth fixing, and together they say something:
   [snemu-milestone-4-measurement.md](snemu-milestone-4-measurement.md) owns this
   spine. **Until then, do not build on per-scenario instret.**
 
-### 1 — Make `fill_rect` not terrible
+### 1 — Make `fill_rect` not terrible ✅ **DONE (2026-08-27)**
 
-One `u32` store instead of four `sb`, bounds checks hoisted out of the loop. Pure
-`kernel-devices` change with existing host tests covering the behaviour, so the
-tests come first and the disassembly is the acceptance check.
+**11 → 5 instructions per pixel.** A full 720p clear: **10.14M → 4.6M** instructions.
 
-**Done when**: the inner loop is ≤3 instructions per pixel, verified by
-disassembly, and the existing `fill_rect` tests are unchanged and green.
+Two changes, and the second was the one that mattered:
+
+1. **Fill a row at a time.** Slice once per row, then fill — one bounds check per
+   row instead of two per pixel. Got 11 → 6, but the stores were *still four `sb`*.
+2. **Hold the backing as `&mut [u32]`, not `&mut [u8]`.** This was the real blocker:
+   **a byte slice has alignment 1**, so LLVM cannot prove a four-byte store is
+   aligned and riscv64gc will not emit unaligned `sw`. No rearrangement of
+   byte-level code can fix that — the element type has to be the store width.
+   `stride` is now in pixels; the kernel's `present()` builds the slice as `u32`
+   with the alignment justified in its `SAFETY` comment (the region is
+   frame-aligned and `STRIDE = WIDTH * 4`).
+
+Resulting inner loop:
+
+```
+addi a4, a1, 0x4
+addi a0, a0, -0x4
+sw   a3, 0x0(a1)   ← one word store, was four sb
+mv   a1, a4
+bnez a0
+```
+
+**Landed at 5, not the ≤3 the criterion asked for** — recording the miss rather than
+moving the target. The gap is codegen slop, not structure: `mv a1, a4` is a
+redundant copy LLVM failed to coalesce, and 3 (`sw`/`addi`/`bne`) is the scalar floor
+with a pointer-compare termination. Two levers remain if the frame budget ever
+demands them, neither taken now:
+
+- **Pair pixels into `u64` stores** where the run is even and 8-byte aligned —
+  roughly halves the store count again.
+- Hand-unrolling, which amortises the loop overhead but fights the compiler.
+
+TDD note: this is a **behaviour-preserving** change, so there was no honest RED. Two
+**characterisation** tests were added first, chosen for what this specific rewrite
+was at risk of breaking — a partial-width rect combined with stride padding (the
+combination the existing tests missed), and degenerate empty rects. Both passed
+before and after; the acceptance check was the disassembly.
+
+**Gate**: 7/7 `kernel-devices` framebuffer tests, 133/133 itests plain **and**
+`--scramble`.
 
 ### 2 — `kitsch-render`: font, compose, rasterize
 

@@ -350,66 +350,6 @@ pub fn stitch_telemetry_on_the_wire(h: &mut View) -> Result<(), String> {
 /// the expression consumes "hello" → emits `io.len`=5. Proves console *input*
 /// reaches a Stitch program end-to-end on-target (the write side is proven by the
 /// REPL rendering its own output through the same platform).
-/// **Increment-0 probe for `plans/kitsch-v1.md`** — how much does one Stitch
-/// operation cost on target? kitsch's policy layer is a Stitch program, so the
-/// answer decides whether an interpreted compositor can hold a frame budget.
-///
-/// Two evals of the same shape at different sizes; the **slope** between them
-/// cancels the REPL's fixed per-line cost (parse + prelude re-registration)
-/// exactly, which a baseline subtraction would only approximate.
-///
-/// Self-synchronising: each probe line `emit`s its own result from *inside* the
-/// eval, and the interpreter emits `stitch.eval.duration_ticks` at the *end* of
-/// that eval — so the first duration frame after the marker is unambiguously the
-/// one we asked for, with no reliance on draining boot self-test emissions.
-///
-/// Reports by failing: a probe's job is to print a number, not to gate.
-pub fn stitch_op_cost_probe(h: &mut View) -> Result<(), String> {
-    const SMALL: u32 = 500;
-    const LARGE: u32 = 2500;
-
-    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
-        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
-
-    let mut measure = |marker: &str, n: u32| -> Result<i64, String> {
-        let line = format!(
-            "emit(\"{marker}\", 1.. |> take({n}) |> toList |> fold(0, (a, b) -> a + b))\n"
-        );
-        h.send_input(line.as_bytes()).map_err(|e| format!("inject probe {marker}: {e}"))?;
-
-        h.wait_for(SEC * 60, |f, strings| match f {
-            OwnedFrame::Metric { name_id, .. } => {
-                strings.get(name_id).map(String::as_str) == Some(marker)
-            }
-            _ => false,
-        })
-        .ok_or_else(|| format!("probe {marker} never emitted within 60s — did the line parse?"))?;
-
-        let frame = h
-            .wait_for(SEC * 60, is_metric_named("stitch.eval.duration_ticks"))
-            .ok_or_else(|| format!("no eval duration after {marker} within 60s"))?;
-
-        match frame {
-            OwnedFrame::Metric { value, .. } => Ok(value),
-            _ => Err("duration frame was not a Metric".to_string()),
-        }
-    };
-
-    let small = measure("probe.small", SMALL)?;
-    let large = measure("probe.large", LARGE)?;
-
-    let d_elems = i64::from(LARGE - SMALL);
-    let slope = (large - small) as f64 / d_elems as f64;
-
-    Err(format!(
-        "PROBE RESULT (not a failure): {SMALL} elems = {small} ticks, {LARGE} elems = {large} ticks; \
-         slope = {slope:.2} ticks/element over {d_elems} elements. \
-         Each element costs roughly one Seq.iterate step, one take step and one fold lambda call, \
-         so per-interpreter-operation is roughly slope/3 = {:.2} ticks.",
-        slope / 3.0
-    ))
-}
-
 pub fn stitch_reads_a_line(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
         .ok_or("stitch REPL never reached its boot self-test within 30s")?;
@@ -4989,6 +4929,58 @@ pub fn framebuffer_absent_degrades_gracefully(h: &mut View) -> Result<(), String
 
     h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
         .ok_or("no heartbeat within 10s after the refusal — kernel hung on the missing device?")?;
+
+    Ok(())
+}
+
+/// `workload=gmac-probe` reconnaissance reaches the wire, in order, and reads a MAC
+/// that identifies itself (`plans/vf2-gmac-driver.md`, `docs/vf2-gmac-design.md`).
+///
+/// **What this proves is the glue, not the register map.** snemu's GMAC model
+/// (`snemu/src/gmac.rs`) is built from the same mainline headers as
+/// `kernel_devices::gmac`, so a wrong offset would be wrong identically on both
+/// sides and agree. What it does cover is ours to get wrong: that the megapages get
+/// mapped at all (an unmapped read halts the run), that the target table is walked
+/// in order, that a breadcrumb precedes every access, that the version word is
+/// *masked* rather than compared whole — snemu answers `0x00001052`, so a guest
+/// that forgot to mask fails here instead of on the board — and that the reset
+/// status decodes. Layout fidelity is settled at T0–T4 on hardware.
+pub fn gmac_probe_identifies_the_core(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg.starts_with("gmac-probe: read gmac1.version"))
+    })
+    .ok_or(
+        "no 'read gmac1.version' breadcrumb within 10s — the probe never reached its first \
+         MMIO access. The breadcrumb precedes the read deliberately, so its absence means the \
+         probe didn't start, not that the read hung",
+    )?;
+
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("core version 0x52") && msg.contains("can be believed"))
+    })
+    .ok_or(
+        "no 'core version 0x52 … can be believed' within 10s — the version read didn't identify \
+         a dwmac-5.20. Either the megapage wasn't mapped, or the guest compared the whole \
+         version word instead of masking its low byte (snemu answers 0x00001052 precisely to \
+         catch that)",
+    )?;
+
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg == "gmac-probe: gmac1 resets released")
+    })
+    .ok_or(
+        "no 'gmac1 resets released' within 10s — gmac1_resets_released() didn't decode snemu's \
+         all-ones SYSCRG status, or the syscrg targets weren't reached",
+    )?;
+
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg == "gmac-probe: done")
+    })
+    .ok_or(
+        "no 'gmac-probe: done' within 10s — the probe started but didn't finish. The last \
+         'read …' Log on the wire names the target it stopped on",
+    )?;
 
     Ok(())
 }

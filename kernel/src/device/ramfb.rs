@@ -106,9 +106,15 @@ pub fn present() {
     // SAFETY: `READY` is only set after `init` has mapped exactly
     // `[FB_VA_BASE, FB_VA_BASE + SIZE_BYTES)` R+W and handed that same
     // region's physical address to the device — nothing else maps or
-    // touches this VA range, so a mutable byte slice over it is sound.
-    let bytes = unsafe { core::slice::from_raw_parts_mut(FB_VA_BASE as *mut u8, SIZE_BYTES) };
-    let mut fb = PixelView::new(bytes, WIDTH, HEIGHT, STRIDE);
+    // touches this VA range, so a mutable slice over it is sound. The
+    // `u32` element type is sound too: `FB_VA_BASE` is frame-aligned (it
+    // is a page-granular mapping) and `SIZE_BYTES` is `STRIDE * HEIGHT`
+    // with `STRIDE = WIDTH * 4`, so the region is a whole number of
+    // 4-byte-aligned pixels. That alignment is what lets `fill_rect`
+    // compile to one `sw` per pixel instead of four `sb`.
+    let pixels =
+        unsafe { core::slice::from_raw_parts_mut(FB_VA_BASE as *mut u32, SIZE_BYTES / 4) };
+    let mut fb = PixelView::new(pixels, WIDTH, HEIGHT, STRIDE / 4);
     fb.clear(0x20_20_40);
     FRAMES_PRESENTED.inc();
 }

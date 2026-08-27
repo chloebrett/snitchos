@@ -1,6 +1,14 @@
 # Plan: the board bridge — driving the VisionFive 2 from the host
 
-**Status (2026-08-27)**: 🚧 **STARTED — Steps 1–3 are done; steps 4–9 are open.**
+**Status (2026-08-27)**: 🚧 **STARTED — Steps 1–4 are code-complete and gate-green;
+steps 4b–9 are open.** Step 4's acceptance criterion is *not* met: nothing here has
+run against a real UART, and `serialport::open` plus the live read loop are the
+untested boundary. **Everything from step 4b onward needs hardware to develop
+against** — "interrupt autoboot within the countdown" has no host-side oracle — so a
+first-light session with the board is the natural next move, not more code. The
+on-board steps are written up as §3 of
+[../docs/next-board-session.md](../docs/next-board-session.md), batched with the
+other board-required work so the setup overhead is paid once.
 The `xtask-board` crate exists and is a workspace member, carrying `reach.rs` (the
 "could not reach the board" vs "reached it and it said nothing" failure taxonomy,
 Step 1), `stop.rs` (the composed stop-condition evaluator, Step 2) and `split.rs`
@@ -501,7 +509,38 @@ the same policy (`OnDecodeError::Resync`).
 
 ---
 
-### Step 4: `cargo xtask board exec` — the CLI over steps 1–3
+### Step 4: `cargo xtask board exec` — the CLI over steps 1–3 — 🟡 CODE LANDED, BOARD-UNVERIFIED
+
+**Result**: `xtask-board` gained a binary; lean `xtask` forwards via `delegate_to`.
+Exit codes are the interface — `0` ended as asked, `1` reached the board but the
+awaited event never came, `2` never reached it — and `outcome::exit_code` shares
+its rule with `script::run` through `StopCondition::satisfied_by`, so the CLI and a
+script can never disagree about whether a step succeeded.
+
+Two modules fell out that the plan did not anticipate, both because **mutation
+testing found design flaws, not just missing tests**:
+
+- **`wire::Ended`.** `capture` originally returned `StopReason::Timeout` for *both*
+  a deadline and a dead transport, so no assertion could tell them apart — the
+  mutants covering that branch were unkillable, which is what exposed it. That is
+  the same conflation `reach` and `script` each exist to prevent, thrown away at
+  the bottom of the stack. A mid-capture transport death is now an
+  `Outcome::Unreachable` and exits `2`, so an unattended loop retries the *host*
+  rather than rebooting a board that was answering fine.
+- **`reach::refine_with_holder`.** The `NoDevice` disambiguation was inline in glue
+  and deletable without a test noticing.
+
+**Coverage**: 60 tests, 48 mutants caught, 17 unviable, 0 timeouts, **7 missed —
+all in `main.rs`** (the entry point, `emit`/`report` formatting, the `consult_lsof`
+shell-out whose *decision* is tested in the lib). That layer's real coverage is a
+board, the same argument CLAUDE.md makes for excluding `kernel/`.
+
+**⏳ Outstanding, and it is the acceptance criterion**: none of this has touched a
+real UART. `serialport::open` and the live read loop are the untested boundary.
+Verified by hand only that a bad path yields `NoSuchDevice` and a `tty.*` path is
+refused *instantly* — the failure that otherwise blocks forever.
+
+### Step 4 (as originally written): `cargo xtask board exec` — the CLI over steps 1–3
 
 **Acceptance criteria**: `cargo xtask board exec "<text>" [--until-quiet Nms |
 --until <marker> | --timeout Nms]` opens the port, writes the input, captures to the

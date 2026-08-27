@@ -280,7 +280,6 @@ catalog! {
     wfi "manifest-satisfy-refuses-unsatisfiable" scenarios::manifest_satisfy_refuses_unsatisfiable [userspace, fs] {"manifest-satisfy"};
     wfi "manifest-satisfy-attenuates"     scenarios::manifest_satisfy_attenuates     [userspace, fs] {"manifest-satisfy"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
-    wfi "stitch-op-cost-probe"            scenarios::stitch_op_cost_probe           [userspace, stitch] {"stitch-repl"};
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
     wfi "stitch-float-evaluates-on-target" scenarios::stitch_float_evaluates_on_target [userspace, stitch, fp] {"stitch-repl"};
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};
@@ -347,6 +346,7 @@ catalog! {
     // with a non-ramfb scenario under `--shared`.
     wfi "framebuffer-presents"            scenarios::framebuffer_presents           [display, ramfb] {"ramfb"};
     wfi "framebuffer-absent-degrades-gracefully" scenarios::framebuffer_absent_degrades_gracefully [display];
+    wfi "gmac-probe-identifies-the-core"  scenarios::gmac_probe_identifies_the_core  [gmac]          {"gmac-probe"};
 }
 
 /// Set the process-wide failure-capture transcript depth. Call once at
