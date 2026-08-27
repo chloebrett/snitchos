@@ -15,6 +15,15 @@ publish = false
 # a bridge over a serial cable has no business compiling a web server. The serial
 # module is deliberately not `native`-gated so this works — see its module docs.
 collector = { path = "../collector", default-features = false }
+# The wire format. `features = ["std"]` is what turns on `protocol::stream` —
+# `try_decode_frame` and `OwnedFrame`, which the two-phase splitter is built on.
+protocol = { path = "../protocol", features = ["std"] }
+
+[dev-dependencies]
+# Test fixtures are built with `protocol::wire_encode` over real `Frame`s rather
+# than hand-typed byte arrays, so they stay true if the encoding changes. Naming
+# a `CapEvent`'s fixed-size name field needs `CAP_NAME_LEN`.
+snitchos-abi = { path = "../abi" }
 
 [lints]
 workspace = true

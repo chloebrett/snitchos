@@ -4,6 +4,7 @@
 //! serial-linked half; lean `xtask` forwards to it.
 
 pub mod reach;
+pub mod split;
 pub mod stop;
 
 // # Releasing the port
@@ -352,5 +353,214 @@ mod stop_tests {
         let mut c = Capture::new(StopCondition::new(ms(10_000)).quiet_after(ms(300)));
         assert_eq!(c.observe(ms(10), b"plenty of output to not remember"), None);
         assert_eq!(c.retained_bytes(), 0);
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::split::split;
+    use protocol::stream::OwnedFrame;
+    use protocol::{CapEventKind, CapObject, Frame, SpanId, StringId, wire_encode};
+
+    /// Fixtures are built by encoding real `Frame`s, never by hand-typing bytes:
+    /// the properties under test are properties of *the wire format*, and a
+    /// hardcoded array would keep passing after the format moved out from under
+    /// it.
+    fn wire(frame: &Frame<'_>) -> Vec<u8> {
+        let mut buf = [0u8; 520];
+        wire_encode(frame, &mut buf).expect("frame fits the UART sink's scratch").to_vec()
+    }
+
+    fn stream(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    fn hello() -> Frame<'static> {
+        Frame::Hello { timebase_hz: 4_000_000, protocol_version: 1 }
+    }
+
+    /// What the cable really carries across `booti` — no `0x00` anywhere in it,
+    /// which is the whole reason the first frame shares a chunk with it.
+    const UBOOT: &str = "\r\nU-Boot SPL 2021.10\r\nStarting kernel ...\r\n";
+
+    #[test]
+    fn a_capture_of_only_frames_yields_no_text() {
+        let bytes = stream(&[&wire(&hello()), &wire(&Frame::Dropped { count: 0 })]);
+        let out = split(&bytes);
+        assert_eq!(out.io_text, "");
+        assert_eq!(out.frames.len(), 2);
+        assert_eq!(out.resyncs, 0);
+    }
+
+    /// **The case this step exists for.** U-Boot's log contains no `0x00`, so the
+    /// first terminator on the wire is the *first frame's* — text and `Hello`
+    /// land in one chunk. A decoder that drops that chunk loses `Hello`, and
+    /// `Hello` is sent exactly once per boot and carries `timebase_hz`. Measured
+    /// against the collector's own decoder, which does lose it.
+    #[test]
+    fn the_uboot_handoff_keeps_both_the_log_and_the_first_frame() {
+        let bytes = stream(&[
+            UBOOT.as_bytes(),
+            &wire(&hello()),
+            &wire(&Frame::StringRegister { id: StringId(1), value: "kernel.boot" }),
+        ]);
+        let out = split(&bytes);
+        assert_eq!(out.io_text, UBOOT, "the boot log must survive intact");
+        assert_eq!(
+            out.frames.first(),
+            Some(&OwnedFrame::Hello { timebase_hz: 4_000_000, protocol_version: 1 }),
+            "Hello must be recovered from the chunk it shares with the text"
+        );
+        assert_eq!(out.frames.len(), 2);
+        assert_eq!(out.resyncs, 0, "nothing was lost, so nothing may be reported lost");
+    }
+
+    /// Text is not only *in front of* the frames. `open_stream` (which sends
+    /// `Hello`) runs long before `console=frames` is applied, so early-boot
+    /// `println!`s go raw to the same UART while frames are already flowing.
+    /// The rule has to be uniform, not a one-time handoff detector.
+    #[test]
+    fn text_interleaved_between_frames_is_recovered() {
+        let bytes = stream(&[
+            &wire(&hello()),
+            b"virtio-console: ready\n",
+            &wire(&Frame::Dropped { count: 0 }),
+        ]);
+        let out = split(&bytes);
+        assert_eq!(out.io_text, "virtio-console: ready\n");
+        assert_eq!(out.frames.len(), 2);
+        assert_eq!(out.resyncs, 0);
+    }
+
+    /// COBS strips `0x00` and nothing else, so `0x0A` rides through a frame body
+    /// freely — `SpanId(10)` *is* a newline byte. Any splitter that treats `\n`
+    /// as a boundary cuts this frame in half. Measured: 2.7% of `SpanEnd` frames
+    /// carry one by timestamp alone, plus every frame holding a 10 in any field.
+    #[test]
+    fn a_frame_whose_body_contains_a_newline_byte_survives_intact() {
+        let span = Frame::SpanStart {
+            id: SpanId(10),
+            parent: SpanId(0),
+            name_id: StringId(3),
+            t: 1_234_567,
+            task_id: 1,
+            hart_id: 0,
+        };
+        let encoded = wire(&span);
+        assert!(encoded.contains(&b'\n'), "fixture must actually exercise the hazard");
+
+        let out = split(&stream(&[UBOOT.as_bytes(), &encoded]));
+        assert_eq!(out.io_text, UBOOT);
+        assert_eq!(out.frames, vec![OwnedFrame::from_borrowed(&span)]);
+        assert_eq!(out.resyncs, 0);
+    }
+
+    /// The ambiguous chunk, taken from a sweep rather than imagined: `CapEvent`
+    /// admits more than one start offset that decodes cleanly to the terminator,
+    /// and the *earliest* of them is wrong. Latest-wins was measured correct on
+    /// all 96 mixed chunks swept; this is the one that discriminates.
+    #[test]
+    fn the_latest_valid_frame_start_wins_where_several_decode() {
+        let cap = Frame::CapEvent {
+            kind: CapEventKind::Granted,
+            cap_id: 9,
+            parent_cap_id: 0,
+            holder: 2,
+            object: CapObject::TelemetrySink,
+            rights: 3,
+            badge: 0,
+            t: 42,
+            hart_id: 0,
+            name: [0u8; snitchos_abi::CAP_NAME_LEN],
+        };
+        let out = split(&stream(&[UBOOT.as_bytes(), &wire(&cap)]));
+        assert_eq!(out.io_text, UBOOT, "an earliest-wins tie-break eats 24 bytes of the log");
+        assert_eq!(out.frames, vec![OwnedFrame::from_borrowed(&cap)]);
+        assert_eq!(out.resyncs, 0);
+    }
+
+    /// U-Boot's `=> ` prompt never gets a newline and never gets a `0x00`. If a
+    /// trailing run with no terminator were dropped, step 4b's output would look
+    /// empty at exactly the moment it worked.
+    #[test]
+    fn trailing_text_with_no_terminator_is_kept() {
+        let out = split(&stream(&[&wire(&hello()), b"=> "]));
+        assert_eq!(out.io_text, "=> ");
+        assert_eq!(out.frames.len(), 1);
+    }
+
+    #[test]
+    fn a_capture_with_no_frames_at_all_is_all_text() {
+        let out = split(UBOOT.as_bytes());
+        assert_eq!(out.io_text, UBOOT);
+        assert!(out.frames.is_empty());
+        assert_eq!(out.resyncs, 0);
+    }
+
+    #[test]
+    fn an_empty_capture_is_empty() {
+        let out = split(b"");
+        assert_eq!(out.io_text, "");
+        assert!(out.frames.is_empty());
+        assert_eq!(out.resyncs, 0);
+    }
+
+    /// Corruption is counted and survived, never fatal — a serial line drops
+    /// bytes for reasons no software prevents, and one bad frame must not end
+    /// the capture. COBS resyncs at the next delimiter by construction.
+    #[test]
+    fn corruption_costs_one_resync_and_the_stream_continues() {
+        let bytes = stream(&[
+            &wire(&hello()),
+            &[0xF0, 0x9F, 0x92, 0xA9, 0xFE, 0xFD, 0x00],
+            &wire(&Frame::Dropped { count: 7 }),
+        ]);
+        let out = split(&bytes);
+        assert_eq!(out.resyncs, 1, "a chunk that was frame-shaped and undecodable is a lost frame");
+        assert_eq!(
+            out.frames,
+            vec![
+                OwnedFrame::Hello { timebase_hz: 4_000_000, protocol_version: 1 },
+                OwnedFrame::Dropped { count: 7 },
+            ],
+            "the frame after the corruption must not be swallowed with it"
+        );
+    }
+
+    /// `resyncs` counts **frames lost**, not "chunks that were not frames". A
+    /// stray `0x00` inside U-Boot text costs nothing — there was never a frame
+    /// there — so reporting it as a loss would send someone hunting for a
+    /// transport fault that does not exist.
+    #[test]
+    fn a_nul_inside_plain_text_is_text_not_a_lost_frame() {
+        let out = split(b"boot\0log\r\n");
+        assert_eq!(out.io_text, "bootlog\r\n");
+        assert!(out.frames.is_empty());
+        assert_eq!(out.resyncs, 0);
+    }
+
+    /// The reason the plan chose per-chunk recovery over one-time handoff
+    /// detection: a board that resets mid-capture starts a whole second session,
+    /// text and all, and the capture has to keep making sense across it.
+    #[test]
+    fn a_reboot_mid_capture_recovers_the_second_session() {
+        let bytes = stream(&[
+            &wire(&hello()),
+            &wire(&Frame::Dropped { count: 1 }),
+            UBOOT.as_bytes(),
+            &wire(&hello()),
+        ]);
+        let out = split(&bytes);
+        assert_eq!(out.io_text, UBOOT);
+        assert_eq!(
+            out.frames,
+            vec![
+                OwnedFrame::Hello { timebase_hz: 4_000_000, protocol_version: 1 },
+                OwnedFrame::Dropped { count: 1 },
+                OwnedFrame::Hello { timebase_hz: 4_000_000, protocol_version: 1 },
+            ],
+            "the second session's Hello must be recovered exactly like the first"
+        );
+        assert_eq!(out.resyncs, 0);
     }
 }
