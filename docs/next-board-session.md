@@ -3,11 +3,16 @@
 **Written 2026-08-27**, from a verification sweep of every in-flight plan against
 the tree.
 
-The VisionFive 2 is usually not to hand. That makes board time the scarcest
-resource in this project, and it fails in a specific way: you plug in, do the one
-thing you sat down for, and only afterwards notice that four other questions
-needed the same board and could have been answered in the same hour. This file
-exists so the next session is a batch, not a single errand.
+The VisionFive 2 is across the room, not far away — but in its current state it
+needs wiring up each time, including a long ethernet cable, and that setup is
+enough of a nuisance that you don't do it on a whim. So the cost is not *reaching*
+the board, it is the fixed overhead of standing it up. That overhead is paid once
+per session regardless of how much you do once it's running, which is the whole
+argument for batching: the marginal question is nearly free, the first one is not.
+
+The failure mode this file prevents: wire it all up, do the one thing you sat down
+for, tear down — and only afterwards notice that four other questions needed the
+same board and could have ridden along in the same session.
 
 Everything here is board-*required*. Anything that could be answered at a desk has
 already been answered at a desk — the items below are exactly the residue.

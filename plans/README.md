@@ -19,7 +19,7 @@ the first is work in progress:
 | Bucket | Count | What it means |
 |---|---|---|
 | [In flight](#in-flight) | 17 | Real work, partially done. |
-| [Not started](#not-started) | 6 | Written down, zero code. A plan is cheap; that's deliberate. |
+| [Not started](#not-started) | 7 | Written down, zero code. A plan is cheap; that's deliberate. |
 | [Done bar a detail](#done-bar-a-detail) | 1 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
 
@@ -62,6 +62,7 @@ Written down, nothing built. Ordered roughly by what unblocks what:
 | [kitsch-v1.md](kitsch-v1.md) | The desktop: surfaces as caps, cell-mode tiling on real pixels ([../docs/kitsch-design.md](../docs/kitsch-design.md)). Increment 0 is four numbers; increment 1 is memory-object capabilities, which several other things want |
 | [vf2-display.md](vf2-display.md) | JH7110 DC8200/HDMI — capture a vendor MMIO trace and replay it |
 | [corpus-mvp-spike.md](corpus-mvp-spike.md) | Increment 0 of corpus-mvp: a decision and four numbers, not code |
+| [tinynerd.md](tinynerd.md) | Pretrain on purpose-built simple technical prose, then fine-tune on Stitch — so the ~46% of the budget that goes on comment English stops buying nothing. Steps 1–3 are cheap probes that gate the generation compute; step 3 is the never-run arm the [batch9 findings](../notes/batch9-findings.md) asked for. Shares its split-metric step with [kvetch-next-measurements.md](kvetch-next-measurements.md) — build it once |
 | [stim-grammar.md](stim-grammar.md) | Post-v1 grammar follow-up for stim |
 | [open-sourcing-extractables.md](open-sourcing-extractables.md) | Which pieces could stand alone outside the repo |
 
