@@ -46,6 +46,63 @@ both directions.
 
 **Done when**: four numbers are written into this file and the resolution is chosen.
 
+#### Findings so far (2026-08-27)
+
+**(4) Resolution: already decided — 1024×768 XRGB8888**, no row padding, exactly
+3 MiB / 768 frames, mapped at `FB_VA_BASE` (root PTE slot 258). Shipped in
+`kernel/src/device/ramfb.rs`. At 8×16 that is a **128×48 cell grid**, which is a
+good desktop. No decision needed; inherited.
+
+**(1) Full-screen blit: 8.65M guest instructions.** Measured by disassembling the
+emitted riscv code rather than by timing — a claim about what a compiler emits is
+empirical. `Framebuffer::fill_rect`'s inner loop at opt-3 is **11 instructions per
+pixel**:
+
+```
+bltu t3, a0     ← bounds check 1 (not elided)
+addi a4, a0, 4
+bltu a2, a4     ← bounds check 2 (not elided)
+add  a0, a0, t5
+addi a3, a3, -1
+sb   a1, 0(a0)  ← FOUR BYTE STORES, not one sw
+sb   a5, 1(a0)
+sb   t6, 2(a0)
+sb   t4, 3(a0)
+mv   a0, a4
+bnez a3
+```
+
+786,432 px × 11 = **8.65M instructions per full-screen clear**. For scale, the
+profiler's entire 100M-instruction post-boot window has `sched::prepare_switch`, its
+busiest kernel function, at 18.2M — so **one full clear costs about half of what the
+whole scheduler does across 100M instructions**, and 60 Hz of full clears would be
+~519M instr/s.
+
+**This is a naive-code problem, not a physics problem.** `copy_from_slice` on a
+4-byte slice did not lower to a word store, and neither bounds check was hoisted out
+of the loop. A `u32` store with the checks hoisted is ~2–3 instructions per pixel —
+a **4–5× win**, taking a full clear to ~2M. Two consequences:
+
+- Optimising `fill_rect` is a prerequisite, and it is a `kernel-devices` change with
+  existing host tests — cheap, and it belongs before increment 4.
+- **Damage tracking is not an optimisation here, it is the design.** Full-screen
+  presents are not affordable at any interesting rate even after the 4–5×; kitsch
+  must present dirty cells.
+
+**Instrument gaps found while measuring** — both worth fixing, neither blocking:
+
+- `cargo xtask snemu profile` boots without `-device ramfb`, so `present()` is a
+  silent no-op and the framebuffer never appears in a profile. Needs a way to enable
+  ramfb on the profile path before any display work can be profiled at all.
+- **Unexplained**: `--record-instret` over the two `framebuffer-*` scenarios differs
+  by only 6,692 instructions (20,660,918 vs 20,667,610), when the presenting one
+  should be ≥8.65M higher for even a single present. Either presents are not
+  happening in the recorded window, or per-scenario instret measures a post-fork
+  delta that excludes them (snapshot sharing). **Do not build on either scenario's
+  instret until this is resolved** — a wrong instrument agrees rather than errors.
+
+**(2) `view`-per-message and (3) font budget**: not yet measured.
+
 ### 1 — Memory objects in the kernel
 
 `Object::Memory { frames, .. }` with `READ`/`WRITE` rights, an ambient `MemCreate`

@@ -1,9 +1,12 @@
 # Plan: A Tour of SnitchOS — the tracer chapter
 
-**Status (2026-08-27)**: 🚧 **STARTED — the chapter schema exists.** Written
-2026-08-27; the `tour` crate (`tour/src/{lib,anchor,search}.rs`) now owns the
-chapter schema and the anchor predicate, host-tested and linked into
-`snemu-wasm` so the browser stops at the frame the gate asserts at.
+**Status (2026-08-27)**: 🚧 **STARTED — steps 1–5 done.** Written 2026-08-27. The
+`tour` crate (`tour/src/{lib,anchor,search}.rs`) owns the chapter schema, the
+anchor predicate and the bounded anchor search, all host-tested; the first
+chapter lives at `tour/chapters/capabilities.{toml,mdx}`; `snemu-wasm` records a
+stamped input log. Both drivers are *designed* to link `tour` so they stop at the
+same frame — the gate does so in step 6, the browser in step 8. Next: **step 6**,
+the drift check in `cargo xtask test`.
 
 Implements stage 3 of [../docs/tour-and-user-docs-design.md](../docs/tour-and-user-docs-design.md)
 (snapshot-pinned chapters + the CI contract), with two of that design's calls
