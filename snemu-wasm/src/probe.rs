@@ -68,7 +68,7 @@ const PROGRAM: [u32; 13] = [
 /// What one probe run observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
-    /// Instructions retired. Equal to [`BUDGET`] unless stepping faulted early.
+    /// Instructions retired. Equal to `BUDGET` unless stepping faulted early.
     pub instret: u64,
     /// `x0..=x7`. `x0` is included precisely because it must stay zero.
     pub regs: [u64; 8],
@@ -113,7 +113,7 @@ impl Speedups {
     }
 }
 
-/// Run [`PROGRAM`] for [`BUDGET`] instructions and report the result.
+/// Run `PROGRAM` for `BUDGET` instructions and report the result.
 ///
 /// Deterministic by construction: no clock, no entropy, no host I/O. snemu's
 /// clock is the instruction counter, which is why the browser gets determinism
@@ -188,7 +188,7 @@ pub fn check_portable(p: &Probe) {
 /// by assumption: wasm32 produces `10084449359911607788` for byte-identical machine
 /// state, because the digest folds in `usize`-width lengths.
 ///
-/// If a legitimate change to snemu's hashing or to [`PROGRAM`] moves it, re-pin it
+/// If a legitimate change to snemu's hashing or to `PROGRAM` moves it, re-pin it
 /// **from a host run**.
 pub const EXPECTED_STATE_HASH: u64 = 980_759_326_325_069_301;
 

@@ -133,6 +133,7 @@ mod scenarios;
 pub(crate) mod schedule;
 pub(crate) mod snapshot_tree;
 pub(crate) mod snemu_audit;
+pub(crate) mod tour_check;
 
 use itest_harness::{Scenario, ScenarioReport};
 

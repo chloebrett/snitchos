@@ -771,6 +771,59 @@ pub fn collect_frames_until_cap_quiescence(
     Ok((decode_frames(machine.virtio_tx_output()), steps))
 }
 
+/// Boot under snemu and stop as soon as `reached` accepts the decoded frames so
+/// far — or at `max_steps`.
+///
+/// The early-stop sibling of [`collect_frames_until_cap_quiescence`], for a caller
+/// that knows the *moment* it wants rather than "once the graph settles". The tour's
+/// chapter check is the first: a chapter's claims are read over the frames up to its
+/// anchor, so there is nothing to learn from the tens of millions of instructions
+/// after it. Quiescence took ~57M steps on an `init` boot; the anchor arrives far
+/// earlier.
+///
+/// Accelerators stay off, as everywhere else in this module — the plain interpreter
+/// is the differential oracle, and correctness here matters more than speed.
+///
+/// `opt` must match whatever the caller's other boots used. Defaulting it to `Low`
+/// while the itest run built `release` cost a **second, full kernel build** (6m30s
+/// measured) on every run, for a boot that then behaved identically.
+///
+/// # Errors
+/// If the kernel will not build or load, or the DTB patch fails.
+pub fn collect_frames_until(
+    workload: Option<&str>,
+    max_steps: u64,
+    opt: qemu::OptLevel,
+    reached: impl Fn(&[OwnedFrame]) -> bool,
+) -> Result<(Vec<OwnedFrame>, u64), String> {
+    let (kernel, dtb_base) = prepare_profiled(workload.is_some(), opt)?;
+    let dtb = match workload {
+        Some(w) => snemu::dtb::set_bootargs(&dtb_base, &format!("workload={w}"))
+            .ok_or("DTB patch failed")?,
+        None => dtb_base,
+    };
+    let mut machine = snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&dtb), HART_COUNT, false)
+        .map_err(|e| format!("snemu load: {e:?}"))?;
+
+    let mut steps = 0u64;
+    let mut seen_tx = 0usize;
+    while steps < max_steps {
+        match machine.step() {
+            Ok(()) => steps += 1,
+            Err(_) => break,
+        }
+        let tx = machine.virtio_tx_output();
+        if tx.len() != seen_tx {
+            seen_tx = tx.len();
+            let frames = decode_frames(tx);
+            if reached(&frames) {
+                return Ok((frames, steps));
+            }
+        }
+    }
+    Ok((decode_frames(machine.virtio_tx_output()), steps))
+}
+
 /// Build the kernel and read the base DTB the emulators share.
 pub(crate) fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
     prepare_profiled(with_workloads, qemu::OptLevel::Low)

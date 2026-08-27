@@ -909,7 +909,15 @@ pub fn run(
         segs,
     );
 
-    let exit = print_report(&results, boot_instret, makespan.as_secs_f64(), verbose, stats);
+    let mut exit = print_report(&results, boot_instret, makespan.as_secs_f64(), verbose, stats);
+
+    // The tour's docs-drift contract. It lives in the itest run rather than the
+    // nextest phase because it boots a kernel, and `cargo xtask test` is host
+    // checks — the same reason the telemetry diagram targets are not `--check`ed
+    // there. See plans/tour-v1.md, step 6.
+    if crate::itest::tour_check::run(opt) != ExitCode::SUCCESS {
+        exit = ExitCode::from(1);
+    }
     if stats {
         print_utilization(&worker_busy, makespan, order, ideal_wall, ideal_instret);
         print_ram_sizing(&results);

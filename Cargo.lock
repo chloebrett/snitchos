@@ -2760,7 +2760,11 @@ dependencies = [
 name = "xtask-board"
 version = "0.0.1"
 dependencies = [
+ "clap",
  "collector",
+ "protocol",
+ "serialport",
+ "snitchos-abi",
 ]
 
 [[package]]
@@ -2809,6 +2813,7 @@ dependencies = [
  "snemu",
  "snitchos-abi",
  "stitch",
+ "tour",
  "xtask-qemu",
  "xtask-snemu",
 ]

@@ -61,6 +61,14 @@ fn scramble_multiplier(n: u64) -> Option<u64> {
 macro_rules! accessors {
     ($read:ident, $write:ident, $ty:ty, $len:literal) => {
         pub fn $read(&self, addr: u64) -> Result<$ty, BusError> {
+            // A boundary-crossing access under scramble has its halves in two
+            // unrelated storage frames, so it must be read per page (Fix 2).
+            if self.needs_split(addr, $len) {
+                self.raw_offset(addr, $len)?; // guest bounds, before any permutation
+                let mut bytes = [0u8; $len];
+                self.read_split(addr, &mut bytes)?;
+                return Ok(<$ty>::from_le_bytes(bytes));
+            }
             let span = self.span(addr, $len)?;
             // span() guarantees exactly $len bytes, so the conversion is total.
             let bytes = <[u8; $len]>::try_from(&self.ram[span]).unwrap();
@@ -68,6 +76,12 @@ macro_rules! accessors {
         }
 
         pub fn $write(&mut self, addr: u64, value: $ty) -> Result<(), BusError> {
+            if self.needs_split(addr, $len) {
+                self.raw_offset(addr, $len)?;
+                // `write_bytes` already splits at guest page boundaries and keeps
+                // `high_water` — the same path the ELF loader and DMA use.
+                return self.write_bytes(addr, &value.to_le_bytes());
+            }
             let span = self.span(addr, $len)?;
             self.high_water = self.high_water.max(span.end as u64);
             self.ram[span].copy_from_slice(&value.to_le_bytes());
@@ -156,6 +170,51 @@ impl Memory {
         self.high_water = 0;
     }
 
+    /// The guest-visible bounds check: the raw RAM offset for a `len`-wide access at
+    /// `addr`, or `OutOfRange`. Checked on the **raw** address so scramble cannot
+    /// change what the guest sees as mapped.
+    ///
+    /// Split out of [`Memory::span`] because a straddling access must be validated
+    /// *before* any storage permutation: `span`'s second, storage-space bound would
+    /// reject a perfectly legal guest access whose permuted base happens to sit in the
+    /// last storage frame.
+    fn raw_offset(&self, addr: u64, len: usize) -> Result<usize, BusError> {
+        let raw = usize::try_from(addr.wrapping_sub(RAM_BASE))
+            .ok()
+            .filter(|_| addr >= RAM_BASE)
+            .ok_or(BusError::OutOfRange { addr })?;
+        let raw_end = raw.checked_add(len).ok_or(BusError::OutOfRange { addr })?;
+        if raw_end > self.ram.len() {
+            return Err(BusError::OutOfRange { addr });
+        }
+        Ok(raw)
+    }
+
+    /// Does this access need splitting at a guest page boundary?
+    ///
+    /// Only when scramble is on **and** the access crosses a page: with scramble off,
+    /// storage is the identity map, so a contiguous range is already correct — and
+    /// this is the hot path of the emulator's memory system, so it keeps its single
+    /// bounds check and single slice.
+    fn needs_split(&self, addr: u64, len: usize) -> bool {
+        self.scramble.is_some() && (addr as usize % PAGE) + len > PAGE
+    }
+
+    /// Read `buf.len()` bytes from `addr`, splitting at guest page boundaries so each
+    /// piece comes from **its own** permuted storage frame — the read counterpart of
+    /// [`Memory::write_bytes`]'s split.
+    fn read_split(&self, addr: u64, buf: &mut [u8]) -> Result<(), BusError> {
+        let mut done = 0;
+        while done < buf.len() {
+            let a = addr + done as u64;
+            let chunk = (PAGE - a as usize % PAGE).min(buf.len() - done);
+            let span = self.span(a, chunk)?; // chunk stays within one guest page
+            buf[done..done + chunk].copy_from_slice(&self.ram[span]);
+            done += chunk;
+        }
+        Ok(())
+    }
+
     accessors!(read_u8, write_u8, u8, 1);
     accessors!(read_u16, write_u16, u16, 2);
     accessors!(read_u32, write_u32, u32, 4);
@@ -169,14 +228,7 @@ impl Memory {
     /// that crosses a page boundary therefore reads its tail from the wrong storage
     /// frame, which is the whole point of the mode.
     fn span(&self, addr: u64, len: usize) -> Result<std::ops::Range<usize>, BusError> {
-        let raw = usize::try_from(addr.wrapping_sub(RAM_BASE))
-            .ok()
-            .filter(|_| addr >= RAM_BASE)
-            .ok_or(BusError::OutOfRange { addr })?;
-        let raw_end = raw.checked_add(len).ok_or(BusError::OutOfRange { addr })?;
-        if raw_end > self.ram.len() {
-            return Err(BusError::OutOfRange { addr });
-        }
+        let raw = self.raw_offset(addr, len)?;
         let start = self.storage_offset(raw);
         let end = start.checked_add(len).ok_or(BusError::OutOfRange { addr })?;
         if end > self.ram.len() {
@@ -234,6 +286,93 @@ mod tests {
         assert_eq!(mem.read_u8(RAM_BASE + 1).unwrap(), 0xbe);
         assert_eq!(mem.read_u8(RAM_BASE + 2).unwrap(), 0xad);
         assert_eq!(mem.read_u8(RAM_BASE + 3).unwrap(), 0xde);
+    }
+
+    /// Fix 2 — a width-typed access that crosses a guest page boundary must still
+    /// land in the guest's *own* frames, scramble or not.
+    ///
+    /// `span` permutes the base frame once and then returns a **contiguous** storage
+    /// range, so under scramble the tail of a straddling access falls in
+    /// `permute(f) + 1` — which is some unrelated guest frame, not the guest's
+    /// `permute(f + 1)`. `write_bytes` already splits per page for exactly this
+    /// reason; the width accessors did not.
+    ///
+    /// Byte reads are the oracle precisely because a 1-byte access can never
+    /// straddle, so `read_u8` sees the guest's true memory even while the wide path
+    /// is broken.
+    #[test]
+    fn a_page_straddling_write_is_visible_byte_for_byte_under_scramble() {
+        let mut mem = Memory::new(0x8000);
+        mem.set_scramble(true);
+        let addr = RAM_BASE + PAGE as u64 - 4; // four bytes either side of the seam
+        mem.write_u64(addr, 0x0807_0605_0403_0201).unwrap();
+
+        let got: Vec<u8> = (0..8).map(|i| mem.read_u8(addr + i).unwrap()).collect();
+        assert_eq!(got, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    }
+
+    /// The same defect seen from the other side: the half that goes astray does not
+    /// vanish, it *overwrites another guest page*. That is the damaging direction —
+    /// a store at a page seam silently corrupting memory the guest never named.
+    #[test]
+    fn a_page_straddling_write_does_not_corrupt_an_unrelated_guest_page() {
+        let mut mem = Memory::new(0x8000);
+        mem.set_scramble(true);
+        let pages = 0x8000 / PAGE;
+        // Fill every guest page through the page-correct bulk path.
+        for p in 0..pages {
+            mem.write_bytes(RAM_BASE + (p * PAGE) as u64, &[0xAA; PAGE]).unwrap();
+        }
+
+        let addr = RAM_BASE + PAGE as u64 - 4;
+        mem.write_u64(addr, 0).unwrap();
+
+        // Only the eight bytes at the seam may have changed. Every other byte of
+        // every other page must still read 0xAA.
+        for p in 2..pages {
+            let base = RAM_BASE + (p * PAGE) as u64;
+            let head: Vec<u8> = (0..8).map(|i| mem.read_u8(base + i).unwrap()).collect();
+            assert_eq!(head, vec![0xAA; 8], "guest page {p} was corrupted by a straddling store");
+        }
+    }
+
+    /// A straddling *read* must see what the guest wrote, not the contents of
+    /// whichever storage frame happens to sit next in the array.
+    #[test]
+    fn a_page_straddling_read_sees_the_guests_own_bytes_under_scramble() {
+        let mut mem = Memory::new(0x8000);
+        mem.set_scramble(true);
+        let addr = RAM_BASE + PAGE as u64 - 4;
+        // Write byte-wise (never straddles), read wide.
+        for i in 0..8u64 {
+            mem.write_u8(addr + i, (i as u8) + 1).unwrap();
+        }
+        assert_eq!(mem.read_u64(addr).unwrap(), 0x0807_0605_0403_0201);
+    }
+
+    /// Scramble is a storage remap that must be **invisible to the guest**
+    /// (`.claude/CLAUDE.md` says so). The straddling case is where that promise was
+    /// broken, so pin the parity directly rather than only its symptoms.
+    #[test]
+    fn a_straddling_access_reads_the_same_with_scramble_on_or_off() {
+        let addr = RAM_BASE + PAGE as u64 - 4;
+        let value = 0xdead_beef_cafe_f00d;
+
+        let mut plain = Memory::new(0x8000);
+        plain.write_u64(addr, value).unwrap();
+
+        let mut scrambled = Memory::new(0x8000);
+        scrambled.set_scramble(true);
+        scrambled.write_u64(addr, value).unwrap();
+
+        assert_eq!(plain.read_u64(addr).unwrap(), scrambled.read_u64(addr).unwrap());
+        for i in 0..8u64 {
+            assert_eq!(
+                plain.read_u8(addr + i).unwrap(),
+                scrambled.read_u8(addr + i).unwrap(),
+                "byte {i} of the straddling access differs under scramble"
+            );
+        }
     }
 
     const PAGE_U64: u64 = PAGE as u64;
