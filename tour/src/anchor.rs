@@ -85,7 +85,9 @@ pub fn parse_rights(names: &[String]) -> Result<u32, String> {
 }
 
 impl FrameMatch {
-    fn matches(&self, frame: &OwnedFrame) -> bool {
+    /// Whether `frame` is the kind of frame this predicate describes.
+    #[must_use]
+    pub fn matches_frame(&self, frame: &OwnedFrame) -> bool {
         match (self, frame) {
             (
                 Self::CapEvent { kind, name, rights },
@@ -109,7 +111,7 @@ impl Anchor {
         frames
             .iter()
             .enumerate()
-            .filter(|(_, frame)| self.matches.matches(frame))
+            .filter(|(_, frame)| self.matches.matches_frame(frame))
             .nth(self.occurrence.checked_sub(1)?)
             .map(|(index, _)| index)
     }

@@ -12,6 +12,7 @@
 
 pub mod anchor;
 pub mod search;
+pub mod verify;
 
 use std::fs;
 use std::path::{Path, PathBuf};
