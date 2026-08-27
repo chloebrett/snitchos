@@ -8,6 +8,16 @@
 /// format this milestone hardcodes.
 pub const FOURCC_XRGB8888: u32 = 0x3432_5258;
 
+/// How many frames back a mode of `height` rows at `stride` bytes each.
+///
+/// Rounds **up**: a mode whose bytes don't divide evenly into frames still needs
+/// a whole final frame, and truncating instead hands the device a buffer shorter
+/// than the geometry it was told to scan out — a DMA write past the allocation,
+/// silent until it corrupts whatever follows.
+pub const fn frames_needed(height: usize, stride: usize, frame_size: usize) -> usize {
+    (height * stride).div_ceil(frame_size)
+}
+
 /// The `RAMFBCfg` struct QEMU's `ramfb` device expects, written via
 /// `etc/ramfb`'s DMA select key. 28 bytes on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +48,19 @@ impl RamfbCfg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mode_whose_bytes_do_not_fill_whole_pages_is_still_fully_backed() {
+        // 960x540x4 = 2,073,600 bytes = 506.25 pages. Truncating division backs
+        // 506 pages and leaves the device DMA-ing 1 KiB past the allocation.
+        assert_eq!(frames_needed(540, 960 * 4, 4096), 507);
+    }
+
+    #[test]
+    fn a_mode_that_exactly_fills_pages_allocates_no_spare() {
+        // 1280x720x4 = 3,686,400 bytes = exactly 900 pages.
+        assert_eq!(frames_needed(720, 1280 * 4, 4096), 900);
+    }
 
     #[test]
     fn serializes_every_field_to_exact_big_endian_bytes() {

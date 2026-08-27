@@ -96,6 +96,14 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // JH7110 SYSCRG (audio clock/reset) — its own megapage, outside the UART's.
     // The PWMDAC block itself (0x100b_0000) is already in the UART megapage.
     mmio_regions.insert(0x1300_0000);
+    // JH7110 GMAC1 + the clock/syscon windows `workload=gmac-probe` reads. Taken
+    // from the probe's own table so the two cannot drift; `insert` aligns then
+    // dedupes, so SYSCRG's megapage above collapses with this list's rather than
+    // consuming a second entry. Board-only, and unconditional for the same reason
+    // SYSCRG is: nothing answers there on QEMU, and mapping it costs one leaf.
+    for megapage in kernel_devices::gmac::PROBE_MEGAPAGES {
+        mmio_regions.insert(*megapage);
+    }
     // PLIC (`kernel::device::plic`, base 0x0c00_0000 on both QEMU `virt` and the
     // JH7110). Two megapages: priority + per-context enable words live in the
     // 0x0c00_0000 page; the hart-0 S-context threshold + claim/complete registers
@@ -594,13 +602,14 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::Shell
             | WorkloadKind::FrameOom
             | WorkloadKind::HeapOom
-            // Spawns nothing: the GMAC probe is read-only reconnaissance that runs
-            // off the heartbeat, not a task layout. Inert until its dispatch lands.
-            | WorkloadKind::GmacProbe
             // smp4's workers are placed on the secondaries post-bring-up (below).
             | WorkloadKind::Smp4,
         )
         | None => {}
+        // Reconnaissance, not a task layout: dump what U-Boot left in the GMAC's
+        // registers, inline on the boot path, then fall through to the idle loop.
+        // Board-only — nothing answers at 0x1604_0000 under QEMU or snemu.
+        Some(WorkloadKind::GmacProbe) => device::gmac::probe(),
     }
 
     // DTB physical region lives in the identity gigapage we're about

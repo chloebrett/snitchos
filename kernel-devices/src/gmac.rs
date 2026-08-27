@@ -76,6 +76,19 @@ pub struct Region {
 /// `0x1300_0000` megapage, so the glue needs two inserts, not three.
 pub const PROBE_REGIONS: &[Region] = &[GMAC1_REGION, SYSCRG_REGION, SYS_SYSCON_REGION];
 
+/// An Sv39 megapage — the granularity `kmain` maps MMIO at.
+pub const MEGAPAGE_SIZE: usize = 0x20_0000;
+
+/// The megapages the kernel glue must `insert` before walking [`PROBE_REGIONS`].
+/// **Two, not three**: SYSCRG and `sys_syscon` are `0x1302_0000` and `0x1303_0000`,
+/// which share one. Neither is a megapage `kmain` already maps.
+///
+/// Stated rather than computed because the probe runs before there is a heap to
+/// deduplicate into; `every_region_is_covered_by_a_declared_megapage` and
+/// `no_declared_megapage_is_redundant` check it against [`PROBE_REGIONS`] in both
+/// directions, so it cannot silently drift or over-map.
+pub const PROBE_MEGAPAGES: &[usize] = &[0x1600_0000, 0x1300_0000];
+
 /// The MAC's own registers.
 pub const GMAC1_REGION: Region = Region {
     label: "gmac1",
@@ -224,6 +237,39 @@ mod tests {
             })
             .collect();
         assert!(dupes.is_empty(), "duplicated offsets: {dupes:?}");
+    }
+
+    fn covers(megapage: usize, r: &Region) -> bool {
+        r.base >= megapage && r.base + r.size <= megapage + MEGAPAGE_SIZE
+    }
+
+    #[test]
+    fn every_region_is_covered_by_a_declared_megapage() {
+        let uncovered: Vec<_> = PROBE_REGIONS
+            .iter()
+            .filter(|r| !PROBE_MEGAPAGES.iter().any(|m| covers(*m, r)))
+            .map(|r| r.label)
+            .collect();
+        assert!(uncovered.is_empty(), "would fault: no mapping for {uncovered:?}");
+    }
+
+    #[test]
+    fn no_declared_megapage_is_redundant() {
+        // Mapping more than the probe reads is authority it has no reason to hold,
+        // and the claim "two inserts, not three" is only true if this passes.
+        let redundant: Vec<_> = PROBE_MEGAPAGES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                let others: Vec<_> =
+                    PROBE_MEGAPAGES.iter().enumerate().filter(|(j, _)| j != i).collect();
+                PROBE_REGIONS
+                    .iter()
+                    .all(|r| others.iter().any(|(_, m)| covers(**m, r)))
+            })
+            .map(|(_, m)| *m)
+            .collect();
+        assert!(redundant.is_empty(), "unnecessary mappings: {redundant:x?}");
     }
 
     #[test]

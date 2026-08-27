@@ -15,13 +15,21 @@ use kernel_devices::ramfb::{FOURCC_XRGB8888, RamfbCfg};
 use crate::counter::DeferredCounter;
 use crate::{frame, mmu};
 
-/// Fixed mode for this milestone: 1024x768 XRGB8888, no row padding
-/// (`stride == width * 4`) — exactly 3 MiB, 768 frames.
-pub const WIDTH: usize = 1024;
-pub const HEIGHT: usize = 768;
+/// Fixed mode: 1280x720 XRGB8888, no row padding (`stride == width * 4`) —
+/// exactly 3,600 KiB, 900 frames.
+///
+/// 720p rather than the 1024x768 this milestone first pinned, for three
+/// reasons: it is a standard CEA mode a real HDMI sink will accept (the VF2
+/// display driver has to output *something* real); its bytes divide evenly
+/// into frames; and at the 8x16 cell grid `kitsch` composites into (see
+/// `docs/kitsch-design.md`) 1280 gives **160 columns — exactly two 80-column
+/// panes**, where 1024's 128 splits into a cramped 64+64.
+/// `docs/framebuffer-design.md` pinned the original mode and said to revisit it.
+pub const WIDTH: usize = 1280;
+pub const HEIGHT: usize = 720;
 pub const STRIDE: usize = WIDTH * 4;
 const SIZE_BYTES: usize = STRIDE * HEIGHT;
-const FRAMES: usize = SIZE_BYTES / frame::FRAME_SIZE;
+const FRAMES: usize = kernel_devices::ramfb::frames_needed(HEIGHT, STRIDE, frame::FRAME_SIZE);
 
 /// Dedicated 1 GiB VA window for the framebuffer: root PTE slot 258,
 /// immediately above the kstack guard-page window (256 = heap,

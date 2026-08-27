@@ -8,6 +8,7 @@
 
 pub mod console;
 pub mod fwcfg;
+pub mod gmac;
 pub mod plic;
 pub mod pwmdac;
 pub mod ramfb;
