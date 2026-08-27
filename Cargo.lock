@@ -1035,6 +1035,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitsch-render"
+version = "0.0.1"
+dependencies = [
+ "kernel-devices",
+]
+
+[[package]]
 name = "kvetch"
 version = "0.0.1"
 dependencies = [

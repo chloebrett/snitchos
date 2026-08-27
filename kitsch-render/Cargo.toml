@@ -1,0 +1,26 @@
+[package]
+name = "kitsch-render"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# The *native* half of `kitsch` — the part Stitch calls once per frame to
+# compose a scene into a cell grid and rasterize the damaged spans into pixels.
+# The policy half (layout, focus, cap grants, input routing) is a Stitch program
+# and lives nowhere near here. See `docs/kitsch-design.md`, `plans/kitsch-v1.md`.
+#
+# One dependency, and it is a reuse call rather than a layering one:
+# `kernel-devices` owns the XRGB8888 pixel view and its `fill_rect`, which is
+# the primitive a glyph blit is built from. Duplicating that here would mean two
+# copies of the alignment lesson from increment 1. `kernel-devices` is itself
+# dependency-free, `no_std` and host-tested, so nothing kernel-ish comes with it.
+[dependencies]
+kernel-devices = { path = "../kernel-devices" }
+
+[lints]
+workspace = true
+
+[lib]
+# No doctests in this crate; doctest=false keeps `cargo test` off the slow
+# rustdoc doc-test compile. See CLAUDE.md "use nextest".
+doctest = false
