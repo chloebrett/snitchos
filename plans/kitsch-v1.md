@@ -298,10 +298,10 @@ before and after; the acceptance check was the disassembly.
 **Gate**: 7/7 `kernel-devices` framebuffer tests, 133/133 itests plain **and**
 `--scramble`.
 
-### 2 — `kitsch-render`: font, compose, rasterize 🚧 **IN PROGRESS**
+### 2 — `kitsch-render`: font, compose, rasterize ✅ **DONE (2026-08-27)**
 
-**Done**: the crate exists (`no_std` + `alloc`, one dependency), composition, and
-the rasterizer's logic. **10/10 host tests, clippy clean.**
+The crate exists (`no_std` + `alloc`, one dependency) with composition, damage, the
+rasterizer and the real font. **22/22 host tests, clippy clean, links green.**
 
 - `Cell` / `Grid` / `Rect` / `Surface` / `Window`, with `Grid::to_text` as the
   snapshot form. A surface holds content in **surface-local** coordinates and does
@@ -331,14 +331,29 @@ non-empty and within its row, and every cell covered exactly once if dirty and n
 if clean. That says "the spans are exactly the dirty set, drawn once", which is what
 a rasterizer driven by them needs.
 
-**Remaining**:
+**The font is the real IBM VGA 8x16** — 256 CP437 glyphs, exactly one 4 KiB page,
+`include_bytes!` from `kitsch-render/fonts/`. Indexed by **code page byte**, not
+Unicode scalar, so mapping Unicode box-drawing onto CP437 is a caller's job.
 
-- **The real font.** The repo has no bitmap font, and glyph bitmaps are *data* —
-  authoring 4 KB of CP437 by hand would produce plausible-looking wrong glyphs,
-  which is worse than none. The rasterizer's logic is therefore pinned against a
-  2x2 synthetic font; sourcing the real table is its own step.
-- **The PPM golden** — a known scene rasterizing byte-identically, which needs the
-  real font first.
+> **A licence decision is recorded, not assumed** —
+> `kitsch-render/fonts/PROVENANCE.md`. The convenient copy of these bitmaps is the
+> Linux kernel's `lib/fonts/font_8x16.c`, which is **GPL-2.0**; vendoring it would
+> attach GPL to this repo. This copy is a **ROM extraction** instead — same bytes,
+> no GPL wrapper — and the position that bitmap font data is not a copyrightable
+> work is written down rather than left implicit. Worth revisiting alongside
+> [open-sourcing-extractables.md](open-sourcing-extractables.md); swapping is cheap
+> because a font is *data behind a `Font` value*, not code.
+
+**The golden is ASCII art, not a PPM** — a deliberate deviation from the original
+scope. Pixels render as `#`/`.` and compare as text, so a failure diffs readably
+instead of reporting "checksum differs". And the expected art was **derived
+independently** (a separate Python rendering of the font binary) rather than
+captured from this code's own output, so it catches drift in composition, font
+wiring or the rasterizer rather than blessing whatever they currently do.
+
+Two levers were deliberately not pulled, and should be measured before they are:
+the rasterizer walks cells within a span rather than merging identical adjacent
+backgrounds, and `rasterize` builds a full-width span list per frame.
 
 Original scope follows.
 

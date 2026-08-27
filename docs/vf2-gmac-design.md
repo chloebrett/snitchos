@@ -348,7 +348,14 @@ Three things this ordering buys:
 
 - **T3 separates DMA from Ethernet.** The single most valuable rung, and the one most
   easily skipped by going straight for a real frame. `OWN` clearing means the engine
-  read the descriptor *and* fetched the buffer — it validates the entire address-
+  read the descriptor — **but not that it fetched the buffer.** A descriptor naming
+  an unreachable buffer address is handed back with `OWN` cleared exactly like a
+  successful one; the difference is `TDES3_ERROR_SUMMARY` in the writeback, and
+  checking it is not optional. (Corrected 2026-08-27: this note previously claimed
+  `OWN` proved both. It does not, on the model *or* on silicon — a negative control
+  against snemu's GMAC model is what caught it, after the first version of that model
+  reproduced the same wrong assumption.) With the error bit checked, T3 validates the
+  address-
   translation story with a frame that does not have to be correct. If T3 is folded
   into T4, then "nothing on tcpdump" has a dozen causes instead of three.
 - **T4's oracle is a raw capture, not the collector.** At that moment the question is

@@ -488,3 +488,42 @@ re-generating. Carried over from
 [../plans/legacy/corpus-mvp.md](../plans/legacy/corpus-mvp.md)'s Increment 5 (the disk
 response cache was scoped and never built) when that plan was archived.
 
+### #22 — `UartFrameSink` is host-tested, mutation-tested, and called by nothing
+
+`kernel-obs/src/uart_sink.rs` defines `UartFrameSink` and its `ByteSink` trait,
+with 8/8 mutants killed. Neither name appears anywhere outside that file. The
+module is `pub`, so no dead-code warning fires — it is public crate API with zero
+consumers.
+
+**Why it ended up orphaned: a shape mismatch, not an oversight.** `UartFrameSink`
+is a `FrameSink` — it takes `&Frame`, encodes into its own 520-byte scratch, and
+pushes bytes to a `ByteSink`. But the kernel already has exactly one `FrameSink`
+(`KernelSink`), which encodes into *its* scratch and then calls `transmit_bytes`.
+Transport selection lives in `transmit_bytes`, at the **byte** level, because
+`send_hello` and `flush_pre_init` enter there too — the session preamble is emitted
+as bytes, not frames. So there were only two ways to plug the sink in:
+
+1. **Dispatch at the frame level** inside `KernelSink::emit` — then the preamble
+   (`Hello`, build info, pre-init drain) bypasses it and goes to virtio. The stream
+   opens on the wrong wire. Actively broken.
+2. **Nest it under `transmit_bytes`** — but there only bytes exist. Decoding them
+   back into a `Frame` so it can re-encode them is absurd.
+
+The 2026-08-27 board session therefore wired the UART arm at the byte level
+(`ConsoleRing::push_all` + `transmit_bytes` + a `UART_DROPPED` counter surfaced as
+`snitchos.telemetry.uart_frames_dropped_total`), which reimplements what
+`UartFrameSink` was for.
+
+**Two ways out, and they are not the same size.** Delete it, since its job is now
+done in the shape the kernel actually has; or restructure `open_stream` so the
+preamble is frame-shaped and *every* transport selects at the frame level — one
+wire-choosing site at one level of abstraction. The second is a real cleanup with a
+real argument behind it, but it is a refactor of the telemetry spine, not a tidy-up.
+
+**Why it is worth recording rather than just deleting.** It was written,
+host-tested, mutation-tested and declared "landed and gate-green" while being
+unreachable from any running path — the same illusion `plans/uart-telemetry.md`'s
+status header had about B3 as a whole. A crate's test suite can prove a component
+correct; it cannot prove that anything calls it. Its mutation score is actively
+misleading, because it certifies code nothing runs.
+

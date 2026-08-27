@@ -211,6 +211,21 @@ impl Font<'_> {
     }
 }
 
+/// The IBM VGA 8x16 text-mode font: 256 glyphs, **exactly one 4 KiB page**,
+/// carrying CP437's whole repertoire — ASCII, single- and double-line box
+/// drawing, block elements, shading, arrows. Everything the window furniture
+/// needs, and nothing to source at runtime.
+///
+/// Indexed by **code page 437 byte**, not by Unicode scalar: `rows('\u{b3}')`
+/// is CP437 0xB3 (a vertical line), not U+00B3. Mapping Unicode box-drawing
+/// characters onto the code page is a caller's job.
+///
+/// Provenance and the licence position: `kitsch-render/fonts/PROVENANCE.md`.
+pub fn ibm_vga_8x16() -> Font<'static> {
+    const BITMAPS: &[u8] = include_bytes!("../fonts/ibm-vga-8x16.bin");
+    Font { width: 8, height: 16, first: 0, bitmaps: BITMAPS }
+}
+
 /// Draw `grid` into `pixels` (a `stride`-pixels-per-row XRGB8888 buffer).
 ///
 /// Each cell becomes a `font.width` x `font.height` block: background first,
@@ -433,6 +448,90 @@ mod tests {
 
         let (fg, bg) = (0xffff_0000, 0xff00_00ff);
         assert_eq!(pixels, vec![fg, bg, bg, fg]);
+    }
+
+    #[test]
+    fn the_ibm_font_covers_all_256_code_page_437_glyphs() {
+        let font = ibm_vga_8x16();
+        assert_eq!((font.width, font.height), (8, 16));
+        assert!(font.rows('\u{0}').is_some(), "first glyph missing");
+        assert!(font.rows('\u{ff}').is_some(), "last glyph missing");
+        assert!(font.rows('\u{100}').is_none(), "font claims a glyph past the table");
+    }
+
+    #[test]
+    fn the_ibm_font_has_a_recognisable_capital_a() {
+        // Spot-check the two rows that make an `A` an `A`: the apex and the
+        // crossbar. Asserting all 16 would pin the data rather than the wiring,
+        // and it is the wiring — offset arithmetic and bit order — that can break.
+        let font = ibm_vga_8x16();
+        let rows = font.rows('A').expect("font has 'A'");
+        assert_eq!(rows.len(), 16);
+        assert_eq!(rows[2], 0b0001_0000, "apex");
+        assert_eq!(rows[7], 0b1111_1110, "crossbar");
+    }
+
+    #[test]
+    fn the_ibm_font_carries_the_box_drawing_the_window_furniture_needs() {
+        // CP437's box-drawing lives at 0xB3..0xDA in the *code page*, which is
+        // why the font is indexed by byte and a Unicode box-drawing char must be
+        // mapped to it first. This pins that the glyphs are actually present.
+        let font = ibm_vga_8x16();
+        let vertical = font.rows('\u{b3}').expect("CP437 0xB3 vertical line");
+        // A vertical bar: the same single column set on every row of the body.
+        assert_eq!(vertical[4], 0b0001_1000);
+        assert_eq!(vertical[10], 0b0001_1000);
+    }
+
+    /// Render a pixel buffer as art: `#` where the foreground was painted, `.`
+    /// where the background was. Readable and byte-exact, so a golden diffs like
+    /// source instead of like a checksum — the same reason `Grid::to_text` is
+    /// the snapshot form for composition.
+    fn pixels_as_art(pixels: &[u32], stride: usize, fg: u32) -> String {
+        let mut out = String::new();
+        for (i, px) in pixels.iter().enumerate() {
+            if i > 0 && i % stride == 0 {
+                out.push('\n');
+            }
+            out.push(if *px == fg { '#' } else { '.' });
+        }
+        out
+    }
+
+    #[test]
+    fn a_composed_scene_rasterizes_through_the_real_font() {
+        // The integration golden: composition, font wiring and the rasterizer
+        // together. The expected art was derived independently from the font
+        // binary (not captured from this code's own output), so it catches drift
+        // in any of the three rather than blessing whatever they currently do.
+        let font = ibm_vga_8x16();
+        let content = surface(&["Hi"]);
+        let grid = compose(2, 1, &[Window {
+            rect: Rect { x: 0, y: 0, width: 2, height: 1 },
+            content: &content,
+        }]);
+
+        let mut pixels = vec![0u32; 16 * 16];
+        rasterize(&grid, &font, &mut pixels, 16);
+
+        let expected = "\
+................\n\
+................\n\
+##...##....##...\n\
+##...##....##...\n\
+##...##.........\n\
+##...##...###...\n\
+#######....##...\n\
+##...##....##...\n\
+##...##....##...\n\
+##...##....##...\n\
+##...##....##...\n\
+##...##...####..\n\
+................\n\
+................\n\
+................\n\
+................";
+        assert_eq!(pixels_as_art(&pixels, 16, 0xffc0_c0c0), expected);
     }
 
     #[test]

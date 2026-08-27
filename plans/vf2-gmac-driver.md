@@ -273,7 +273,9 @@ board-bridge unattended.
 | 10 | **T5/T6 — `net=` end to end.** One decodable `Frame`, then sustained heartbeat-paced telemetry. | collector, then Grafana |
 
 Step 8 is the one most easily skipped and the most valuable: `OWN` clearing proves the
-engine read the descriptor *and* fetched the buffer, validating the entire address-
+engine read the descriptor — **not** that it fetched the buffer, which needs
+`TDES3_ERROR_SUMMARY` in the writeback checked too (see the design note). Together they
+validate the entire address-
 translation story with a frame that does not have to be correct. Folded into step 9,
 "nothing on tcpdump" acquires a dozen causes instead of three.
 
