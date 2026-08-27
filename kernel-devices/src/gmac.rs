@@ -265,6 +265,141 @@ impl Descriptor {
     }
 }
 
+/// `GMAC_MDIO_DATA` — the transaction's data word, low 16 bits.
+pub const MDIO_DATA: usize = 0x0204;
+
+/// `GBUSY` — set by software to start a transaction, cleared by the MAC when the
+/// PHY has answered. (Written as a shift for symmetry with its neighbours; mutation
+/// testing flags `<< → >>` here, which is equivalent at a shift of zero.)
+pub const MDIO_BUSY: u32 = 1 << 0;
+/// Operation-command shift within [`MDIO_ADDR`].
+const MDIO_GOC_SHIFT: u32 = 2;
+/// `MII_GMAC4_WRITE`.
+const MDIO_GOC_WRITE: u32 = 1 << MDIO_GOC_SHIFT;
+/// `MII_GMAC4_READ`.
+const MDIO_GOC_READ: u32 = 3 << MDIO_GOC_SHIFT;
+/// CSR clock-range field shift — the MDC divider off the AHB clock.
+const MDIO_CSR_SHIFT: u32 = 8;
+/// Register-address (`RDA`) field shift.
+const MDIO_REG_SHIFT: u32 = 16;
+/// PHY-address (`PA`) field shift.
+const MDIO_PHY_SHIFT: u32 = 21;
+
+/// How many times [`Mdio`] reads `GBUSY` before giving up. Mainline polls at 100 µs
+/// with a 10 ms ceiling; this is that ratio.
+///
+/// **The bound is not a tuning knob, it is the safety property.** An unbounded poll
+/// against a PHY held in reset never returns, and a kernel that never returns has
+/// nothing to say about why — the `PollUntilSet` hang the board watchdog exists to
+/// catch. Bounded here, in a layer where a test can prove it.
+pub const MDIO_MAX_POLLS: u32 = 100;
+
+/// Why an MDIO transaction failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MdioError {
+    /// `GBUSY` never cleared within [`MDIO_MAX_POLLS`]. The PHY is held in reset,
+    /// absent, or the MDC divider is wrong.
+    Timeout,
+    /// A PHY or register address wider than [`MDIO_ADDR_BITS`].
+    BadAddress,
+}
+
+/// MDIO addresses are 5 bits wide. Enforced rather than masked: a caller that means
+/// `0x20` means something, and silently wrapping it to `0` would address a different
+/// PHY than the one asked for.
+pub const MDIO_ADDR_BITS: u8 = 5;
+
+/// The MAC's register file, as the kernel glue's volatile accesses. The seam that
+/// keeps this crate free of MMIO — same shape as [`crate::virtio::MmioTransport`].
+pub trait GmacTransport {
+    /// Read the 32-bit register at `offset` from the MAC's base.
+    fn read_reg(&self, offset: usize) -> u32;
+    /// Write the 32-bit register at `offset` from the MAC's base.
+    fn write_reg(&mut self, offset: usize, value: u32);
+}
+
+/// MDIO transaction sequencing over a [`GmacTransport`], carrying the CSR
+/// clock-range field that sets the MDC divider.
+///
+/// That divider is the single most likely constant to be wrong on first contact
+/// with the board: too fast and the PHY answers garbage that looks like a wiring
+/// fault. It is a constructor parameter rather than a constant so a bring-up
+/// session can sweep it without a rebuild of this crate's tests.
+#[derive(Clone, Copy, Debug)]
+pub struct Mdio {
+    csr_clock_range: u32,
+}
+
+impl Mdio {
+    /// `csr_clock_range` is the CSR-clock-range field value for the AHB rate.
+    #[must_use]
+    pub const fn new(csr_clock_range: u32) -> Self {
+        Self { csr_clock_range }
+    }
+
+    /// Validated so [`address_word`]'s fields are provably disjoint.
+    ///
+    /// [`address_word`]: Mdio::address_word
+    fn check(phy: u8, reg: u8) -> Result<(), MdioError> {
+        let limit = 1 << MDIO_ADDR_BITS;
+        if phy >= limit || reg >= limit {
+            return Err(MdioError::BadAddress);
+        }
+        Ok(())
+    }
+
+    /// `PA`, `RDA`, the CSR range, the opcode and `GBUSY` occupy disjoint bits —
+    /// guaranteed by [`check`], which is why mutation testing reports the `| → ^`
+    /// mutants here as survivors. They are genuine equivalent mutants, as in
+    /// `syscrg::pwmdac_bringup`. Without that validation they would *not* be
+    /// equivalent, which is what made the check worth adding.
+    ///
+    /// [`check`]: Mdio::check
+    fn address_word(self, phy: u8, reg: u8, operation: u32) -> u32 {
+        (u32::from(phy) << MDIO_PHY_SHIFT)
+            | (u32::from(reg) << MDIO_REG_SHIFT)
+            | (self.csr_clock_range << MDIO_CSR_SHIFT)
+            | operation
+            | MDIO_BUSY
+    }
+
+    /// Poll `GBUSY` until the MAC clears it, bounded by [`MDIO_MAX_POLLS`].
+    fn await_completion<T: GmacTransport>(t: &T) -> Result<(), MdioError> {
+        for _ in 0..MDIO_MAX_POLLS {
+            if t.read_reg(MDIO_ADDR) & MDIO_BUSY == 0 {
+                return Ok(());
+            }
+        }
+        Err(MdioError::Timeout)
+    }
+
+    /// Read one PHY register. Returns the low 16 bits of the data register.
+    pub fn read<T: GmacTransport>(self, t: &mut T, phy: u8, reg: u8) -> Result<u16, MdioError> {
+        Self::check(phy, reg)?;
+        t.write_reg(MDIO_ADDR, self.address_word(phy, reg, MDIO_GOC_READ));
+        Self::await_completion(t)?;
+        Ok((t.read_reg(MDIO_DATA) & 0xFFFF) as u16)
+    }
+
+    /// Write one PHY register.
+    ///
+    /// The data word goes down **before** the address word, because writing the
+    /// address is what starts the transaction — reversing them races the PHY
+    /// against a data register that has not been loaded yet.
+    pub fn write<T: GmacTransport>(
+        self,
+        t: &mut T,
+        phy: u8,
+        reg: u8,
+        value: u16,
+    ) -> Result<(), MdioError> {
+        Self::check(phy, reg)?;
+        t.write_reg(MDIO_DATA, u32::from(value));
+        t.write_reg(MDIO_ADDR, self.address_word(phy, reg, MDIO_GOC_WRITE));
+        Self::await_completion(t)
+    }
+}
+
 /// Why a submission was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxError {
@@ -691,6 +826,126 @@ mod tests {
         assert_eq!(r.peek_reclaimable(), Some(1), "still owned — the glue stops here");
         assert!(r.descriptor(1).is_owned_by_device());
         assert_eq!(r.outstanding(), 2);
+    }
+
+    /// A PHY that answers after `busy_reads` polls. `Cell` because `read_reg` takes
+    /// `&self` — an MMIO read is a read, even when the device changes under it.
+    struct FakePhy {
+        writes: core::cell::RefCell<Vec<(usize, u32)>>,
+        busy_reads: core::cell::Cell<u32>,
+        reads: core::cell::Cell<u32>,
+        answer: u32,
+    }
+
+    impl FakePhy {
+        fn answering_after(busy_reads: u32, answer: u32) -> Self {
+            Self {
+                writes: core::cell::RefCell::new(Vec::new()),
+                busy_reads: core::cell::Cell::new(busy_reads),
+                reads: core::cell::Cell::new(0),
+                answer,
+            }
+        }
+
+        fn never_answers() -> Self {
+            Self::answering_after(u32::MAX, 0)
+        }
+
+        fn written(&self, offset: usize) -> Option<u32> {
+            self.writes.borrow().iter().rev().find(|(o, _)| *o == offset).map(|(_, v)| *v)
+        }
+
+        fn write_order(&self) -> Vec<usize> {
+            self.writes.borrow().iter().map(|(o, _)| *o).collect()
+        }
+    }
+
+    impl GmacTransport for FakePhy {
+        fn read_reg(&self, offset: usize) -> u32 {
+            if offset == MDIO_DATA {
+                return self.answer;
+            }
+            self.reads.set(self.reads.get() + 1);
+            let remaining = self.busy_reads.get();
+            if remaining == 0 {
+                return 0;
+            }
+            self.busy_reads.set(remaining.saturating_sub(1));
+            MDIO_BUSY
+        }
+
+        fn write_reg(&mut self, offset: usize, value: u32) {
+            self.writes.borrow_mut().push((offset, value));
+        }
+    }
+
+    #[test]
+    fn a_read_builds_the_address_word_the_spec_describes() {
+        let mut phy = FakePhy::answering_after(0, 0);
+        Mdio::new(4).read(&mut phy, 0, 2).expect("answers immediately");
+        // PA 0<<21 | RDA 2<<16 | CSR 4<<8 | GOC READ 3<<2 | GBUSY
+        assert_eq!(phy.written(MDIO_ADDR), Some(0x0002_040D));
+    }
+
+    #[test]
+    fn a_write_builds_its_own_address_word_and_lands_the_value_first() {
+        let mut phy = FakePhy::answering_after(0, 0);
+        Mdio::new(4).write(&mut phy, 1, 0, 0x1234).expect("answers immediately");
+        // PA 1<<21 | RDA 0 | CSR 4<<8 | GOC WRITE 1<<2 | GBUSY
+        assert_eq!(phy.written(MDIO_ADDR), Some(0x0020_0405));
+        assert_eq!(phy.written(MDIO_DATA), Some(0x1234));
+        // Ordering is the point: writing ADDR is what *starts* the transaction, so
+        // the data has to be in place before it, not after.
+        assert_eq!(phy.write_order(), [MDIO_DATA, MDIO_ADDR]);
+    }
+
+    #[test]
+    fn an_address_wider_than_five_bits_is_refused_before_touching_the_device() {
+        // MDIO addresses are 5 bits. A wider one would shift PA into RDA's field
+        // and silently address a different register on a different PHY — refuse it
+        // rather than start a corrupt transaction.
+        let mut phy = FakePhy::answering_after(0, 0);
+        assert_eq!(Mdio::new(4).read(&mut phy, 32, 0), Err(MdioError::BadAddress));
+        assert_eq!(Mdio::new(4).read(&mut phy, 0, 32), Err(MdioError::BadAddress));
+        assert_eq!(Mdio::new(4).write(&mut phy, 32, 0, 1), Err(MdioError::BadAddress));
+        assert!(phy.write_order().is_empty(), "a refusal must not write anything");
+    }
+
+    #[test]
+    fn the_widest_valid_address_is_still_accepted() {
+        let mut phy = FakePhy::answering_after(0, 0);
+        Mdio::new(4).read(&mut phy, 31, 31).expect("31 is a valid 5-bit address");
+        // PA 31<<21 | RDA 31<<16 | CSR 4<<8 | GOC READ | GBUSY — adjacent, disjoint.
+        assert_eq!(phy.written(MDIO_ADDR), Some(0x03FF_040D));
+    }
+
+    #[test]
+    fn a_read_returns_the_low_half_of_the_data_register() {
+        let mut phy = FakePhy::answering_after(0, 0xDEAD_BEEF);
+        assert_eq!(Mdio::new(4).read(&mut phy, 0, 2), Ok(0xBEEF));
+    }
+
+    #[test]
+    fn a_read_waits_for_a_phy_that_answers_slowly() {
+        let mut phy = FakePhy::answering_after(5, 0x00AB);
+        assert_eq!(Mdio::new(4).read(&mut phy, 0, 2), Ok(0xAB));
+    }
+
+    #[test]
+    fn a_phy_that_never_clears_busy_is_an_error_not_a_hang() {
+        // The bound is the whole point. An unbounded poll against a PHY held in
+        // reset is the PollUntilSet hang the board watchdog exists to catch — and
+        // this is the most likely place on this device to meet it. Assert the error
+        // value, not merely that the test finished.
+        let mut phy = FakePhy::never_answers();
+        assert_eq!(Mdio::new(4).read(&mut phy, 0, 2), Err(MdioError::Timeout));
+        assert!(phy.reads.get() <= MDIO_MAX_POLLS, "the poll must be bounded");
+    }
+
+    #[test]
+    fn a_write_to_an_unresponsive_phy_is_also_bounded() {
+        let mut phy = FakePhy::never_answers();
+        assert_eq!(Mdio::new(4).write(&mut phy, 0, 2, 1), Err(MdioError::Timeout));
     }
 
     #[test]
