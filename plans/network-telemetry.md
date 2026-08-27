@@ -1,6 +1,5 @@
 # Plan: Network telemetry (M2.5 — UDP frame transport)
 
-**Branch**: main (this repo works directly on main; the user commits)
 **Status**: 🟡 **PRs 1–7 SHIPPED and gate-green; PR 8 (the JH7110 GMAC driver) is all
 that remains — and it is its own project, not a step here.**
 **Design**: [docs/network-telemetry-design.md](../docs/network-telemetry-design.md)

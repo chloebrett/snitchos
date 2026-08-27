@@ -1,6 +1,5 @@
 # Plan: the board bridge — driving the VisionFive 2 from the host
 
-**Branch**: main (this repo works directly on main; the user commits)
 **Status**: 📐 **NOT STARTED.** Two phases — the host bridge (steps 1–6b, including the
 U-Boot layer that makes netboot zero-touch) and the ESP32 transport (steps 7–9).
 **Unblocked 2026-08-25**: its prerequisite, [uart-telemetry.md](uart-telemetry.md)

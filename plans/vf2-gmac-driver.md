@@ -1,11 +1,14 @@
 # Plan: the JH7110 GMAC driver — `NetDevice` on real hardware
 
-**Branch**: main (this repo works directly on main; the user commits)
-**Status**: 📐 **NOT STARTED — scoping plan.** Phase 0 and steps 1–4 are sized and
-TDD-decomposed; steps 5–7 are deliberately left as sketches, because they depend on
-what Phase 0 measures. Per the planning skill: do not write steps you cannot yet size.
-**Design**: [docs/network-telemetry-design.md](../docs/network-telemetry-design.md)
-(Decision 3's JH7110 row, and open questions 4–5)
+**Status**: 📐 **NOT STARTED.** Phase 0's *desk* half is now done — see the design
+note — which closes three open questions, retires a risk nobody had asked about
+(DMA coherency), and replaces the step 5–7 sketches with a six-rung tracer-bullet
+ladder. What remains of Phase 0 is board-side and cheap.
+**Design**: [docs/vf2-gmac-design.md](../docs/vf2-gmac-design.md) — the register map,
+the GMAC1-over-GMAC0 decision, the module boundary, the ladder, and the failure-mode
+table. Read it before this plan. Its parent is
+[docs/network-telemetry-design.md](../docs/network-telemetry-design.md) (Decision 3's
+JH7110 row, and open questions 4–5).
 **Owes its existence to**: [network-telemetry.md](network-telemetry.md) PR 8, which
 says to write this file once PR 7 landed. PR 7 landed; this is that file.
 **Milestone**: completes M2.5 in [visionfive2-port.md](visionfive2-port.md)
@@ -68,41 +71,39 @@ time sink, and the one genuinely unknown-shaped part of the whole design."
    debugged *is* the other channel.
 3. **`cargo xtask image` → TFTP netboot (shipped)** — a reset is the whole re-flash.
 
-## Phase 0 — reconnaissance, before any code
+## Phase 0 — reconnaissance
 
-The unknowns are the schedule. Answer these first; several can invalidate later steps.
+**The desk half is done**: [docs/vf2-gmac-design.md](../docs/vf2-gmac-design.md) has
+the DTB inventory, the clock/reset indices, the full register map, the descriptor
+layout, and the reference sequences. It also settles three things this section used to
+ask:
 
-- **DTB inventory.** The `ethernet@16030000` / `ethernet@16040000` nodes: MMIO base
-  and size, interrupt numbers, `clocks`/`resets` phandles and their indices, `phy-mode`
-  (expect `rgmii-id`), `phy-handle` and the PHY's MDIO address, and any
-  `starfive,tx-use-rgmii-clk` style vendor properties. Source of truth is the board's
-  own DTB plus mainline `jh7110.dtsi` / `jh7110-visionfive-2.dtsi`.
-- **Which MAC.** The JH7110 has two GMACs; the VF2's RJ45 is wired to one of them.
-  Confirm which, and do not assume the first node is the connected one.
-- **The megapage question.** Is the GMAC's base inside a 2 MiB megapage `kmain`
-  already maps, or does it need its own `insert`? SYSCRG needed one; the PWMDAC did
-  not. This is a two-line answer that must be known before the first MMIO read.
-- **Reference sequences to transcribe.** Mainline `dwmac-starfive.c` +
-  `stmmac_main.c`, and U-Boot's StarFive dwmac support. The syscrg/iomux precedent is
-  the model: read the mainline driver, transcribe the *register model* into a pure
-  host-tested module, keep the volatile writes in `kernel/`.
-- **Does U-Boot leave anything usable behind?** It brings the PHY up for TFTP, so the
-  link is provably working seconds before `booti`. Worth **measuring** whether the MAC
-  is left in a usable state — but assume nothing: the display work already found that
-  inheriting U-Boot's framebuffer was a dead end
-  ([vf2-display.md](vf2-display.md)). Even if no state is inheritable, U-Boot's
-  *source* is a known-good sequence **for this exact board**, which is worth more than
-  a generic datasheet reading.
-- **Open question 4, answered early: does the config we need force an RX ring?** The
-  design note defers this to bring-up. Resolve it in Phase 0 instead, because it
-  changes two things: the size of this plan, and whether the network-console path
-  (see the addendum in
-  [docs/network-telemetry-design.md](../docs/network-telemetry-design.md)) gets its RX
-  ring almost for free.
+- **Which MAC** — *both* are wired on v1.3B and both are YT8531/`rgmii-id`, so the
+  choice is free and is made on cost: **GMAC1**, because it hangs off SYSCRG (the
+  controller `syscrg.rs` already models) rather than AONCRG, and its PHY-mode syscon
+  sits in a megapage SYSCRG already needs.
+- **RX ring** (open question 4) — **not needed.** TX and RX are separately configured
+  and separately started in dwmac4; program only the TX half.
+- **DMA coherency** — a risk this plan never named. **JH7110 is IO-coherent**; no
+  cache-maintenance layer is in scope. Had it gone the other way this would be a
+  different plan, because the U74 has no `Zicbom`.
 
-**Done when**: the above are written up as a short findings note (follow
-[v0.4-memory-findings.md](v0.4-memory-findings.md)'s shape), and steps 5–7 below can
-be decomposed with real acceptance criteria.
+What remains is board-side, and each item is minutes not days:
+
+- **Confirm `dma-noncoherent` is absent from the board's own live DTB**, not just from
+  mainline. One grep. If present, stop and re-scope.
+- **Which physical RJ45 is GMAC1** — plug one jack, see which PHY links; or read
+  U-Boot's `ethact`.
+- **The megapage question.** `0x1600_0000` is expected to need its own `insert`.
+  Two-line answer, needed before the first MMIO read.
+- **Is there a PHY reset GPIO?** Not in the mainline VF2 DTS; check the board's DTB.
+- **Does U-Boot leave anything usable behind?** Worth *measuring*, worth nothing to
+  plan around — the display work already found inheriting U-Boot's framebuffer was a
+  dead end ([vf2-display.md](vf2-display.md)). Its *source*, though, is a known-good
+  sequence for this exact board.
+
+**Done when**: the five above are answered against the live board and any correction to
+the design note is folded back into it.
 
 ## Acceptance Criteria
 
@@ -123,18 +124,26 @@ be decomposed with real acceptance criteria.
 ## Steps
 
 Every step follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. Steps 1–4 are pure host
-logic — no board, no MMIO — and are where most of the *code* lives. Steps 5–7 are
-board bring-up, where most of the *time* lives; each is one observable bit, per the
-port's "cheapest possible board increment" discipline.
+logic — no board, no MMIO — and are where most of the *code* lives. Steps 5–10 are the
+tracer-bullet ladder on the board, where most of the *time* lives; each is one
+observable bit, per the port's "cheapest possible board increment" discipline.
+
+The board should be met with code already believed correct — every pure layer TDD'd and
+mutation-tested against a `FakeGmac` double before it is powered on — so that a failure
+is information about hardware rather than about us.
 
 ---
 
 ### Step 1: GMAC clock + reset bring-up as a pure `Op` sequence
 
-**Acceptance criteria**: `syscrg::gmac_bringup(...)` returns the exact ordered
-sequence of clock-gate, divider, and reset assert/release operations for the connected
-GMAC, matching the mainline sequence, with reset release expressed as
+**Acceptance criteria**: `syscrg::gmac1_bringup(...)` returns the exact ordered
+sequence of clock-gate, divider, and reset assert/release operations for GMAC1,
+matching the mainline sequence, with reset release expressed as
 "poll status until the bit reads 1" — the model `syscrg.rs` already encodes.
+
+Indices are known (design note): clocks `GMAC1_AHB` 97, `GMAC1_AXI` 98, `GMAC1_PTP`
+102, `GMAC1_TX_INV` 106, `GMAC1_GTXC` 107; resets `GMAC1_AXI` 66, `GMAC1_AHB` 67.
+**No AONCRG module** — that is GMAC0's cost, and GMAC0 is not on this path.
 
 **RED**: a golden-sequence test asserting the ops in order against the transcribed
 mainline sequence, plus a test that reset release polls status rather than assuming.
@@ -153,10 +162,11 @@ extracting — two consumers is the threshold, not one.
 board needs is a pure `FieldWrite` sequence in the `iomux::route_output` shape,
 asserted against the board DTS's pin group.
 
-**Note**: this step may be **empty** — the RJ45 pins may be fixed-function rather than
-muxed, in which case the delay configuration lives in a GMAC/syscon register instead
-and belongs to step 1. Phase 0 decides. If it is empty, say so and delete the step
-rather than inventing work for it.
+**Note**: this step is **very likely empty.** No pinctrl group for the GMAC pads
+appears in the board DTS. What exists instead is the `sys_syscon` PHY-mode field
+(offset `0x90`, shift `2`, 3-bit `phy_intf_sel`) and the `GMAC1_TX_INV` clock
+selection — both of which belong to step 1. Confirm against the board's own DTB, then
+**retire this step with a note rather than inventing work for it.**
 
 **RED/GREEN/MUTATE/KILL/REFACTOR**: as step 1.
 **Done when**: the sequence matches the DTS, or the step is retired with a note.
@@ -217,56 +227,59 @@ approved.
 
 ---
 
-### Step 5 (sketch): PHY bring-up on the board — link up
+### Steps 5–10: the tracer-bullet ladder
 
-The first board increment, and the first place the emulator cannot help. Reset the
-YT8531 via its board GPIO, configure RGMII delay, read the PHY ID registers over MDIO
-(a known constant — the cheapest possible "am I talking to the right thing?" oracle),
-then poll link status.
+The design note's ladder, one rung per step. Each is one observable bit with an oracle
+that does not depend on the rungs above it being right — that independence is the whole
+point, and it is why this is six steps rather than three. Full table, including what
+each rung *cannot* prove and the failure-mode lookup, is in
+[docs/vf2-gmac-design.md](../docs/vf2-gmac-design.md).
 
-**The observable bit**: a telemetry breadcrumb over the UART carrying the PHY ID and
-the link state. Nothing else. Do not attempt to transmit in this step.
+Breadcrumbs are **telemetry `Frame`s over the M2 UART channel**, not ad-hoc `println!` —
+so the bring-up log is decodable, diffable between attempts, and assertable by the
+board-bridge unattended.
 
-Decompose after Phase 0 — the reset GPIO, the delay configuration location, and the
-YT8531's register specifics are exactly what Phase 0 establishes.
+| Step | Rung | Observable |
+|---|---|---|
+| 5 | **T0 — the MAC answers.** Clock ungate + reset release, then read a register with a known reset value. | breadcrumb with the raw word |
+| 6 | **T1 — the PHY answers.** MDIO read of PHY ID1/ID2; YT8531's OUI is a known constant. | breadcrumb with both words |
+| 7 | **T2 — link up.** Advertise **100-full** (not gigabit — see the design note), restart autoneg, poll BMSR. | breadcrumb `link up 100/full` |
+| 8 | **T3 — the DMA engine moves.** One descriptor, contents deliberately irrelevant, poll until the MAC clears `OWN`. | breadcrumb `own cleared, tdes3=…` |
+| 9 | **T4 — bytes leave the board.** One broadcast frame, custom ethertype. Oracle is `tcpdump -XX`, **not** the collector. | host capture |
+| 10 | **T5/T6 — `net=` end to end.** One decodable `Frame`, then sustained heartbeat-paced telemetry. | collector, then Grafana |
 
----
+Step 8 is the one most easily skipped and the most valuable: `OWN` clearing proves the
+engine read the descriptor *and* fetched the buffer, validating the entire address-
+translation story with a frame that does not have to be correct. Folded into step 9,
+"nothing on tcpdump" acquires a dozen causes instead of three.
 
-### Step 6 (sketch): first datagram on the wire
-
-MAC init, install the TX ring built in step 3, transmit one hand-built frame from
-`kernel-net::build_udp_datagram`. **Oracle: `tcpdump` on the host**, not the collector
-— at this stage the question is "did well-formed bytes leave the board", and a raw
-capture answers it without involving the decode path.
-
----
-
-### Step 7 (sketch): `net=` end to end
-
-Wire the `NetDevice` impl into the existing boot-time sink selection — which already
-exists and already works for virtio-net, so this should be small. Boot the board with
-`net=…`, run `cargo xtask collect`, watch the board reach Grafana.
-
-At this point M2.5 is complete and
-[network-telemetry.md](network-telemetry.md) can move to `plans/legacy/`.
+**Optional, and only after step 9: a snemu dwmac device model** as a deterministic
+regression guard. Not before — it would prove the driver matches *our model of* the
+hardware, which is the document that produced the driver.
 
 ---
 
 ## Open questions
 
-1. **RX ring necessity** (design note Q4) — pulled forward into Phase 0; see above.
-2. **PHY specifics** (design note Q5) — YT8531 reset GPIO, RGMII clock/delay location,
-   MDIO addressing. The genuinely unknown-shaped part.
-3. **Interrupt or poll?** The telemetry path is fire-and-forget and TX-only, so a
-   polled reclaim in the heartbeat may be sufficient and avoids a PLIC route entirely.
-   Decide once step 3's reclaim is written; prefer the poll unless something forces
-   otherwise.
-4. **Does the second GMAC matter?** Almost certainly not — one RJ45 — but confirm
-   rather than assume, since a wrong-node bring-up looks identical to a broken one.
-5. **What happens to `net=`'s static MAC on real hardware?** The board has an assigned
-   MAC (often from OTP/eFuse). Does the bootarg keep overriding it, or should the
-   driver read the hardware address? Bootarg-wins is simpler and matches the existing
-   config story; note it as a deliberate choice rather than an oversight.
+Closed by the design note: **RX ring necessity** (none — TX and RX start separately);
+**interrupt vs poll** (poll; no PLIC route); **which MAC / does the second one matter**
+(both are wired and identical on v1.3B, so the choice is free and GMAC1 wins on cost);
+and **static MAC vs hardware MAC** (bootarg wins, matching the existing config story —
+a deliberate choice, not an oversight). One risk was added and retired: **DMA
+coherency**.
+
+Genuinely still open:
+
+1. **The MDIO CSR clock-range constant** — depends on the AHB (`pclk`) rate, hence on
+   what U-Boot left the clock tree in. Bounded: surfaces at step 6, found by trying
+   values.
+2. **YT8531 delay configuration** — `rgmii-id` puts the delay in the PHY, but the VF2
+   vendor tree carries `motorcomm,*` delay and clock-inversion properties. Which this
+   board needs is the genuinely unknown-shaped part; it surfaces between steps 7 and 9.
+3. **PHY reset GPIO** — absent from mainline's VF2 DTS. Resolve against the board's DTB
+   in Phase 0.
+4. **Ring depth.** Start at 8. A tuning knob, not a design decision — `TxFull` is
+   already the trait's contract.
 
 ## Pre-PR Quality Gate
 
