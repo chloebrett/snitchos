@@ -1,6 +1,5 @@
 # Plan: B3 — Telemetry over UART (M2)
 
-**Branch**: `main` (this repo works directly on main — no feature branches)
 **Status**: 🟡 **Steps 0–4, 6, 8, 9, 10a and 10b are landed and gate-green — but
 Step 10b is NOT yet verified against the board, so B3 is not done.** The remaining
 work is one hardware run (see 10b), then Step 5b (interactive relay); Step 7

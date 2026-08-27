@@ -1,6 +1,5 @@
 # Plan: `cargo xtask image --opt` — optimized board images
 
-**Branch**: `main` (this project lands on main; no feature branches)
 **Status**: 📐 PLAN — not started
 
 ## Goal

@@ -1,6 +1,5 @@
 # Plan: kvetch — what the nats actually buy
 
-**Branch**: none — work lands directly on `main` (project rule)
 **Status**: Active
 
 ## Goal

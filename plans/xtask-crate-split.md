@@ -1,5 +1,17 @@
 # xtask crate split — cut the incremental rebuild
 
+**Status (2026-08-27)**: 🟡 **PARTIAL — Phases 1 and 2 shipped; Phase 3 unbuilt.** `xtask-qemu`,
+`xtask-snemu`, `xtask-cmds` and `xtask-itest` are all workspace members.
+**Phase 1 did not speed the hot loop** — measured 2026-07-18 at 7.996s vs 7.98s
+pre-split, identical; what it bought was isolating the *cold* paths (see
+*Phase 1 RESULT* below). Phase 2 then went further than this plan describes:
+`scenarios.rs` ended up inside `xtask-itest`
+(`xtask-itest/src/itest/scenarios.rs`) rather than being left in the bin. **So
+Phase 3 is open in a changed form** — no separate `xtask-scenarios` crate exists,
+and the scenario-edit loop has not been re-measured since scenarios moved, so the
+win Phase 3 was written to chase may already be partly banked. Phase 4 (splitting
+`scenarios.rs` by area) stays gated on that measurement.
+
 ## Problem (measured, not guessed)
 
 Editing any file under `xtask/src/` recompiles the entire `xtask` binary

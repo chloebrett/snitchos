@@ -1,7 +1,6 @@
 # Plan: A Tour of SnitchOS — the tracer chapter
 
 **Status:** 📝 **PLANNED — not started.** Written 2026-08-27.
-**Branch:** none — work lands directly on `main`, per CLAUDE.md.
 
 Implements stage 3 of [../docs/tour-and-user-docs-design.md](../docs/tour-and-user-docs-design.md)
 (snapshot-pinned chapters + the CI contract), with two of that design's calls

@@ -32,7 +32,7 @@ Recently active — the board/network cluster is the current front:
 | [visionfive2-port.md](visionfive2-port.md) | The VF2 hardware port, M0–M4 | M1 achieved on hardware; **M3 shipped** (B6 ✓, all four U74s). M0 bar the TFTP loop. **M2 is code-complete but board-unverified** (uart step 10b), **M2.5** waits on the GMAC, **M4** (B5, DTB-driven MMIO) deferred — `collect_mmio_regions` still parked |
 | [uart-telemetry.md](uart-telemetry.md) | Frames off the board over a physical UART (M2) | Steps 0–4, 6, 8, 9, **10a and 10b all landed and gate-green**. The critical path is now **one hardware run** to verify 10b — until it passes, B3/M2 are not done; 5b (interactive relay) follows; step 7 deferred |
 | [network-telemetry.md](network-telemetry.md) | Telemetry over UDP (M2.5) | PRs 1–7 shipped and gate-green. **PR 8 is the GMAC driver** — its own plan, below |
-| [board-bridge.md](board-bridge.md) | Letting an agent drive the real board | Not started, but **unblocked 2026-08-25** — its prerequisite (uart step 10) has landed. Two phases: host bridge (steps 1–6b) then ESP32 transport (7–9) |
+| [board-bridge.md](board-bridge.md) | Letting an agent drive the real board | Not started, but **unblocked 2026-08-25** — its prerequisite (uart step 10) has landed. Two phases: host bridge (steps 1–6b) then ESP32 transport (7–9). **Now on the critical path** — [vf2-gmac-driver.md](vf2-gmac-driver.md) names both phases as prerequisites |
 | [kvetch-next-measurements.md](kvetch-next-measurements.md) | What the ladder's nats actually buy | 7 steps, none done. Answers the batch11 gap: a 0.43-nat gain showed **no** perceivable output difference |
 | [stitch-native-tests.md](stitch-native-tests.md) | `test "…" { expect … }` in Stitch | **8 of 9 done.** Increment 9 only: tests never run on target |
 | [glitch-v2-async-ring.md](glitch-v2-async-ring.md) | The async audio RT ring | Increments 1–5 shipped; **the XRun observable is armed and proven firing** (2026-08-25, inc 9's prerequisite). **6–9 remain** — mixing, init-delegated AudioSink, snemu PCM capture, the last two acceptance itests |
@@ -45,8 +45,8 @@ Parked — nothing since mid-July:
 | [stitch-type-system.md](stitch-type-system.md) | Bidirectional + gradual types | Stages 1, 2, 3, 5, 6 + G1–G2 done. **G3–G6 (generics) left** |
 | [stage-0-validator-funnel.md](stage-0-validator-funnel.md) | The corpus candidate gate | Funnel built and in daily use; increments 4–8 and 11 (diversity + augmentation) unbuilt; splitting out `sift` still open |
 | [userspace-runtime-maturity.md](userspace-runtime-maturity.md) | alloc → `main()` → heap → std | Steps 1–3 shipped, 4a in progress. **Cannot be retired** — `user/std/src/lib.rs` names it as the tracker |
-| [xtask-crate-split.md](xtask-crate-split.md) | Cut the xtask incremental rebuild | Phases 1–2 shipped. **Phase 1 did not speed the hot loop** (measured, 7.996s vs 7.98s); Phase 3 (`xtask-scenarios`) is its own measurement |
-| [xtask-surface-consolidation.md](xtask-surface-consolidation.md) | Trim the xtask CLI surface | Most phases shipped. Open: `View` as one type; deferred: reverse-direction `--engine qemu` gating |
+| [xtask-crate-split.md](xtask-crate-split.md) | Cut the xtask incremental rebuild | Phases 1–2 shipped. **Phase 1 did not speed the hot loop** (measured, 7.996s vs 7.98s). Phase 2 took `scenarios.rs` into `xtask-itest` rather than leaving it in the bin, so **Phase 3's win may already be partly banked — unmeasured since the move** |
+| [xtask-surface-consolidation.md](xtask-surface-consolidation.md) | Trim the xtask CLI surface | Phases 0–2 done, Phase 3 part done. Open: `View` as one type; deferred: reverse-direction `--engine qemu` gating. **The trim did not hold** — 24 → 20 then back to **24** (measured 2026-08-27) |
 | [snemu-milestone-4-measurement.md](snemu-milestone-4-measurement.md) | snemu's measurement spine | Steps 2/3/4 shipped, 5 in substance. **Steps 6 (dashboard) and 7 (`H/G`) not built**; 2 of 4 criteria unmet |
 | [snemu-page-straddle-fix.md](snemu-page-straddle-fix.md) | The page-straddle access bug | Fix 1 + follow-up D shipped and gated. Open: Fix 2 (data straddle), follow-ups A/B/C, the clock-skew verdict |
 
@@ -56,7 +56,7 @@ Written down, nothing built. Ordered roughly by what unblocks what:
 
 | Plan | What it is |
 |---|---|
-| [vf2-gmac-driver.md](vf2-gmac-driver.md) | The JH7110 GMAC driver. The single *item* between network-telemetry and done, but **not a small one** — the plan calls it "the monster — weeks", bigger than the rest of the port combined. Phase 0 + steps 1–4 are sized; 5–7 are sketches pending Phase 0's measurements |
+| [vf2-gmac-driver.md](vf2-gmac-driver.md) | The JH7110 GMAC driver. The single *item* between network-telemetry and done, but **not a small one** — the plan calls it "the monster — weeks", bigger than the rest of the port combined. **Phase 0's desk half is done** ([../docs/vf2-gmac-design.md](../docs/vf2-gmac-design.md) — register map, GMAC1-over-GMAC0, no RX ring, IO-coherent so no cache layer); what's left of Phase 0 is five board-side checks. Steps 5–7's sketches are now a six-rung tracer-bullet ladder. **Gated on [board-bridge.md](board-bridge.md)** — a deliberate 2026-08-25 sequencing call |
 | [board-image-opt-level.md](board-image-opt-level.md) | Debt #19: the board image's opt level |
 | [vf2-display.md](vf2-display.md) | JH7110 DC8200/HDMI — capture a vendor MMIO trace and replay it |
 | [corpus-mvp-spike.md](corpus-mvp-spike.md) | Increment 0 of corpus-mvp: a decision and four numbers, not code |

@@ -1,5 +1,20 @@
 # Consolidating the xtask surface
 
+**Status (2026-08-27)**: 🟡 **MOSTLY DELIVERED — Phases 0, 1 and 2 done; Phase 3 PART DONE.**
+Every step in Phases 0–2 is marked ✅, with two withdrawn on purpose (`snemu-fork`,
+and the quarantine — both justifications were wrong; see *Where this lands*).
+Phase 3's `FrameSource` enum landed, collapsing `View`'s `live`/`batch`/`quiet`/
+`input`/`log_path`/`recorder`/`cursor` into one `source` field; finishing that
+untangle is what remains. **Deferred:** reverse-direction `--engine qemu` gating
+(step 2.2), and the per-scenario instret breakdown (2.3 lands the number;
+classifying it is its own work).
+
+**The trim did not hold.** This plan took the surface 24 → 20, but
+`cargo xtask --help | grep -E '^  [a-z]'` measures **24 again** as of 2026-08-27 —
+other work has added back what the consolidation removed. That is not a regression
+in this plan's steps; it is evidence that a one-off trim without a gate does not
+stay trimmed.
+
 `cargo xtask` has 22 top-level commands and ~14k lines. That is not itself a
 problem — xtask is where every orchestration concern in the workspace lands, and
 a workspace this wide will have a wide driver. The problem is that a
