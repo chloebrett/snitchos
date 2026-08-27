@@ -4984,3 +4984,111 @@ pub fn gmac_probe_identifies_the_core(h: &mut View) -> Result<(), String> {
 
     Ok(())
 }
+
+/// `workload=gmac-tx` hands the MAC a frame and the engine transmits it — T3 and T4
+/// of the ladder in `docs/vf2-gmac-design.md`, against snemu's GMAC model.
+///
+/// **Assert on "transmitted", never on "returned the descriptor".** The device hands
+/// back a descriptor whose buffer address was unreachable exactly as it hands back a
+/// successful one — `OWN` clearing proves only that the *descriptor* was fetched. The
+/// difference is `TDES3_ERROR_SUMMARY` in the writeback. A scenario that stopped at
+/// `OWN` would pass with the buffer address wrong, which is the `TX_STAGING` bug
+/// shape: `va_to_pa` passes a non-`KERNEL_OFFSET` address through unchanged, so the
+/// device DMAs whatever physical memory sits at that number. Verified by deliberately
+/// corrupting `buffer_pa` — the earlier `OWN`-only form of this scenario passed.
+///
+/// As with the probe, this covers the *glue*, not the register map: snemu's model and
+/// `kernel_devices::gmac` are both transcribed from the same mainline headers.
+pub fn gmac_tx_transmits_a_frame(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg == "gmac-tx: submitted 1 frame")
+    })
+    .ok_or(
+        "no 'submitted 1 frame' within 10s — the ring refused the submission before any \
+         DMA happened. Either the frame exceeded the slot buffer or the ring was full",
+    )?;
+
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg == "gmac-tx: engine transmitted the frame")
+    })
+    .ok_or(
+        "no 'engine transmitted the frame' within 10s. Three distinct causes, and the \
+         Logs before this one separate them: 'reported failure' means the descriptor \
+         came back with the error bit — a buffer PA the device could not reach, so \
+         suspect va_to_pa on a non-KERNEL_OFFSET address first. 'never cleared OWN' \
+         means the engine never took it — ring base unprogrammed, ST unset, or the \
+         tail pointer never kicked. Neither means the probe didn't run at all",
+    )?;
+
+    Ok(())
+}
+
+/// Board-bridge Step 5: the console reboot line reaches SBI SRST, and says why
+/// before it does.
+///
+/// The kernel side of `cargo xtask board reboot`. Without this scenario the
+/// step's only oracle is a board — you have to power-cycle a VisionFive 2 to find
+/// out whether the token was recognised, which is precisely the manual loop the
+/// bridge exists to remove.
+///
+/// **Three things are under test, and the order between them is the interesting
+/// part:**
+///
+/// 1. The token survives the trip through the UART RX ring and
+///    `RebootDetector`. Host tests cover the detector on synthetic byte streams;
+///    only this proves the bytes actually arrive that way.
+/// 2. The kernel emits its reason **and flushes it** before resetting. A reset
+///    that fires with bytes still queued truncates the very frame that explains
+///    the reboot, leaving an unexplained silence — the failure mode the reason
+///    frame exists to prevent. Asserting the `Log` *arrives* is asserting the
+///    flush happened, because the ring drains on the THRE interrupt that the
+///    reset would otherwise cut short.
+/// 3. The SRST ecall is actually issued, which the halt reason reports.
+///
+/// The halt is a **pass**, not a failure — the one scenario where the guest
+/// stopping is the behaviour under test. `halt_reason` is what separates "the
+/// guest asked to reset" from "the guest hit an unimplemented instruction"; both
+/// end the run, and before snemu modelled SRST the latter is exactly what this
+/// would have looked like.
+pub fn console_reboot_requests_srst(h: &mut View) -> Result<(), String> {
+    // Wait for a heartbeat rather than any earlier marker: the reboot request is
+    // serviced *by* the heartbeat, and the RX interrupt that carries the token
+    // only works once external interrupts are on. A token injected before this
+    // would be dropped by a guest not yet listening.
+    h.wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no kernel.heartbeat within 20s — guest never reached the loop that reboots")?;
+
+    h.send_input(b"~~~reboot\n").map_err(|e| format!("inject reboot line: {e}"))?;
+
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("reboot: requested over console"))
+    })
+    .ok_or(
+        "no 'reboot: requested over console' Log within 20s. Either the token never \
+         reached RebootDetector (RX interrupt not delivering, or the bytes were \
+         dropped by a full RX ring), or the heartbeat never checked the flag. Note \
+         the detector itself is host-tested — suspect the wire before the matcher",
+    )?;
+
+    // The reason frame is out; the reset follows it. Give the guest room to run
+    // the flush and the ecall, then read why it stopped. Nothing is expected to
+    // arrive, so this wait is a *pump*, and its timing out is the normal path.
+    let _ = h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("SBI SRST refused"))
+    });
+
+    let halt = h.halt_reason().ok_or(
+        "guest never halted after the reboot line. The reason frame reached the wire, \
+         so the detector and the flush both worked — the SRST ecall is what did not \
+         land. Under snemu that means service_sbi did not match EID 0x53525354",
+    )?;
+
+    if !halt.contains("SystemReset") {
+        return Err(format!(
+            "guest halted, but not on a reset request: {halt}. A halt for any other \
+             reason here is a crash wearing the right timing"
+        ));
+    }
+
+    Ok(())
+}

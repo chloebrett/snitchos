@@ -109,6 +109,11 @@ mod sbi {
     /// rather than writing `stimecmp` directly.
     pub const EID_TIME: u64 = 0x5449_4D45;
     pub const FID_SET_TIMER: u64 = 0;
+    /// System Reset extension id (`"SRST"`), function 0 = `sbi_system_reset`. The
+    /// kernel's console-triggered reboot rides this (`plans/board-bridge.md`
+    /// Step 5); snemu answers by halting with the request preserved.
+    pub const EID_SRST: u64 = 0x5352_5354;
+    pub const FID_SYSTEM_RESET: u64 = 0;
     pub const SUCCESS: i64 = 0;
     pub const ERR_NOT_SUPPORTED: i64 = -2;
     pub const ERR_INVALID_PARAM: i64 = -3;
@@ -244,6 +249,18 @@ pub enum StepError {
     /// Sv39 translation failed for `va` (unmapped or permission-denied). A real
     /// guest page-fault trap is future work; for now this halts the run.
     PageFault { va: u64 },
+    /// The guest asked firmware to reset the platform (SBI SRST,
+    /// `sbi_system_reset`). snemu has nothing to reset *into* — there is no
+    /// firmware to re-enter and no image to re-load — so the run stops here.
+    ///
+    /// **Not an error, and it keeps the request.** This is the one halt that means
+    /// the guest did exactly what it meant to, so callers that treat any `Err` as
+    /// a fault should special-case it. `reset_type` distinguishes shutdown (`0`)
+    /// from cold (`1`) and warm (`2`) reboot, and `reason` carries the guest's own
+    /// explanation — folding them into a bare "it reset" would make a deliberate
+    /// reboot indistinguishable from a panic-driven shutdown, which is precisely
+    /// the conflation the halt-reason work already fixed once.
+    SystemReset { reset_type: u64, reason: u64 },
 }
 
 /// How a `csr*` instruction combines the source operand with the old value.
@@ -416,7 +433,9 @@ impl Cpu {
         self.hart.set_cycle(self.hart.instret);
         match self.hart.step(&mut self.bus)? {
             HartEffect::Sbi(req) => {
-                service_sbi(std::slice::from_mut(&mut self.hart), 0, &req);
+                if let Some(halt) = service_sbi(std::slice::from_mut(&mut self.hart), 0, &req) {
+                    return Err(halt);
+                }
             }
             // The lone hart parked on wfi: jump its clock (its retired-instruction
             // count) to the timer deadline so the next step delivers the interrupt,
@@ -2144,7 +2163,20 @@ impl Hart {
 /// plays firmware). `send_ipi` and `hart_start` reach harts other than the
 /// caller, so this runs at the driver level, not inside `Hart::step`. The result
 /// (`a0` = error, `a1` = value) is written back into the caller.
-pub(crate) fn service_sbi(harts: &mut [Hart], caller: usize, req: &SbiRequest) {
+/// Service one SBI call. Returns `Some(StepError)` for the one call that does not
+/// return to the guest — `sbi_system_reset`, which stops the run rather than
+/// writing a result back.
+pub(crate) fn service_sbi(
+    harts: &mut [Hart],
+    caller: usize,
+    req: &SbiRequest,
+) -> Option<StepError> {
+    // Handled before the result-writing calls below because it has no result: on
+    // real firmware the reset happens and the `ecall` never retires, so writing
+    // `a0`/`a1` here would model a return that hardware does not perform.
+    if (req.eid, req.fid) == (sbi::EID_SRST, sbi::FID_SYSTEM_RESET) {
+        return Some(StepError::SystemReset { reset_type: req.arg0, reason: req.arg1 });
+    }
     let (error, value) = match (req.eid, req.fid) {
         (sbi::EID_IPI, sbi::FID_SEND_IPI) => {
             send_ipi(harts, req.arg0, req.arg1);
@@ -2156,6 +2188,7 @@ pub(crate) fn service_sbi(harts: &mut [Hart], caller: usize, req: &SbiRequest) {
     };
     harts[caller].set_reg(10, error as u64);
     harts[caller].set_reg(11, value);
+    None
 }
 
 /// Raise `sip.SSIP` on every hart the mask selects. Hart `i` has mhartid `i`

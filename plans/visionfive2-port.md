@@ -584,13 +584,50 @@ both land on `code0`, a `JAL` over the header).
   auto-fetch on reset. Needs the board and Mac on one network: board→router by
   cable + Mac on Wi-Fi (same subnet, **main** Wi-Fi not guest), or a direct
   Mac↔board cable (USB-C Ethernet adapter + static IPs). `serverip` = the Mac's IP
-  on that network (`ipconfig getifaddr en0`). **Current dev network (2026-08-25): the
-  Mac holds a DHCP reservation at `192.168.0.7`, so `serverip` is stable and a saved
-  `bootcmd` keeps working across reboots.** That reservation is what makes zero-touch
-  netboot possible without any tooling — it removes the failure class (a `serverip`
-  that drifts with the lease) rather than automating around it. Re-check
-  `ipconfig getifaddr en0` after any network change; the value is stable, not
-  permanent. Mac TFTP server: `dnsmasq
+  on that network (`ipconfig getifaddr en0`). **Current dev network (verified
+  2026-08-28): the Mac holds `192.168.0.7/24` on `en0`, matching the board's saved
+  `serverip`.**
+
+  **The 2026-08-25 version of this note claimed a DHCP reservation made `serverip`
+  stable. That was wrong, and the board session of 2026-08-27 cost most of an
+  evening to it** — see [../notes/board-session-2026-08-27.md](../notes/board-session-2026-08-27.md).
+  macOS **Private Wi-Fi Address** gives `en0` a locally-administered MAC per SSID,
+  and **a reservation cannot pin a MAC the client changes**. `serverip=192.168.0.7`
+  was correct when written and became wrong with no change to the repo, the board,
+  or this file — the board ARP'd for `.7`, nothing answered, and TFTP failed with
+  ICMP port-unreachable. A hardcoded `serverip` is a *standing* trap, not a one-off.
+
+  **Fixed 2026-08-28, and the fix keeps the privacy feature.** Private Wi-Fi Address
+  is set to **Fixed** (not Off), which gives `en0` a locally-administered MAC that is
+  *stable per SSID* — `96:5f:c7:25:91:03` for `coogee flip flops 🌊`. The router's
+  reservation is pinned to **that** address, so `.7` now holds across rejoins without
+  ever exposing the permanent `bc:d0:74:08:62:fd`.
+
+  The distinction that matters: **Fixed vs Rotating, not Private vs not.** A
+  locally-administered MAC in `ifconfig` is *not* a sign of trouble — under Fixed it
+  is the expected steady state. What broke the original setup was rotation, and
+  Fixed is precisely the setting that removes it.
+
+  Residual risk, now small and named: the MAC is **per-SSID**, so a different network
+  means a different MAC and its own reservation — and `serverip` is still hardcoded
+  in the board's saved `bootcmd`, so a network change still drifts.
+
+  **The fix that depends on none of this**, and the one to prefer: give `en0` the
+  address the board already asks for.
+
+  ```
+  sudo ifconfig en0 alias 192.168.0.7 255.255.255.255
+  ```
+
+  It needs no working UART, no router access, and is immune to MAC rotation — so it
+  works even when the console is dead, which is when you need it most. Make it
+  permanent with a `networksetup` secondary address. (An alias shows as a *second*
+  `inet` line at `/32`; today there is only one `inet` line, so the current `.7` is
+  a lease, not this.)
+
+  **Always verify before trusting it**: `ipconfig getifaddr en0`, and confirm the
+  board's saved `serverip` agrees. The 2026-08-27 session's whole first hour was
+  this check not having been made. Mac TFTP server: `dnsmasq
   --enable-tftp --tftp-root="$(pwd)" --port=0 --no-daemon` (serves the repo dir +
   logs requests) or the built-in `tftpd` (`/private/tftpboot`).
 - **microSD** — no network at all: FAT32-format an SD on the Mac, copy the Image,

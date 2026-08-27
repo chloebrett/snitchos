@@ -246,6 +246,9 @@ catalog! {
     wfi "console-frames-routes-log"       scenarios::console_frames_routes_log      [boot]          {"init console=frames"};
     // wait_for_log forces a live boot; the marker is pushed in kmain (any workload).
     cpu "tx-irq-delivers"                 scenarios::tx_irq_delivers                [boot]          {"init"};
+    // Injects console input, so it can never collapse onto a shared observe-only
+    // forward run — and it ends by *halting* the guest, which is the pass.
+    cpu "console-reboot-requests-srst"    scenarios::console_reboot_requests_srst   [boot]          {"init"};
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     wfi "ipc-message-crosses"             scenarios::ipc_message_crosses            [userspace, ipc] {"ipc"};
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};
@@ -347,6 +350,7 @@ catalog! {
     wfi "framebuffer-presents"            scenarios::framebuffer_presents           [display, ramfb] {"ramfb"};
     wfi "framebuffer-absent-degrades-gracefully" scenarios::framebuffer_absent_degrades_gracefully [display];
     wfi "gmac-probe-identifies-the-core"  scenarios::gmac_probe_identifies_the_core  [gmac]          {"gmac-probe"};
+    wfi "gmac-tx-transmits-a-frame"       scenarios::gmac_tx_transmits_a_frame       [gmac]          {"gmac-tx"};
 }
 
 /// Set the process-wide failure-capture transcript depth. Call once at

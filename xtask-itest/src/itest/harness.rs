@@ -635,6 +635,20 @@ impl View {
         }
     }
 
+    /// Why the guest stopped, if it did — the rendered `StepError`.
+    ///
+    /// Almost every scenario asserts on frames and never asks: a halt is a
+    /// *failure* there, reported by the runner. The exception is a guest that is
+    /// **supposed** to stop — SBI SRST, where halting is the behaviour under test
+    /// and the reason distinguishes "the guest asked to reset" from "the guest hit
+    /// an unimplemented instruction". Both end the run; only one is a pass.
+    ///
+    /// `None` under QEMU and replay, which have no snemu halt to report.
+    #[must_use]
+    pub fn halt_reason(&self) -> Option<&str> {
+        self.source.live().and_then(LiveSnemu::halt_reason)
+    }
+
     /// This scenario's branch key — the console injections it performed, tagged by
     /// guest instret. The audit reads it after a scenario runs to classify it:
     /// empty ⇒ observe-only (collapsible onto a shared forward run), non-empty ⇒

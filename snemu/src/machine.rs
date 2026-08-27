@@ -200,7 +200,9 @@ impl Machine {
 
             match self.harts[i].step(&mut self.bus)? {
                 HartEffect::Sbi(req) => {
-                    service_sbi(&mut self.harts, i, &req);
+                    if let Some(halt) = service_sbi(&mut self.harts, i, &req) {
+                        return Err(halt);
+                    }
                     self.time += 1;
                     retired = true;
                     self.probe_memop_retire(i);
@@ -319,7 +321,9 @@ impl Machine {
                 let pc = self.harts[j].pc();
                 match self.harts[j].step(&mut self.bus)? {
                     HartEffect::Sbi(req) => {
-                        service_sbi(&mut self.harts, j, &req);
+                        if let Some(halt) = service_sbi(&mut self.harts, j, &req) {
+                            return Err(halt);
+                        }
                         self.time += 1;
                         if let Some(p) = self.profile.as_mut() {
                             *p.entry(pc).or_insert(0) += 1;
@@ -1059,6 +1063,50 @@ mod tests {
         assert_eq!(m.pc(1), entry); // ...running its self-loop at the entry
         assert_eq!(m.reg(1, 10), 1); // a0 = hartid
         assert_eq!(m.reg(1, 11), 0x1234); // a1 = opaque
+    }
+
+    /// SBI SRST is how the kernel reboots itself (`plans/board-bridge.md` Step 5).
+    /// snemu models it as a halt that **keeps the reason**, so a test can assert
+    /// the guest asked to reset rather than inferring it from a generic stop —
+    /// the same lesson `snemu diff` already paid for with halt reasons.
+    #[test]
+    fn system_reset_halts_the_run_and_keeps_the_reason() {
+        const ECALL: u32 = 0x0000_0073;
+        const EID_SRST: u64 = 0x5352_5354;
+        let mut m = machine_with(&[ECALL], 1);
+        // sbi_system_reset(reset_type = 1 (cold reboot), reset_reason = 0).
+        m.set_reg(0, 17, EID_SRST); // a7 = EID
+        m.set_reg(0, 16, 0); // a6 = FID 0
+        m.set_reg(0, 10, 1); // a0 = reset_type
+        m.set_reg(0, 11, 0); // a1 = reset_reason
+
+        let err = m.step().expect_err("SRST must stop the run, not return");
+
+        assert!(
+            matches!(err, StepError::SystemReset { reset_type: 1, reason: 0 }),
+            "halt must name what the guest asked for, got {err:?}"
+        );
+    }
+
+    /// A shutdown is a different request from a reboot, and the halt must say
+    /// which — a single "it reset" verdict would make the two indistinguishable to
+    /// anything reading the outcome.
+    #[test]
+    fn system_reset_distinguishes_shutdown_from_reboot() {
+        const ECALL: u32 = 0x0000_0073;
+        const EID_SRST: u64 = 0x5352_5354;
+        let mut m = machine_with(&[ECALL], 1);
+        m.set_reg(0, 17, EID_SRST);
+        m.set_reg(0, 16, 0);
+        m.set_reg(0, 10, 0); // a0 = reset_type 0 = shutdown
+        m.set_reg(0, 11, 1); // a1 = reset_reason 1 = system failure
+
+        let err = m.step().expect_err("SRST must stop the run");
+
+        assert!(
+            matches!(err, StepError::SystemReset { reset_type: 0, reason: 1 }),
+            "got {err:?}"
+        );
     }
 
     #[test]

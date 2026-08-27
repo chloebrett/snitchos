@@ -659,17 +659,39 @@ env goes stale is that it names a machine whose address moves; re-running `provi
 after switching networks is a one-liner, whereas a hardcoded value is a bug that
 surfaces as a mysterious TFTP timeout.
 
-**✅ Done 2026-08-25 — the Mac holds a DHCP reservation at `192.168.0.7`.** That was the
-complementary fix, and it was the right one to do first: it costs minutes and no code,
-and it removes the failure *class* (a `serverip` that drifts with the lease) rather
-than automating around it.
+**❌ Corrected 2026-08-28. The 2026-08-25 claim here — "a DHCP reservation removes
+the failure *class*" — was wrong, and the board session of 2026-08-27 spent most of
+an evening proving it.** It removed the *instance* and left the class untouched.
 
-**This changes what this step is for.** With a stable `serverip`, a one-time manual
-`saveenv` at the U-Boot prompt already delivers zero-touch netboot — the exact commands,
-and the two parser gotchas the read-back check catches, are written up in
-[visionfive2-port.md](visionfive2-port.md) ("Making netboot zero-touch", **not yet
-applied** at time of writing). So `provision` is
-no longer the daily-loop fix, it is the **residue** handler: a wiped environment, a new
+macOS **Private Wi-Fi Address** was *rotating* `en0`'s MAC, and **a reservation
+cannot pin a MAC the client changes.** So `serverip=192.168.0.7` stayed in the saved
+`bootcmd`, the Mac quietly became `.8`, the board ARP'd for `.7`, nothing answered,
+and TFTP failed with ICMP port-unreachable. Nothing in the repo, the board, or the
+docs changed — which is precisely what makes it a *class*. See
+[../notes/board-session-2026-08-27.md](../notes/board-session-2026-08-27.md).
+
+**Resolved 2026-08-28** by setting Private Wi-Fi Address to **Fixed** (stable per
+SSID) and pinning the reservation to that MAC — so a reservation *is* the right
+tool, once the address it names holds still. The 2026-08-25 claim was wrong about
+the mechanism, not about reservations.
+
+**This strengthens the case for `provision`, rather than the reverse.** The whole
+point of the step as designed is that it **discovers `serverip` at run time**
+(`ipconfig getifaddr en0`) instead of baking it into `bootcmd` — which is exactly
+the defect the session found. I demoted this step on the strength of the wrong
+belief; the correct reading is that a hardcoded `serverip` is a standing trap and
+re-deriving it is the fix.
+
+**What is genuinely true:** netboot *is* zero-touch today — verified end to end on
+2026-08-27, `run bootcmd` → DHCP → TFTP (exact byte match) → `booti` → 4 harts up,
+`saveenv` persisted. So this step is not urgent. But it is not merely a residue
+handler either: it is the thing that stops the next drift, and there **will** be a
+next drift until the address is re-derived rather than remembered. Until then, the
+mechanism that depends on neither router nor UART is
+`sudo ifconfig en0 alias 192.168.0.7 255.255.255.255` — make the Mac answer where
+the board already looks.
+
+Beyond that, `provision` still handles the **residue**: a wiped environment, a new
 network, a second dev machine, or a board someone else is bringing up. Still worth
 building (it is small, and it is what makes the loop reproducible rather than
 remembered), but it dropped out of the critical path. Sequence it accordingly.
