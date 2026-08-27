@@ -375,8 +375,9 @@ and they improve the code. Only `deref_addrof` needs the `#[allow]` guard.
 | Unit (kernel-proc) | `cargo test -p kernel-proc` | Runqueue/preempt/kill, caps, IPC, reaping, ELF + W^X planning |
 | Unit (protocol)    | `cargo test -p protocol --features std` | Frame roundtrips + stream decoder |
 | Unit (collector)   | `cargo test -p collector` | Span state machine, prom/otlp encoding |
-| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the collector-core wasm32 portability build + the generated-diagram drift check + the doc-link check + rustdoc (`-D warnings`, host and riscv) |
+| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the collector-core wasm32 portability build + the generated-diagram drift check + the doc-link check + the plan-status check + rustdoc (`-D warnings`, host and riscv) |
 | Doc links          | `cargo xtask links` | Every relative `.md` link in the repo resolves (also runs inside `xtask test`) |
+| Plan status        | `cargo xtask plan-status` | Every plan has a dated `**Status (YYYY-MM-DD)**:` header and is linked from `plans/README.md` (also runs inside `xtask test`) |
 | Integration        | `cargo xtask itest` | Boots the kernel **under snemu**, asserts on the decoded wire frame sequence. Deterministic → one run is the gate. `--engine qemu` runs the same scenarios under QEMU (the fidelity escape hatch). |
 
 **Run host tests with `cargo nextest run`, never plain `cargo test`.** The gate
@@ -429,6 +430,20 @@ common fast path; the scrambled pass is the standing regression guard for the
 straddle bug class (see `plans/snemu-page-straddle-fix.md`). Both are deterministic,
 so each is a one-run gate (~1.7s). `--scramble` is snemu-only — it's a snemu-internal
 storage remap, invisible to the guest and to QEMU.
+
+**Plan status (`cargo xtask plan-status`, also inside `xtask test`).** `plans/README.md`
+is the five-second answer to "what is actually live?", and nothing compiled it. Every
+sweep this repo has done found it stale — always correct when written, always wrong
+within weeks, and wrong *precisely* where work was happening. Two things are now
+gated: every plan carries a **dated** `**Status (YYYY-MM-DD)**:` header in its first
+15 lines, and every plan is linked from the index. Run it alone for a staleness
+readout — it prints each plan by status date, oldest first. It does **not** fail on
+age: a gate that reddens through the passage of time gets ignored, and the only way
+to green it without doing the work is to lie about the date. Non-plans under `plans/`
+opt out via `NOT_PLANS` in `xtask-cmds/src/plan_status.rs`, each with a written
+reason — a deny-list, because this repo has already been bitten by
+allow-lists-by-omission. The date bounds the *header block* on purpose: `stim-v1.md`
+and `visionfive2-port.md` both carry per-step `**Status**:` notes deep in the body.
 
 **Doc links (`cargo xtask links`, also inside `xtask test`).** A markdown link is a
 contract nothing compiles, so a `git mv` breaks it silently — which happened on

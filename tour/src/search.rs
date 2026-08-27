@@ -125,6 +125,7 @@ mod tests {
             matches: FrameMatch::CapEvent {
                 kind: CapEventKind::Transferred,
                 name: "fs.endpoint".to_owned(),
+                rights: None,
             },
             occurrence: 1,
         }
