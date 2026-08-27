@@ -22,6 +22,7 @@ extern crate alloc;
 pub mod console;
 pub mod framebuffer;
 pub mod fwcfg;
+pub mod gmac;
 pub mod iomux;
 pub mod plic;
 pub mod pwmdac;
