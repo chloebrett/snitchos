@@ -24,10 +24,6 @@
       }
     ]
   },
-  "statusLine": {
-    "type": "command",
-    "command": "npx -y @owloops/claude-powerline --style=powerline"
-  },
   "permissions": {
     "deny": [
       "Bash(find * -delete)",

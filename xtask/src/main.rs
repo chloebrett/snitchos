@@ -510,6 +510,11 @@ mod mutant_plan_tests {
             "snemu-wasm",
             "stitch",
             "synth",
+            // The tour's chapter schema (plans/tour-v1.md, step 1). Enrolled on the
+            // same reasoning as `snemu-wasm` above: the crate exists *because* the
+            // chapter contract is pure and host-testable, so leaving it un-mutated
+            // would be the one place that claim goes unchecked.
+            "tour",
             // Joined by existing, not by anyone remembering — which is the
             // property this test protects. See plans/board-bridge.md step 1.
             "xtask-board",

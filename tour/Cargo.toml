@@ -1,0 +1,20 @@
+[package]
+name = "tour"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# A chapter's workload is validated against the kernel's own `workload=` parser
+# rather than a list copied into this crate. `snemu-wasm/src/boot.rs` is the
+# precedent — the only thing entitled to an opinion about what parses is the guest.
+kernel-boot = { path = "../kernel-boot" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[lints]
+workspace = true
+
+[lib]
+# No doctests here; the gate runs nextest, which never runs them. See CLAUDE.md.
+doctest = false

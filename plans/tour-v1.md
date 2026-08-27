@@ -232,6 +232,19 @@ against a different runtime (WebContainers runs Node, not machines — it fills 
 slot `snemu-wasm` already fills here, so there is nothing to adopt from it but
 the state model).
 
+**Pre-buffering: the fold store is the tape.** Replay is forward-only and
+deterministic, so if chapters are ordered by increasing anchor the tour is *one
+guest running forward*, and each anchor is a checkpoint it passes through. The
+cycles spent while a reader reads prose go into pre-reaching the next anchor
+rather than animating an unopened chart — the YouTube-buffer model. Better still,
+the panels are folds over the frame stream, so the store *is* the buffer: the
+guest may be at chapter 3's anchor while the panels render the fold up to chapter
+2's. Tape, write head, read cursor. Two limits to state plainly when building it:
+the guest's live state is not rewound, only its telemetry projection — so history
+is readable anywhere but the guest is only *typeable* at the write head — and
+retention is bounded by what the frame store keeps (`Decoder::durable_len`), so
+the tape is finite on a long tour.
+
 **Backwards navigation, and when snapshots become necessary.** Replay is
 forward-only. Navigating from a chapter anchored late to one anchored early
 cannot rewind — it costs a fresh boot and replay. Sub-second today; it scales
