@@ -8,6 +8,145 @@ pub mod reach;
 pub mod script;
 pub mod split;
 pub mod stop;
+pub mod wire;
+
+#[cfg(test)]
+mod wire_tests {
+    use super::stop::{StopCondition, StopReason};
+    use super::wire::{Ended, ReadWrite, capture};
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    /// A port scripted read-by-read, as `SerialReader`'s tests do one layer down.
+    struct MockPort {
+        reads: std::collections::VecDeque<std::io::Result<Vec<u8>>>,
+    }
+
+    impl Read for MockPort {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.reads.pop_front() {
+                Some(Ok(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Some(Err(e)) => Err(e),
+                None => Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            }
+        }
+    }
+
+    impl Write for MockPort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn port(reads: Vec<std::io::Result<Vec<u8>>>) -> MockPort {
+        MockPort { reads: reads.into_iter().collect() }
+    }
+
+    fn until_prompt() -> StopCondition {
+        StopCondition::new(Duration::from_secs(30)).marker(b"=> ")
+    }
+
+    /// **The loop's defining decision.** An idle read must advance the capture,
+    /// not end it — a board between heartbeats is quiet, not gone. Get this
+    /// backwards and every capture ends at the first gap, reporting a marker that
+    /// never came and blaming a board that was about to answer.
+    #[test]
+    fn an_idle_read_does_not_end_the_capture() {
+        let mut p = port(vec![
+            Ok(b"Hit any key".to_vec()),
+            Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            Ok(Vec::new()),
+            Ok(b"=> ".to_vec()),
+        ]);
+        let (ended, raw) = capture(&mut p as &mut dyn ReadWrite, &until_prompt());
+        assert_eq!(
+            ended,
+            Ended::Stopped(StopReason::Marker),
+            "the marker after the idle gap must still count"
+        );
+        assert!(raw.ends_with(b"=> "), "bytes on both sides of the gap are kept: {raw:?}");
+    }
+
+    /// The other half, and why the guard cannot simply absorb every error: **a
+    /// dead transport is not a quiet board.**
+    ///
+    /// Reporting it as a timeout would be true-ish and useless — the same
+    /// `StopReason` a board that merely stayed silent produces, so a caller could
+    /// not tell "it never answered" from "we stopped being able to hear it". That
+    /// is the distinction `reach` and `script` both keep, and this layer must not
+    /// be the one that throws it away.
+    #[test]
+    fn a_dead_transport_is_reported_as_itself_not_as_a_timeout() {
+        let mut p = port(vec![
+            Ok(b"boot".to_vec()),
+            Err(std::io::Error::from(std::io::ErrorKind::NotConnected)),
+        ]);
+        // A deliberately short deadline. If the transport check were ever inverted
+        // — absorbing real errors as if they were idleness — this capture would
+        // spin to its deadline instead of failing, so a long one would turn a
+        // wrong answer into a slow one. Short keeps the failure fast and legible.
+        let brief = StopCondition::new(Duration::from_millis(200)).marker(b"=> ");
+        let (ended, raw) = capture(&mut p as &mut dyn ReadWrite, &brief);
+        assert_eq!(ended, Ended::TransportFailed(std::io::ErrorKind::NotConnected));
+        assert_eq!(raw, b"boot", "bytes read before the failure are still evidence");
+    }
+}
+
+#[cfg(test)]
+mod refine_tests {
+    use super::reach::{Unreachable, refine_with_holder};
+    use std::io::ErrorKind;
+
+    fn held() -> Unreachable {
+        Unreachable::PortHeld { device: "/dev/cu.usbserial-1".into(), holder: None }
+    }
+
+    /// The ordinary upgrade: "something has the port" becomes "pid 4242 has it",
+    /// which is the difference between a puzzle and a `kill`.
+    #[test]
+    fn a_held_port_learns_its_holder() {
+        assert_eq!(
+            refine_with_holder(held(), 4242),
+            Unreachable::PortHeld { device: "/dev/cu.usbserial-1".into(), holder: Some(4242) }
+        );
+    }
+
+    /// The one that resolves a real ambiguity. `serialport` reports both *busy*
+    /// and *absent* as `NoDevice` (see `io_kind`), so a port classified missing
+    /// but which `lsof` says is open was never missing at all. Reporting "no such
+    /// device" there would send someone hunting a cable that is fine, while the
+    /// actual fix is to kill a process.
+    #[test]
+    fn a_device_something_holds_open_was_never_missing() {
+        let missing = Unreachable::NoSuchDevice { device: "/dev/cu.usbserial-1".into() };
+        assert_eq!(
+            refine_with_holder(missing, 4242),
+            Unreachable::PortHeld { device: "/dev/cu.usbserial-1".into(), holder: Some(4242) },
+            "evidence of a holder outranks serialport's ambiguous NoDevice"
+        );
+    }
+
+    /// Evidence only refines the two it can explain. A permissions failure is not
+    /// about who holds the port, and rewriting it as `PortHeld` would replace a
+    /// correct diagnosis with a wrong one.
+    #[test]
+    fn an_unrelated_failure_is_left_alone() {
+        let denied = Unreachable::NoPermission { device: "/dev/cu.usbserial-1".into() };
+        assert_eq!(refine_with_holder(denied.clone(), 4242), denied);
+
+        let other = Unreachable::OpenFailed {
+            device: "/dev/cu.usbserial-1".into(),
+            kind: ErrorKind::BrokenPipe,
+        };
+        assert_eq!(refine_with_holder(other.clone(), 4242), other);
+    }
+}
 
 #[cfg(test)]
 mod io_kind_tests {

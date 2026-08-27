@@ -92,6 +92,31 @@ pub fn classify_open_failure(device: &str, kind: ErrorKind) -> Unreachable {
     }
 }
 
+/// Refine a classification with evidence that `pid` holds the device.
+///
+/// Two upgrades, both driven by the same fact — something has the port open:
+///
+/// - A [`Unreachable::PortHeld`] learns *who*, turning "something has it" into a
+///   `kill` target.
+/// - A [`Unreachable::NoSuchDevice`] was **wrong**, and this is the only way to
+///   know. `serialport` reports busy and absent alike as `NoDevice` (see
+///   [`io_kind`]), so a device `lsof` can name a holder for plainly exists. Left
+///   uncorrected it sends someone hunting a cable that is fine, when the fix is
+///   to kill a process.
+///
+/// Everything else is returned untouched: a permissions failure is not about who
+/// holds the port, and rewriting it would replace a correct diagnosis with a
+/// wrong one.
+#[must_use]
+pub fn refine_with_holder(unreachable: Unreachable, pid: u32) -> Unreachable {
+    match unreachable {
+        Unreachable::PortHeld { device, .. } | Unreachable::NoSuchDevice { device } => {
+            Unreachable::PortHeld { device, holder: Some(pid) }
+        }
+        other => other,
+    }
+}
+
 /// The pid in the first data row of `lsof` output, if there is one.
 ///
 /// `lsof` prints only a header (or nothing at all) when no process holds the

@@ -10,16 +10,18 @@
 //! *next* run report `PortHeld` against a process that no longer exists. Hence
 //! `main` returns an [`ExitCode`] rather than exiting, all the way down.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
 use xtask_board::outcome::{Outcome, condition_from, exit_code};
-use xtask_board::reach::{Unreachable, check_device, classify_open_failure, holder_pid, io_kind};
+use xtask_board::reach::{
+    Unreachable, check_device, classify_open_failure, holder_pid, io_kind, refine_with_holder,
+};
 use xtask_board::split::split;
-use xtask_board::stop::{Capture, StopCondition, StopReason};
+use xtask_board::stop::StopCondition;
+use xtask_board::wire::{Ended, ReadWrite, capture};
 
 /// Drive the board over its UART and get structured frames back.
 #[derive(Parser)]
@@ -113,40 +115,19 @@ fn exec(input: &str, device: &str, baud: u32, condition: &StopCondition) -> Outc
         return Outcome::Unreachable(classify_open_failure(device, e.kind()));
     }
 
-    Outcome::Stopped(capture(&mut *port, condition))
-}
-
-/// Read until the condition fires, echoing text as it arrives.
-///
-/// `SerialReader` is deliberately *not* wrapped around the port here: this loop
-/// wants to see an idle read as an idle read so it can advance the quiescence
-/// clock. Absorbing timeouts is right for a decode loop that must not mistake
-/// quiet for EOF, and wrong for one whose whole job is noticing quiet.
-fn capture(port: &mut dyn ReadWrite, condition: &StopCondition) -> StopReason {
-    let mut capture = Capture::new(condition.clone());
-    let mut buf = [0u8; 1024];
-    let mut raw: Vec<u8> = Vec::new();
-    let started = Instant::now();
-
-    loop {
-        let elapsed = started.elapsed();
-        let stop = match port.read(&mut buf) {
-            Ok(0) => capture.tick(elapsed),
-            Ok(n) => {
-                raw.extend_from_slice(&buf[..n]);
-                capture.observe(elapsed, &buf[..n])
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => capture.tick(elapsed),
-            // A genuine read failure ends the capture; the deadline still bounds
-            // it, so this cannot spin.
-            Err(_) => Some(StopReason::Timeout),
-        };
-        if let Some(reason) = stop {
-            emit(&raw);
-            return reason;
+    let (ended, raw) = capture(&mut *port, condition);
+    emit(&raw);
+    match ended {
+        Ended::Stopped(reason) => Outcome::Stopped(reason),
+        // The port opened and then died under us. That is an `Unreachable`, not a
+        // capture that ended — and it exits 2, so an unattended loop retries the
+        // host rather than rebooting a board that was answering fine.
+        Ended::TransportFailed(kind) => {
+            Outcome::Unreachable(classify_open_failure(device, kind))
         }
     }
 }
+
 
 /// Print what the board said: its own text on stdout, frames on stderr.
 ///
@@ -188,20 +169,9 @@ fn consult_lsof(unreachable: &mut Unreachable, device: &str) {
     let Ok(out) = std::process::Command::new("lsof").arg(device).output() else { return };
     let Some(pid) = holder_pid(&String::from_utf8_lossy(&out.stdout)) else { return };
 
-    match unreachable {
-        Unreachable::PortHeld { holder, .. } => *holder = Some(pid),
-        // Classified missing, but something has it open — so it exists.
-        Unreachable::NoSuchDevice { device } => {
-            *unreachable = Unreachable::PortHeld { device: device.clone(), holder: Some(pid) };
-        }
-        _ => {}
-    }
+    // The decision lives in `reach` where it is host-tested; this is only the
+    // shelling-out. Mutation testing is what moved it: as an inline `match` here
+    // the whole `NoSuchDevice` upgrade could be deleted with no test noticing.
+    *unreachable = refine_with_holder(unreachable.clone(), pid);
 }
 
-/// The transport seam. Phase 2's TCP socket implements this too.
-trait ReadWrite: Read + Write {}
-impl<T: Read + Write> ReadWrite for T {}
-
-/// Silences the unused-import warning for `Duration` in builds where the
-/// capture loop's types are inferred; keeps the intent visible.
-const _: Option<Duration> = None;
