@@ -119,27 +119,84 @@ interactive relay) becomes the next uart item.
 
 ---
 
-## 3. Reality-check the board bridge's host logic
+## 3. First light for the board bridge — it is now a runnable command
 
-[../plans/board-bridge.md](../plans/board-bridge.md) steps 1–2 are done and
-**neither has touched a board**. Both are guesses about how real hardware
-misbehaves, and both are about to have steps 3–9 built on top of them. Validating
-them costs one session; discovering they are wrong after step 6 costs a rewrite.
+**Updated 2026-08-27**: this item used to say "steps 1–2 are done". Steps 1–4 are
+now code-complete and gate-green (`reach`, `stop`, `split`, `script`, `wire`,
+`outcome`, and a `cargo xtask board exec` CLI). None of it has touched a board.
+Everything from step 4b onward — interrupting the autoboot countdown — has **no
+host-side oracle at all**, so this session is the gate on all of it.
 
-- **`reach.rs` — the failure taxonomy.** Its whole purpose is that "could not
-  reach the board" must never look like "reached it, and it said nothing." Provoke
-  each variant deliberately: unplug the adapter, hold the port with `screen`, point
-  it at a wrong path, and boot a kernel that reaches the prompt but emits nothing.
-  Does each produce the variant that tells you what to *do* differently? That is
-  the axis the module claims to partition on.
-- **`stop.rs` — the stop-condition evaluator.** Exercise all three against a live
-  stream: a quiescence window, a marker match, a timeout. The quiescence window is
-  the one most likely to be mistuned against real timing, because the gaps between
-  real heartbeats are the thing no mock got to choose.
+### 3a. The one-command first light
 
-Note the interaction with item 2: a silent board reading as EOF is a *collector*
-behaviour, and the bridge sits on the same serial handle. Check the bridge does
-not inherit it.
+Nothing unbuilt is required. Empty input, quiescence stop — a pure read:
+
+```
+cargo xtask board exec "" --device /dev/cu.<adapter> --until-quiet 500
+```
+
+Power-cycle the board and it captures the boot log. That single command exercises
+`check_device`, `serialport::open`, the read loop, the text/frame split, and the
+exit code in one shot.
+
+**Success:** the boot log on stdout, decoded frames on stderr, exit `0`.
+
+### 3b. Run it *before* item 2, and here is why
+
+Items 2 and 3 put opposite idle-handling disciplines on the same physical setup,
+which makes them a natural A/B rather than two chores:
+
+| | idle read (`TimedOut` / `Ok(0)`) | so a quiet board… |
+|---|---|---|
+| `cargo xtask reader --serial` (item 2) | absorbed by `SerialReader` | keeps the session alive |
+| `cargo xtask board exec` (item 3) | **seen**, advances the quiescence clock | is the point |
+
+If item 2's clean-EOF trap fires but item 3 works, the fault is in the collector's
+idle handling. If **both** fail, the problem is lower down — the port, the baud, the
+cable — and you have saved yourself debugging the wrong layer. Running the cheaper,
+more-instrumented one first is the better experiment.
+
+### 3c. Provoke each failure deliberately — the exit codes are the interface
+
+The taxonomy's whole claim is that these need *different actions*, so check the
+codes actually discriminate rather than all meaning "it didn't work":
+
+| Provoke | Expect | Exit |
+|---|---|---|
+| Point at `/dev/tty.*` | `CallInDevice`, naming the `cu.*` path, **instantly** | 2 |
+| Hold the port with `screen` | `PortHeld`, naming the holder's pid via `lsof` | 2 |
+| Point at a nonexistent path | `NoSuchDevice` | 2 |
+| Board running, `--until "NEVER_APPEARS"` | reached it, marker never came | **1** |
+| Board running, `--timeout 2000` only | capture ran its window | **0** |
+
+The 1-vs-2 split is the one that matters: an unattended loop reboots the board on
+`1` and fixes the *host* on `2`. If they collapse, the loop chases the wrong fix
+every iteration.
+
+### 3d. ⚠ The hypothesis only hardware can settle
+
+**Unplug the adapter mid-capture.** Expect `Unreachable` and exit `2`, from
+`wire::Ended::TransportFailed`.
+
+This is a genuine guess. The code assumes a yanked USB-serial adapter makes
+`read()` return an **error**. If `serialport` instead returns `Ok(0)` forever, that
+path reads as *idle* — the capture spins to its deadline and reports `Timeout`
+(exit `1`, "the board went silent") for what was actually a dead cable (exit `2`,
+"fix the host"). That is precisely the conflation the `Ended` split was introduced
+to prevent, so it failing here would mean the split is right and its *input* is
+wrong.
+
+Nothing at a desk can answer this: it depends on what the macOS driver does to a
+blocking read when the device node vanishes. **If it reports `Timeout`, the fix is
+in `wire::capture`** — treat a repeated zero-length read on a port that once had
+bytes as transport death, not idleness.
+
+### 3e. Tune the quiescence window against real timing
+
+`--until-quiet` is the one constant no mock got to choose: the gaps between real
+heartbeats are a property of the board. Try 200 ms, 500 ms, 1 s and note which
+first stops fragmenting a boot log into pieces. Record the answer — Phase 2 needs
+it, because WiFi jitter will widen whatever serial wants.
 
 ---
 
@@ -250,8 +307,16 @@ checks and is now one boot plus three DTB greps. That is the probe doing its job
 it exists to move questions off the board, and it did so before ever running on
 one. Which also means its own correctness is now the thing riding on this session.
 
-If the session is cut short, the priority is **1, then 2**. Item 1 pays for every
-future session; item 2 unblocks the port's headline milestone.
+**Run §3a before item 2** (updated 2026-08-27). It is one command and about thirty
+seconds, and it makes item 2's result *interpretable*: the two put opposite
+idle-handling disciplines on the same cable, so if item 2 dies at a quiet gap you
+immediately know whether that is the collector's `SerialReader` behaviour or the
+port itself. Item 2 still closes the milestone; §3a just stops you debugging the
+wrong layer to get there.
+
+If the session is cut short, the priority is **1, then §3a, then 2**. Item 1 pays
+for every future session; §3a is nearly free and de-risks item 2; item 2 unblocks
+the port's headline milestone.
 
 ## What to capture before you unplug
 
@@ -268,6 +333,13 @@ not need the board again:
 - **`printenv`** in full, once provisioned.
 - **The exact device path and baud** that worked.
 - **Which RJ45 linked**, and its PHY.
+- **The `--until-quiet` value that stopped fragmenting the boot log** (§3e). It is
+  the one constant no host test could choose, and Phase 2 needs it as its starting
+  point before WiFi jitter widens it.
+- **What `read()` returned when you unplugged the adapter mid-capture** (§3d) —
+  error or `Ok(0)`. One bit, and it decides whether `wire::capture` needs a fix.
+  Note it even if the answer is the boring one; "confirmed as assumed" is a result
+  that stops the question being asked again.
 
 Then fold the answers back into the plans they came from, and re-date those
 `**Status (YYYY-MM-DD)**:` headers — `cargo xtask plan-status` prints them
