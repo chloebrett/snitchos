@@ -767,7 +767,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// **Where a completion would land.** A completer computes what may come next
     /// from the *token stream*, but writes bytes at the *end of the buffer*. Inside a
     /// comment those are different places: the lexer skipped the comment, so an

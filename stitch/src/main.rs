@@ -63,13 +63,14 @@ fn main() -> ExitCode {
         // `test` is a verb, not a path — a file literally named `test` is
         // reachable as `./test`, which is the same convention every other CLI
         // with a bare-word subcommand uses.
-        Some("test") => match args.next() {
-            Some(path) => test_file(&path),
-            None => {
+        Some("test") => {
+            if let Some(path) = args.next() {
+                test_file(&path)
+            } else {
                 eprintln!("usage: stitch test <file.st>");
                 ExitCode::from(2)
             }
-        },
+        }
         Some(path) => run_file(path),
         None => repl(),
     }
