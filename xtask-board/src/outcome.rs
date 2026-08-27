@@ -70,7 +70,7 @@ pub enum Outcome {
 pub fn exit_code(condition: &StopCondition, outcome: &Outcome) -> u8 {
     match outcome {
         Outcome::Unreachable(_) => 2,
-        Outcome::Stopped(StopReason::Timeout) if condition.awaits_an_event() => 1,
-        Outcome::Stopped(_) => 0,
+        Outcome::Stopped(reason) if condition.satisfied_by(*reason) => 0,
+        Outcome::Stopped(_) => 1,
     }
 }

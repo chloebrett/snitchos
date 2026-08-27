@@ -93,6 +93,23 @@ impl StopCondition {
     pub const fn awaits_an_event(&self) -> bool {
         self.marker.is_some() || self.quiet_after.is_some()
     }
+
+    /// Did `reason` give this condition what it asked for?
+    ///
+    /// [`StopReason::Timeout`] is the only ambiguous one, and it is ambiguous in
+    /// both directions: it *satisfies* "watch for three seconds" and *fails*
+    /// "wait for the prompt". The reason alone cannot tell those apart — only the
+    /// request can, which is why this lives on the condition.
+    ///
+    /// One rule, two callers: `crate::outcome::exit_code` uses it to decide the
+    /// process exit code, and [`crate::script::run`] uses it to decide whether
+    /// the next step may be sent. Those must never disagree — a script that
+    /// pressed on where the CLI would have reported failure would type into a
+    /// board that is not at a prompt.
+    #[must_use]
+    pub const fn satisfied_by(&self, reason: StopReason) -> bool {
+        !matches!(reason, StopReason::Timeout) || !self.awaits_an_event()
+    }
 }
 
 /// Evaluates a [`StopCondition`] against a stream of arrivals.

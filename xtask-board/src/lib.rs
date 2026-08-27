@@ -5,6 +5,7 @@
 
 pub mod outcome;
 pub mod reach;
+pub mod script;
 pub mod split;
 pub mod stop;
 
@@ -91,11 +92,11 @@ mod outcome_tests {
     use std::time::Duration;
 
     fn window_only() -> StopCondition {
-        StopCondition::new(Duration::from_millis(3000))
+        StopCondition::new(Duration::from_secs(3))
     }
 
     fn awaiting_a_marker() -> StopCondition {
-        StopCondition::new(Duration::from_millis(3000)).marker(b"=> ")
+        StopCondition::new(Duration::from_secs(3)).marker(b"=> ")
     }
 
     /// The distinction an unattended loop is built on: **a board that never said
@@ -128,7 +129,7 @@ mod outcome_tests {
     #[test]
     fn going_quiet_succeeds_when_quiet_was_the_request() {
         let c =
-            StopCondition::new(Duration::from_millis(3000)).quiet_after(Duration::from_millis(200));
+            StopCondition::new(Duration::from_secs(3)).quiet_after(Duration::from_millis(200));
         assert_eq!(exit_code(&c, &Outcome::Stopped(StopReason::Quiet)), 0);
     }
 
@@ -707,5 +708,147 @@ mod split_tests {
             "the second session's Hello must be recovered exactly like the first"
         );
         assert_eq!(out.resyncs, 0);
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::script::{ScriptOutcome, Step, run};
+    use super::stop::{StopCondition, StopReason};
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    fn until_prompt() -> StopCondition {
+        StopCondition::new(Duration::from_secs(3)).marker(b"=> ")
+    }
+
+    /// A bare deadline with nothing awaited: "watch for three seconds", which
+    /// reaching the deadline *satisfies*.
+    fn just_watch() -> StopCondition {
+        StopCondition::new(Duration::from_secs(3))
+    }
+
+    /// Records what was actually put on the wire, so a test can assert on the
+    /// steps that were **not** sent — which is the property that matters.
+    struct Wire {
+        sent: RefCell<Vec<Vec<u8>>>,
+        reasons: RefCell<std::vec::IntoIter<Option<StopReason>>>,
+    }
+
+    impl Wire {
+        fn answering(reasons: Vec<Option<StopReason>>) -> Self {
+            Self { sent: RefCell::new(Vec::new()), reasons: RefCell::new(reasons.into_iter()) }
+        }
+
+        fn perform(&self, step: &Step) -> Option<StopReason> {
+            self.sent.borrow_mut().push(step.send().to_vec());
+            self.reasons.borrow_mut().next().flatten()
+        }
+
+        fn sent(&self) -> Vec<Vec<u8>> {
+            self.sent.borrow().clone()
+        }
+    }
+
+    #[test]
+    fn every_step_runs_in_order_when_each_reaches_what_it_awaited() {
+        let steps = vec![
+            Step::new(b"\r", until_prompt()),
+            Step::new(b"printenv serverip\r", until_prompt()),
+        ];
+        let wire = Wire::answering(vec![Some(StopReason::Marker), Some(StopReason::Marker)]);
+
+        let outcome = run(&steps, |step| wire.perform(step));
+
+        assert_eq!(
+            outcome,
+            ScriptOutcome::Completed { reasons: vec![StopReason::Marker, StopReason::Marker] }
+        );
+        assert_eq!(wire.sent(), vec![b"\r".to_vec(), b"printenv serverip\r".to_vec()]);
+    }
+
+    /// **The safety property, and the reason a conversation is a value rather
+    /// than a loop written three times.** If the prompt never arrived, the board
+    /// is not at a prompt — it is booting, or wedged, or halfway through a
+    /// `saveenv`. Typing the next command into it is not a failed step, it is an
+    /// unpredictable one, and `provision` writing half an environment is worse
+    /// than writing none.
+    #[test]
+    fn a_step_that_never_saw_what_it_awaited_abandons_the_rest_unsent() {
+        let steps = vec![
+            Step::new(b"\r", until_prompt()),
+            Step::new(b"setenv serverip 192.168.0.7\r", until_prompt()),
+            Step::new(b"saveenv\r", until_prompt()),
+        ];
+        let wire = Wire::answering(vec![Some(StopReason::Timeout)]);
+
+        let outcome = run(&steps, |step| wire.perform(step));
+
+        assert_eq!(
+            outcome,
+            ScriptOutcome::Abandoned { index: 0, reason: StopReason::Timeout },
+            "the verdict must name *which* step failed — 'the script failed' is not actionable"
+        );
+        assert_eq!(
+            wire.sent(),
+            vec![b"\r".to_vec()],
+            "nothing after the failed step may reach the board"
+        );
+    }
+
+    /// The same `StopReason::Timeout` that fails a step awaiting a prompt
+    /// *satisfies* a step that only asked to watch for a while. The reason alone
+    /// cannot tell them apart — only the request can. Shares its rule with
+    /// `outcome::exit_code`, via `StopCondition::satisfied_by`.
+    #[test]
+    fn a_timeout_is_success_for_a_step_that_awaited_nothing() {
+        let steps = vec![Step::new(b"", just_watch()), Step::new(b"\r", until_prompt())];
+        let wire = Wire::answering(vec![Some(StopReason::Timeout), Some(StopReason::Marker)]);
+
+        let outcome = run(&steps, |step| wire.perform(step));
+
+        assert_eq!(
+            outcome,
+            ScriptOutcome::Completed { reasons: vec![StopReason::Timeout, StopReason::Marker] }
+        );
+        assert_eq!(wire.sent().len(), 2, "a satisfied timeout must not abandon the script");
+    }
+
+    #[test]
+    fn an_empty_script_completes_without_touching_the_wire() {
+        let wire = Wire::answering(vec![]);
+        let outcome = run(&[], |step| wire.perform(step));
+        assert_eq!(outcome, ScriptOutcome::Completed { reasons: vec![] });
+        assert!(wire.sent().is_empty());
+    }
+
+    /// A transport that dies mid-script is **not** a step that timed out, and
+    /// collapsing the two is the confusion this whole plan exists to prevent: one
+    /// means the board did not answer, the other means we stopped listening. This
+    /// layer reports *where* it died; the driver, which holds the `io::Error` or
+    /// the `Unreachable`, reports why.
+    #[test]
+    fn a_transport_failure_says_where_it_died_rather_than_looking_like_silence() {
+        let steps = vec![
+            Step::new(b"\r", until_prompt()),
+            Step::new(b"printenv\r", until_prompt()),
+            Step::new(b"boot\r", until_prompt()),
+        ];
+        let wire = Wire::answering(vec![Some(StopReason::Marker), None]);
+
+        let outcome = run(&steps, |step| wire.perform(step));
+
+        assert_eq!(outcome, ScriptOutcome::Interrupted { index: 1 });
+        assert_eq!(wire.sent().len(), 2, "the step after the failure must not be sent");
+    }
+
+    /// The failing step's own reason is part of the verdict, not discarded — it
+    /// is the difference between "the prompt never came" and "it went quiet".
+    #[test]
+    fn the_reason_the_step_failed_survives_into_the_verdict() {
+        let steps = vec![Step::new(b"\r", StopCondition::new(Duration::from_secs(3)).quiet_after(Duration::from_millis(200)))];
+        let wire = Wire::answering(vec![Some(StopReason::Timeout)]);
+        let outcome = run(&steps, |step| wire.perform(step));
+        assert_eq!(outcome, ScriptOutcome::Abandoned { index: 0, reason: StopReason::Timeout });
     }
 }

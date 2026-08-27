@@ -40,7 +40,7 @@
 //! **the latest wins**. Swept over 96 mixed chunks (16 frame shapes × 6 text
 //! prefixes): latest-wins was wrong 0 times, earliest-wins 3.
 //!
-//! The search is bounded by [`MAX_FRAME_BYTES`], so a long boot log in front of a
+//! The search is bounded by `MAX_FRAME_BYTES`, so a long boot log in front of a
 //! frame costs nothing.
 
 use protocol::stream::{OwnedFrame, try_decode_frame};
