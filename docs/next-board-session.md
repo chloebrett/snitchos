@@ -191,20 +191,24 @@ What it answers without any further typing: whether the megapage needs its own
 the `phy_intf_sel` field, the MDC divider in the MDIO CSR field, the station MAC
 address, and whether U-Boot left a TX descriptor ring behind (old item 5).
 
-### 4b. Still manual — three DTB questions
+The probe reads the **device tree first**, before any MMIO — none of it can hang the
+bus, and its answers say whether the register reads are even worth attempting. So the
+dump opens with:
 
-The probe reads MMIO, not the device tree, so these stay hand-work this session:
+```
+gmac-probe: dtb dma-noncoherent=false (true means STOP — no Zicbom on this core)
+gmac-probe: dtb /soc/ethernet@16040000 status=okay phy-mode=rgmii-id phy-handle=yes reset-gpios=no
+```
 
-1. **Is `dma-noncoherent` absent from the board's *live* DTB?** One grep. Mainline
-   says it is; confirm on the actual board. **If present, stop and re-scope** — the
-   U74 has no `Zicbom`, so a cache-maintenance layer would be a different plan.
-2. **Which physical RJ45 is GMAC1?** Plug one jack and see which PHY links, or read
-   U-Boot's `ethact`.
-3. **Is there a PHY reset GPIO?** Not in the mainline VF2 DTS; check the board's
-   own DTB.
+**`dma-noncoherent=true` ends the session's GMAC work.** The whole driver estimate
+rests on this being false; if the board disagrees with mainline, the plan needs
+re-scoping around a cache-maintenance layer the kernel has no primitives for.
 
-Capturing the live DTB (see below) answers 1 and 3 at the desk afterwards, so they
-never need the board twice.
+### 4b. Still manual — one question
+
+**Which physical RJ45 is GMAC1?** Plug one jack and see which PHY links, or read
+U-Boot's `ethact`. The DTB report says which *nodes* are enabled, not which *socket*
+is which — that mapping isn't in the device tree.
 
 ---
 
@@ -232,7 +236,9 @@ not need the board again:
 - **The `gmac-probe` dump specifically**, even if it looks like a hang. A dump that
   stops after one breadcrumb is a *result*, and the last line names the register
   that stopped it.
-- **The live DTB**, for items 4b.1 and 4b.3, so DTB questions never need the board twice.
+- **The live DTB**, so any *further* device-tree question never needs the board twice.
+  The probe already reports the two that Phase 0 asked; this is insurance against the
+  next one.
 - **`printenv`** in full, once provisioned.
 - **The exact device path and baud** that worked.
 - **Which RJ45 linked**, and its PHY.

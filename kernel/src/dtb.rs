@@ -54,6 +54,43 @@ pub fn has_fw_cfg(dtb: &Fdt) -> bool {
   dtb.find_compatible(&["qemu,fw-cfg-mmio"]).is_some()
 }
 
+/// True when the DTB marks peripheral DMA as **non**-coherent (`/soc` carrying
+/// `dma-noncoherent`). Read by `workload=gmac-probe`.
+///
+/// This is the single fact the GMAC driver's whole estimate rests on. Mainline's
+/// `jh7110.dtsi` omits the property — the JH7110 routes peripheral DMA through a
+/// coherent port on the L2, unlike its JH7100 predecessor, which carried it and
+/// needed a `SiFive` cache-flush layer. If this ever returns `true` on the board,
+/// **stop**: the U74 has no `Zicbom`, so cache maintenance would be a sub-project
+/// this kernel has no primitives for. See `docs/vf2-gmac-design.md`, Finding 2.
+pub fn dma_is_noncoherent(dtb: &Fdt) -> bool {
+  dtb.find_node("/soc").is_some_and(|soc| soc.property("dma-noncoherent").is_some())
+}
+
+/// Report what the DTB says about the GMAC nodes over the telemetry channel: which
+/// are enabled, their `phy-mode`, and whether a PHY reset GPIO is named. Answers
+/// the Phase 0 questions that are about the device tree rather than about MMIO —
+/// and unlike the register reads, none of this can hang the bus, which is why the
+/// probe does it first.
+pub fn report_gmac_nodes(dtb: &Fdt) {
+  for path in ["/soc/ethernet@16030000", "/soc/ethernet@16040000"] {
+    let Some(node) = dtb.find_node(path) else {
+      crate::tracing::emit_log(&alloc::format!("gmac-probe: dtb {path} absent"));
+      continue;
+    };
+    let text = |name| {
+      node.property(name).and_then(fdt::node::NodeProperty::as_str).unwrap_or("-")
+    };
+    crate::tracing::emit_log(&alloc::format!(
+      "gmac-probe: dtb {path} status={} phy-mode={} phy-handle={} reset-gpios={}",
+      text("status"),
+      text("phy-mode"),
+      if node.property("phy-handle").is_some() { "yes" } else { "no" },
+      if node.property("reset-gpios").is_some() { "yes" } else { "no" },
+    ));
+  }
+}
+
 /// Enumerate the harts the DTB advertises under `/cpus`, filling `out` with one
 /// [`HartInfo`] per `cpu@N` node — its `reg` (the `mhartid`) and whether its
 /// `status` marks it usable (the JH7110's S7 monitor is `status="disabled"` and

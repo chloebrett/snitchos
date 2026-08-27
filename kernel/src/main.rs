@@ -609,7 +609,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
         // Reconnaissance, not a task layout: dump what U-Boot left in the GMAC's
         // registers, inline on the boot path, then fall through to the idle loop.
         // Board-only — nothing answers at 0x1604_0000 under QEMU or snemu.
-        Some(WorkloadKind::GmacProbe) => device::gmac::probe(),
+        Some(WorkloadKind::GmacProbe) => device::gmac::probe(&dtb),
     }
 
     // DTB physical region lives in the identity gigapage we're about

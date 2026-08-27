@@ -50,8 +50,19 @@ fn read_reported(region: &Region, target: &Target) -> u32 {
 /// The megapages this needs are inserted by `kmain` pre-MMU from
 /// `kernel_devices::gmac::PROBE_MEGAPAGES`, alongside SYSCRG's — see the
 /// `mmio_regions` block there. Nothing is mapped here.
-pub fn probe() {
+///
+/// `dtb` must still be borrowable — this runs before `kmain` tears down the
+/// identity gigapage the DTB lives in.
+pub fn probe(dtb: &fdt::Fdt) {
     crate::tracing::emit_log("gmac-probe: start");
+
+    // The device tree first, deliberately: none of it can hang the bus, and its
+    // answers say whether the MMIO reads below are even worth attempting.
+    crate::tracing::emit_log(&alloc::format!(
+        "gmac-probe: dtb dma-noncoherent={} (true means STOP — no Zicbom on this core)",
+        crate::dtb::dma_is_noncoherent(dtb),
+    ));
+    crate::dtb::report_gmac_nodes(dtb);
 
     for (region_index, region) in PROBE_REGIONS.iter().enumerate() {
         for (target_index, target) in region.targets.iter().enumerate() {
