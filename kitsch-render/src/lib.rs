@@ -94,6 +94,97 @@ pub fn compose(width: usize, height: usize, windows: &[Window<'_>]) -> Grid {
     grid
 }
 
+/// A horizontal run of dirty cells on one row — what the rasterizer redraws.
+/// Never crosses a row: the framebuffer is row-major, so a horizontal run is
+/// contiguous memory and a vertical one is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub y: usize,
+    pub x: usize,
+    pub width: usize,
+}
+
+/// Which cells changed since the last present, as one dirty bit each.
+///
+/// A bitmap, not a tree. 7,200 cells is **900 bytes** — 113 `u64` words to mark
+/// and scan — and there is no query to accelerate because every dirty cell gets
+/// visited anyway. A quadtree is four orders of magnitude short of paying for
+/// itself here. See `docs/kitsch-design.md` §4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Damage {
+    width: usize,
+    height: usize,
+    bits: Vec<u64>,
+}
+
+impl Damage {
+    /// A map with nothing dirty.
+    pub fn new(width: usize, height: usize) -> Self {
+        Self { width, height, bits: vec![0; (width * height).div_ceil(64)] }
+    }
+
+    /// Mark one cell dirty. Out of bounds is ignored, not a panic: callers
+    /// compute cell coordinates from geometry that clips, and a redraw request
+    /// for a cell that is not on screen is a no-op, not a bug.
+    pub fn mark(&mut self, x: usize, y: usize) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let index = y * self.width + x;
+        self.bits[index / 64] |= 1 << (index % 64);
+    }
+
+    /// Mark every cell in `rect` dirty, clipped to the map.
+    pub fn mark_rect(&mut self, rect: Rect) {
+        let x_end = (rect.x + rect.width).min(self.width);
+        let y_end = (rect.y + rect.height).min(self.height);
+        for y in rect.y..y_end {
+            for x in rect.x..x_end {
+                self.mark(x, y);
+            }
+        }
+    }
+
+    /// Whether `(x, y)` is dirty. Out of bounds is clean.
+    pub fn is_dirty(&self, x: usize, y: usize) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        let index = y * self.width + x;
+        self.bits[index / 64] & (1 << (index % 64)) != 0
+    }
+
+    /// Everything clean again — call after a present.
+    pub fn clear(&mut self) {
+        self.bits.fill(0);
+    }
+
+    /// The dirty cells as coalesced per-row runs, in row order.
+    ///
+    /// Coalescing is the whole optimisation: the framebuffer is row-major, so a
+    /// horizontal run is one contiguous blit while the same cells drawn
+    /// individually are N. Runs stop at the row end — bits adjacent across a row
+    /// boundary are not adjacent pixels.
+    pub fn spans(&self) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for y in 0..self.height {
+            let mut x = 0;
+            while x < self.width {
+                if !self.is_dirty(x, y) {
+                    x += 1;
+                    continue;
+                }
+                let start = x;
+                while x < self.width && self.is_dirty(x, y) {
+                    x += 1;
+                }
+                spans.push(Span { y, x: start, width: x - start });
+            }
+        }
+        spans
+    }
+}
+
 /// A bitmap font: `height` bytes per glyph, one byte per row, **MSB is the
 /// leftmost pixel**. Glyphs are stored contiguously from code point `first`,
 /// so lookup is an index rather than a search.
@@ -127,14 +218,32 @@ impl Font<'_> {
 /// pixels so the work goes through `fill_rect`, which increment 1 made emit one
 /// `sw` per pixel — a per-pixel path would give back that win immediately.
 pub fn rasterize(grid: &Grid, font: &Font<'_>, pixels: &mut [u32], stride: usize) {
+    let all: Vec<Span> =
+        (0..grid.height).map(|y| Span { y, x: 0, width: grid.width }).collect();
+    rasterize_spans(grid, font, pixels, stride, &all);
+}
+
+/// Draw only the cells covered by `spans`. The damage-driven path, and the one
+/// that matters: a keystroke should cost a few cells, not a screen.
+pub fn rasterize_spans(
+    grid: &Grid,
+    font: &Font<'_>,
+    pixels: &mut [u32],
+    stride: usize,
+    spans: &[Span],
+) {
     let (cw, ch) = (font.width, font.height);
     let height = pixels.len() / stride.max(1);
     let mut fb = Framebuffer::new(pixels, stride, height, stride);
 
-    for y in 0..grid.height {
-        for x in 0..grid.width {
-            let cell = grid.cells[y * grid.width + x];
-            let (ox, oy) = (x * cw, y * ch);
+    for span in spans {
+        if span.y >= grid.height {
+            continue;
+        }
+        let x_end = (span.x + span.width).min(grid.width);
+        for x in span.x..x_end {
+            let cell = grid.cells[span.y * grid.width + x];
+            let (ox, oy) = (x * cw, span.y * ch);
             fb.fill_rect(FbRect { x: ox, y: oy, width: cw, height: ch }, cell.bg);
 
             let Some(rows) = font.rows(cell.glyph) else {
@@ -327,6 +436,102 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_damage_map_has_nothing_to_redraw() {
+        let damage = Damage::new(160, 45);
+        assert!(damage.spans().is_empty());
+    }
+
+    #[test]
+    fn one_dirty_cell_is_one_span_of_width_one() {
+        let mut damage = Damage::new(4, 2);
+        damage.mark(2, 1);
+        assert_eq!(damage.spans(), vec![Span { y: 1, x: 2, width: 1 }]);
+    }
+
+    #[test]
+    fn adjacent_dirty_cells_coalesce_into_one_span() {
+        // The whole point of coalescing: three separate blits become one, over
+        // contiguous memory.
+        let mut damage = Damage::new(5, 1);
+        damage.mark(1, 0);
+        damage.mark(2, 0);
+        damage.mark(3, 0);
+        assert_eq!(damage.spans(), vec![Span { y: 0, x: 1, width: 3 }]);
+    }
+
+    #[test]
+    fn a_clean_cell_between_dirty_ones_splits_the_span() {
+        let mut damage = Damage::new(5, 1);
+        damage.mark(0, 0);
+        damage.mark(1, 0);
+        damage.mark(3, 0);
+        assert_eq!(damage.spans(), vec![
+            Span { y: 0, x: 0, width: 2 },
+            Span { y: 0, x: 3, width: 1 },
+        ]);
+    }
+
+    #[test]
+    fn a_span_never_crosses_a_row() {
+        // The end of one row and the start of the next are adjacent *bits* but
+        // not adjacent *pixels* — the framebuffer is row-major. Merging them
+        // would smear a blit across the screen.
+        let mut damage = Damage::new(3, 2);
+        damage.mark(2, 0);
+        damage.mark(0, 1);
+        assert_eq!(damage.spans(), vec![
+            Span { y: 0, x: 2, width: 1 },
+            Span { y: 1, x: 0, width: 1 },
+        ]);
+    }
+
+    #[test]
+    fn marking_a_rect_dirties_exactly_that_rect() {
+        let mut damage = Damage::new(4, 3);
+        damage.mark_rect(Rect { x: 1, y: 1, width: 2, height: 2 });
+        assert_eq!(damage.spans(), vec![
+            Span { y: 1, x: 1, width: 2 },
+            Span { y: 2, x: 1, width: 2 },
+        ]);
+    }
+
+    #[test]
+    fn spans_partition_the_dirty_cells_for_every_possible_pattern() {
+        // Exhaustive, not random: every one of the 2^10 dirty patterns of a 5x2
+        // grid. Three invariants together say "the spans are exactly the dirty
+        // set, drawn once" — which is what a rasterizer driven by them needs.
+        const W: usize = 5;
+        const H: usize = 2;
+        for pattern in 0u32..(1 << (W * H)) {
+            let mut damage = Damage::new(W, H);
+            for i in 0..(W * H) {
+                if pattern & (1 << i) != 0 {
+                    damage.mark(i % W, i / W);
+                }
+            }
+
+            let spans = damage.spans();
+            let mut covered = [0usize; W * H];
+            for span in &spans {
+                assert!(span.width > 0, "empty span in {pattern:#b}");
+                for x in span.x..span.x + span.width {
+                    assert!(x < W, "span past the row end in {pattern:#b}");
+                    covered[span.y * W + x] += 1;
+                }
+            }
+
+            for (i, &times) in covered.iter().enumerate() {
+                let dirty = pattern & (1 << i) != 0;
+                assert_eq!(
+                    times,
+                    usize::from(dirty),
+                    "cell {i} covered {times} times, dirty={dirty}, pattern {pattern:#b}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn each_cell_rasterizes_at_its_own_offset() {
         // A one-cell grid cannot catch an offset bug: every wrong formula still
         // lands at (0,0). Two cells side by side is the smallest grid that can.
@@ -343,6 +548,28 @@ mod tests {
         assert_eq!(pixels, vec![
             bg, bg, fg, bg, // row 0
             bg, bg, bg, fg, // row 1
+        ]);
+    }
+
+    #[test]
+    fn rasterizing_spans_leaves_undamaged_pixels_alone() {
+        // The point of damage tracking: a keystroke must not cost a full-screen
+        // redraw. If undamaged pixels get touched, the spans are decoration and
+        // the frame budget is gone.
+        const SENTINEL: u32 = 0xdead_beef;
+        let font = diagonal_font();
+        let mut grid = Grid::new(2, 1);
+        let ink = Cell { glyph: 'A', fg: 0x00ff_ffff, bg: 0x0000_0000 };
+        grid.set(0, 0, ink);
+        grid.set(1, 0, ink);
+
+        let mut pixels = vec![SENTINEL; 4 * 2];
+        rasterize_spans(&grid, &font, &mut pixels, 4, &[Span { y: 0, x: 1, width: 1 }]);
+
+        let (fg, bg) = (0xffff_ffff, 0xff00_0000);
+        assert_eq!(pixels, vec![
+            SENTINEL, SENTINEL, fg, bg, // row 0: cell 0 untouched
+            SENTINEL, SENTINEL, bg, fg, // row 1: cell 0 untouched
         ]);
     }
 

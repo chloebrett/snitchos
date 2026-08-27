@@ -5,7 +5,7 @@
 use crate::fwcfg::{Fwcfg, RamfbCfg};
 use crate::mem::{BusError, Memory};
 use crate::plic::Plic;
-use crate::gmac;
+use crate::gmac::Gmac;
 use crate::pwmdac::Pwmdac;
 use crate::uart::Uart;
 use crate::virtio::Virtio;
@@ -58,6 +58,7 @@ pub(crate) struct Bus {
     virtio: Virtio,
     fwcfg: Fwcfg,
     pwmdac: Pwmdac,
+    gmac: Gmac,
     plic: Plic,
 }
 
@@ -69,6 +70,7 @@ impl Bus {
             virtio: Virtio::new(),
             fwcfg: Fwcfg::new(),
             pwmdac: Pwmdac::new(),
+            gmac: Gmac::new(),
             plic: Plic::new(),
         }
     }
@@ -143,6 +145,10 @@ impl Bus {
         self.virtio.tx_output().hash(h);
         self.fwcfg.ramfb_cfg().hash(h);
         self.pwmdac.hash_state(h);
+        // Transmitted frames are semantic device state, not derivable from RAM —
+        // two runs that differ only in what left the NIC must hash differently, or
+        // snapshot sharing would treat them as the same machine.
+        self.gmac.frames().hash(h);
     }
 
     /// RAM, for the page-table walker (PTEs always live in physical memory).
@@ -154,8 +160,8 @@ impl Bus {
         if Pwmdac::in_window(addr) {
             return Ok(Pwmdac::read(addr) as u8);
         }
-        if gmac::in_window(addr) {
-            return Ok(gmac::read(addr) as u8);
+        if Gmac::in_window(addr) {
+            return Ok(self.gmac.read(addr) as u8);
         }
         if addr == FWCFG_REG_DATA {
             return Ok(self.fwcfg.read_data_byte());
@@ -173,8 +179,8 @@ impl Bus {
         if Pwmdac::in_window(addr) {
             return Ok(Pwmdac::read(addr) as u16);
         }
-        if gmac::in_window(addr) {
-            return Ok(gmac::read(addr) as u16);
+        if Gmac::in_window(addr) {
+            return Ok(self.gmac.read(addr) as u16);
         }
         if in_fwcfg(addr) {
             return Ok(0);
@@ -189,8 +195,8 @@ impl Bus {
         if Pwmdac::in_window(addr) {
             return Ok(Pwmdac::read(addr) as u32);
         }
-        if gmac::in_window(addr) {
-            return Ok(gmac::read(addr) as u32);
+        if Gmac::in_window(addr) {
+            return Ok(self.gmac.read(addr) as u32);
         }
         if in_fwcfg(addr) {
             return Ok(0);
@@ -213,8 +219,8 @@ impl Bus {
         if Pwmdac::in_window(addr) {
             return Ok(Pwmdac::read(addr));
         }
-        if gmac::in_window(addr) {
-            return Ok(gmac::read(addr));
+        if Gmac::in_window(addr) {
+            return Ok(self.gmac.read(addr));
         }
         if in_fwcfg(addr) {
             return Ok(0);
@@ -292,6 +298,16 @@ impl Bus {
         }
         if in_fwcfg(addr) {
             return Ok(()); // un-modeled offset in the page — old stub behaviour
+        }
+        if Gmac::in_window(addr) {
+            self.gmac.write(addr, value);
+            if Gmac::is_tx_kick(addr) {
+                // The tail-pointer write hands the device control: walk the guest's
+                // descriptor ring, transmit what it owns us, hand each back by
+                // clearing OWN. Same trigger/transfer split as `service_tx` below.
+                self.gmac.service_tx(&mut self.ram);
+            }
+            return Ok(());
         }
         if Virtio::in_window(addr) {
             self.virtio.write(addr, value);

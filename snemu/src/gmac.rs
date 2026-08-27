@@ -42,38 +42,207 @@ pub(crate) const SNPSVER_5_20: u64 = 0x0000_1052;
 /// from an unmodelled window.
 const PHY_INTF_SEL_WORD: u64 = 0b001 << 2;
 
-/// Whether `addr` is in the GMAC1 or `sys_syscon` window.
-pub(crate) fn in_window(addr: u64) -> bool {
-    (GMAC1_BASE..GMAC1_BASE + GMAC1_SIZE).contains(&addr)
-        || (SYS_SYSCON_BASE..SYS_SYSCON_BASE + SYS_SYSCON_SIZE).contains(&addr)
+/// `DMA_CHAN_TX_BASE_ADDR` (channel 0), low half.
+const TX_BASE_ADDR: u64 = 0x1114;
+/// `DMA_CHAN_TX_BASE_ADDR_HI` (channel 0).
+const TX_BASE_ADDR_HI: u64 = 0x1110;
+/// `DMA_CHAN_TX_RING_LEN` (channel 0).
+const TX_RING_LEN: u64 = 0x112C;
+/// `DMA_CHAN_TX_END_ADDR` — the tail pointer. Writing it is the **transmit
+/// trigger**, matching the real device and the guest driver's write order.
+const TX_END_ADDR: u64 = 0x1120;
+
+/// `TDES3_OWN`.
+const TDES3_OWN: u32 = 1 << 31;
+/// `TDES2_BUFFER1_SIZE_MASK`.
+const TDES2_SIZE_MASK: u32 = (1 << 14) - 1;
+/// One descriptor is four 32-bit words.
+const DESCRIPTOR_BYTES: u64 = 16;
+/// How many descriptors a single kick will walk, whatever the ring length register
+/// says — a runaway guard, since a corrupt `TX_RING_LEN` would otherwise make the
+/// model walk guest RAM forever.
+const MAX_WALK: u32 = 64;
+
+/// The modelled GMAC1: enough register state to accept a TX descriptor ring, and
+/// the frames it has "transmitted".
+#[derive(Clone, Default)]
+pub(crate) struct Gmac {
+    tx_base: u64,
+    tx_ring_len: u32,
+    frames: Vec<Vec<u8>>,
 }
 
-/// Read semantics. Depends only on `addr` — there is no captured state, because the
-/// guest only reads.
-pub(crate) fn read(addr: u64) -> u64 {
-    if addr == GMAC1_BASE + VERSION_OFFSET {
-        return SNPSVER_5_20;
+impl Gmac {
+    pub(crate) fn new() -> Self {
+        Self::default()
     }
-    if addr == SYS_SYSCON_BASE + 0x90 {
-        return PHY_INTF_SEL_WORD;
+
+    /// Whether `addr` is in the GMAC1 or `sys_syscon` window.
+    pub(crate) fn in_window(addr: u64) -> bool {
+        (GMAC1_BASE..GMAC1_BASE + GMAC1_SIZE).contains(&addr)
+            || (SYS_SYSCON_BASE..SYS_SYSCON_BASE + SYS_SYSCON_SIZE).contains(&addr)
     }
-    0
+
+    /// Whether writing `addr` hands the device control — the bus calls
+    /// [`service_tx`] after such a write, the same split `Virtio::is_notify` uses.
+    ///
+    /// [`service_tx`]: Gmac::service_tx
+    pub(crate) fn is_tx_kick(addr: u64) -> bool {
+        addr == GMAC1_BASE + TX_END_ADDR
+    }
+
+    /// Frames handed to the device so far, oldest first.
+    pub(crate) fn frames(&self) -> &[Vec<u8>] {
+        &self.frames
+    }
+
+    /// Read semantics: the version register identifies the core, the DMA registers
+    /// read back what the guest wrote, everything else is zero — what a MAC nobody
+    /// has configured looks like.
+    pub(crate) fn read(&self, addr: u64) -> u64 {
+        match addr {
+            a if a == GMAC1_BASE + VERSION_OFFSET => SNPSVER_5_20,
+            a if a == SYS_SYSCON_BASE + 0x90 => PHY_INTF_SEL_WORD,
+            a if a == GMAC1_BASE + TX_BASE_ADDR => self.tx_base & 0xFFFF_FFFF,
+            a if a == GMAC1_BASE + TX_BASE_ADDR_HI => self.tx_base >> 32,
+            a if a == GMAC1_BASE + TX_RING_LEN => u64::from(self.tx_ring_len),
+            _ => 0,
+        }
+    }
+
+    /// Capture the DMA registers; swallow everything else.
+    pub(crate) fn write(&mut self, addr: u64, value: u32) {
+        let value64 = u64::from(value);
+        match addr {
+            a if a == GMAC1_BASE + TX_BASE_ADDR => {
+                self.tx_base = (self.tx_base & 0xFFFF_FFFF_0000_0000) | value64;
+            }
+            a if a == GMAC1_BASE + TX_BASE_ADDR_HI => {
+                self.tx_base = (self.tx_base & 0xFFFF_FFFF) | (value64 << 32);
+            }
+            a if a == GMAC1_BASE + TX_RING_LEN => self.tx_ring_len = value,
+            _ => {}
+        }
+    }
+
+    /// Walk the descriptor ring from `tx_base`, transmitting every descriptor the
+    /// guest owns us and handing each back by clearing `OWN`. Stops at the first
+    /// descriptor software still owns — completion is in order.
+    pub(crate) fn service_tx(&mut self, ram: &mut crate::mem::Memory) {
+        if self.tx_base == 0 {
+            return;
+        }
+        for slot in 0..self.tx_ring_len.min(MAX_WALK) {
+            let desc = self.tx_base + u64::from(slot) * DESCRIPTOR_BYTES;
+            let tdes3 = ram.read_u32(desc + 12).unwrap_or(0);
+            if tdes3 & TDES3_OWN == 0 {
+                return;
+            }
+            let lo = u64::from(ram.read_u32(desc).unwrap_or(0));
+            let hi = u64::from(ram.read_u32(desc + 4).unwrap_or(0));
+            let len = ram.read_u32(desc + 8).unwrap_or(0) & TDES2_SIZE_MASK;
+            let buf = (hi << 32) | lo;
+            let frame =
+                (0..u64::from(len)).map(|i| ram.read_u8(buf + i).unwrap_or(0)).collect();
+            self.frames.push(frame);
+            let _ = ram.write_u32(desc + 12, tdes3 & !TDES3_OWN);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mem::Memory;
+
+    const RAM_BASE: u64 = 0x8000_0000;
+
+    /// Lay a one-descriptor ring at `ring_pa` pointing at `payload`, owned by the
+    /// device — the shape `kernel_devices::gmac::Descriptor::prepare` produces.
+    fn rig(mem: &mut Memory, ring_pa: u64, buf_pa: u64, payload: &[u8]) {
+        for (i, &b) in payload.iter().enumerate() {
+            mem.write_u8(buf_pa + i as u64, b).unwrap();
+        }
+        let len = u32::try_from(payload.len()).unwrap();
+        mem.write_u32(ring_pa, (buf_pa & 0xFFFF_FFFF) as u32).unwrap();
+        mem.write_u32(ring_pa + 4, (buf_pa >> 32) as u32).unwrap();
+        mem.write_u32(ring_pa + 8, len).unwrap();
+        // OWN | FD | LD | packet length
+        mem.write_u32(ring_pa + 12, 0x8000_0000 | 0x2000_0000 | 0x1000_0000 | len).unwrap();
+    }
+
+    fn armed(ring_pa: u64) -> Gmac {
+        let mut g = Gmac::new();
+        g.write(GMAC1_BASE + TX_BASE_ADDR_HI, (ring_pa >> 32) as u32);
+        g.write(GMAC1_BASE + TX_BASE_ADDR, (ring_pa & 0xFFFF_FFFF) as u32);
+        g.write(GMAC1_BASE + TX_RING_LEN, 4);
+        g
+    }
+
+    #[test]
+    fn a_kick_clears_ownership_on_the_descriptor() {
+        // T3's assertion, at desk speed: the engine read the descriptor and gave it
+        // back. That alone validates the whole address-translation story.
+        let (ring_pa, buf_pa) = (RAM_BASE + 0x1000, RAM_BASE + 0x2000);
+        let mut mem = Memory::new(0x10000);
+        rig(&mut mem, ring_pa, buf_pa, b"hello");
+        let mut g = armed(ring_pa);
+        g.service_tx(&mut mem);
+        assert_eq!(mem.read_u32(ring_pa + 12).unwrap() & 0x8000_0000, 0, "OWN cleared");
+    }
+
+    #[test]
+    fn a_kick_captures_the_frame_the_descriptor_points_at() {
+        // T4's oracle: well-formed bytes reached the device.
+        let (ring_pa, buf_pa) = (RAM_BASE + 0x1000, RAM_BASE + 0x2000);
+        let mut mem = Memory::new(0x10000);
+        rig(&mut mem, ring_pa, buf_pa, b"hello");
+        let mut g = armed(ring_pa);
+        g.service_tx(&mut mem);
+        assert_eq!(g.frames(), &[b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn a_descriptor_the_guest_still_owns_is_left_alone() {
+        // Software owns it until it sets OWN. Transmitting one the guest has not
+        // published would send a half-written frame.
+        let (ring_pa, buf_pa) = (RAM_BASE + 0x1000, RAM_BASE + 0x2000);
+        let mut mem = Memory::new(0x10000);
+        rig(&mut mem, ring_pa, buf_pa, b"hello");
+        mem.write_u32(ring_pa + 12, 0x3000_0005).unwrap(); // FD | LD | len, OWN clear
+        let mut g = armed(ring_pa);
+        g.service_tx(&mut mem);
+        assert!(g.frames().is_empty());
+    }
+
+    #[test]
+    fn a_kick_before_the_ring_base_is_programmed_transmits_nothing() {
+        let mut mem = Memory::new(0x10000);
+        let mut g = Gmac::new();
+        g.service_tx(&mut mem);
+        assert!(g.frames().is_empty(), "no ring base — nothing to walk");
+    }
+
+    #[test]
+    fn the_ring_base_register_reads_back_what_was_written() {
+        // The probe reports this register; a model that always answered zero would
+        // make "U-Boot left no ring" indistinguishable from "we never wrote one".
+        let mut g = armed(RAM_BASE + 0x1000);
+        assert_eq!(g.read(GMAC1_BASE + TX_BASE_ADDR), (RAM_BASE + 0x1000) & 0xFFFF_FFFF);
+        g.write(GMAC1_BASE + TX_RING_LEN, 7);
+        assert_eq!(g.read(GMAC1_BASE + TX_RING_LEN), 7);
+    }
 
     #[test]
     fn the_version_register_identifies_a_dwmac_5_20() {
         // The low byte is what `kernel_devices::gmac::is_expected_core` checks.
-        assert_eq!(read(GMAC1_BASE + VERSION_OFFSET) & 0xFF, 0x52);
+        assert_eq!(Gmac::new().read(GMAC1_BASE + VERSION_OFFSET) & 0xFF, 0x52);
     }
 
     #[test]
     fn the_version_word_carries_a_vendor_byte_above_the_core_id() {
         // So a guest that forgot to mask fails here rather than on the board.
-        assert_ne!(read(GMAC1_BASE + VERSION_OFFSET), 0x52);
+        assert_ne!(Gmac::new().read(GMAC1_BASE + VERSION_OFFSET), 0x52);
     }
 
     #[test]
@@ -81,23 +250,31 @@ mod tests {
         // A MAC U-Boot never touched. Notably this is *not* all-ones: the guest's
         // poison-word check treats 0xFFFF_FFFF as a floating bus, and a model that
         // returned it would make every probe run look like a hardware fault.
-        assert_eq!(read(GMAC1_BASE), 0);
-        assert_eq!(read(GMAC1_BASE + 0x1114), 0);
+        let g = Gmac::new();
+        assert_eq!(g.read(GMAC1_BASE), 0);
+        assert_eq!(g.read(GMAC1_BASE + TX_BASE_ADDR), 0);
     }
 
     #[test]
     fn the_phy_interface_field_is_non_zero() {
-        assert_ne!(read(SYS_SYSCON_BASE + 0x90), 0);
+        assert_ne!(Gmac::new().read(SYS_SYSCON_BASE + 0x90), 0);
     }
 
     #[test]
     fn both_windows_are_claimed_and_neighbours_are_not() {
-        assert!(in_window(GMAC1_BASE));
-        assert!(in_window(GMAC1_BASE + GMAC1_SIZE - 1));
-        assert!(in_window(SYS_SYSCON_BASE));
-        assert!(in_window(SYS_SYSCON_BASE + SYS_SYSCON_SIZE - 1));
-        assert!(!in_window(GMAC1_BASE - 1), "GMAC0's window is not modelled");
-        assert!(!in_window(GMAC1_BASE + GMAC1_SIZE));
-        assert!(!in_window(SYS_SYSCON_BASE + SYS_SYSCON_SIZE));
+        assert!(Gmac::in_window(GMAC1_BASE));
+        assert!(Gmac::in_window(GMAC1_BASE + GMAC1_SIZE - 1));
+        assert!(Gmac::in_window(SYS_SYSCON_BASE));
+        assert!(Gmac::in_window(SYS_SYSCON_BASE + SYS_SYSCON_SIZE - 1));
+        assert!(!Gmac::in_window(GMAC1_BASE - 1), "GMAC0's window is not modelled");
+        assert!(!Gmac::in_window(GMAC1_BASE + GMAC1_SIZE));
+        assert!(!Gmac::in_window(SYS_SYSCON_BASE + SYS_SYSCON_SIZE));
+    }
+
+    #[test]
+    fn only_the_tail_pointer_write_hands_the_device_control() {
+        assert!(Gmac::is_tx_kick(GMAC1_BASE + TX_END_ADDR));
+        assert!(!Gmac::is_tx_kick(GMAC1_BASE + TX_BASE_ADDR));
+        assert!(!Gmac::is_tx_kick(GMAC1_BASE + TX_RING_LEN));
     }
 }

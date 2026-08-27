@@ -321,11 +321,18 @@ the rasterizer's logic. **10/10 host tests, clippy clean.**
 A reuse call, not a layering one: duplicating it would mean two copies of increment
 1's alignment lesson. That crate is itself dependency-free, `no_std` and host-tested.
 
+**Damage is done too** — `Damage` (dirty-bit bitmap), `mark`/`mark_rect`/`is_dirty`/
+`clear`, `spans()` coalescing per-row runs, and `rasterize_spans` so a keystroke
+costs a few cells rather than a screen. **18/18 host tests.**
+
+The correctness argument is an **exhaustive** property test, not a random one: all
+2^10 dirty patterns of a 5x2 grid, asserting three invariants together — every span
+non-empty and within its row, and every cell covered exactly once if dirty and never
+if clean. That says "the spans are exactly the dirty set, drawn once", which is what
+a rasterizer driven by them needs.
+
 **Remaining**:
 
-- **Damage** — the dirty-bit bitmap and row-run span coalescing, with the property
-  tests (every dirty cell in exactly one span, no span contains a clean cell, no
-  span crosses a row).
 - **The real font.** The repo has no bitmap font, and glyph bitmaps are *data* —
   authoring 4 KB of CP437 by hand would produce plausible-looking wrong glyphs,
   which is worse than none. The rasterizer's logic is therefore pinned against a
