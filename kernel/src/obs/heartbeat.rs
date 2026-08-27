@@ -92,6 +92,10 @@ define_metrics! {
     counter   heartbeat_count           = "snitchos.heartbeat.count";
     gauge     intern_used               = "snitchos.intern.strings_used";
     counter   intern_released           = "snitchos.intern.strings_released_total";
+    // Telemetry frames the UART TX ring had no room for. Only ever non-zero on
+    // hardware, where the UART is the sole transport; the wire reporting its own
+    // losses is the point of a snitching kernel.
+    counter   uart_frames_dropped       = "snitchos.telemetry.uart_frames_dropped_total";
     gauge     time_ticks                = "snitchos.time.ticks";
     histogram irq_duration              = "snitchos.irq.timer.duration_ticks";
     // frame allocator (the allocated/freed/alloc_failed counters are now
@@ -280,6 +284,7 @@ fn emit_core(m: &Metrics, count: i64) {
     emit!(m, heartbeat_count = count);
     emit!(m, intern_used     = tracing::intern_count());
     emit!(m, intern_released = tracing::strings_released_total() as i64);
+    emit!(m, uart_frames_dropped = i64::from(tracing::uart_dropped()));
     emit!(m, time_ticks      = tracing::timestamp());
     // Histogram observation: how long the last IRQ took. The handler
     // measured rdtime delta; main thread emits.

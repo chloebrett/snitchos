@@ -298,7 +298,43 @@ before and after; the acceptance check was the disassembly.
 **Gate**: 7/7 `kernel-devices` framebuffer tests, 133/133 itests plain **and**
 `--scramble`.
 
-### 2 — `kitsch-render`: font, compose, rasterize
+### 2 — `kitsch-render`: font, compose, rasterize 🚧 **IN PROGRESS**
+
+**Done**: the crate exists (`no_std` + `alloc`, one dependency), composition, and
+the rasterizer's logic. **10/10 host tests, clippy clean.**
+
+- `Cell` / `Grid` / `Rect` / `Surface` / `Window`, with `Grid::to_text` as the
+  snapshot form. A surface holds content in **surface-local** coordinates and does
+  not know where it sits — moving a window touches none of it.
+- `compose(width, height, &[Window])` — z-ordered, bottom first. Content is clipped
+  to **both** the window's rect and the screen, so **a client cannot paint outside
+  the geometry kitsch gave it however large its surface is**. That is the authority
+  property from design §4, enforced in the compositor and pinned by a test.
+- `rasterize(&Grid, &Font, &mut [u32], stride)` — background per cell, then one
+  `fill_rect` per *horizontal run* of set bits rather than per pixel, so the work
+  goes through increment 1's one-`sw`-per-pixel path instead of giving that win
+  straight back.
+- `Font` is `first` + contiguous row-bytes, MSB-leftmost. A **missing glyph paints
+  background and continues** — no panic, and no reading a neighbouring glyph's bytes.
+
+**One dependency, `kernel-devices`**, for the XRGB8888 pixel view and `fill_rect`.
+A reuse call, not a layering one: duplicating it would mean two copies of increment
+1's alignment lesson. That crate is itself dependency-free, `no_std` and host-tested.
+
+**Remaining**:
+
+- **Damage** — the dirty-bit bitmap and row-run span coalescing, with the property
+  tests (every dirty cell in exactly one span, no span contains a clean cell, no
+  span crosses a row).
+- **The real font.** The repo has no bitmap font, and glyph bitmaps are *data* —
+  authoring 4 KB of CP437 by hand would produce plausible-looking wrong glyphs,
+  which is worse than none. The rasterizer's logic is therefore pinned against a
+  2x2 synthetic font; sourcing the real table is its own step.
+- **The PPM golden** — a known scene rasterizing byte-identically, which needs the
+  real font first.
+
+Original scope follows.
+
 
 Pure logic, no syscalls. 8×16 bitmap font embedded. Compose a scene into a cell grid;
 rasterize damaged spans into pixels. The grid is the thing tests assert on, as text,

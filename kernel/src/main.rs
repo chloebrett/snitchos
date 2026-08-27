@@ -298,7 +298,15 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
                         tracing::open_stream(timebase_hz as u32);
                         println!("virtio-console: ready");
                     }
-                    Err(e) => println!("virtio-console: init failed: {:?}", e),
+                    // No virtio transport — real hardware. Telemetry goes out the
+                    // UART's TX ring, sharing the wire with the human log; the
+                    // host separates them (`collector --serial`, `board exec`).
+                    // Without this the kernel encodes frames into nothing.
+                    Err(e) => {
+                        println!("virtio-console: init failed: {:?} — telemetry over UART", e);
+                        tracing::init_uart_sink();
+                        tracing::open_stream(timebase_hz as u32);
+                    }
                 }
             }
         }

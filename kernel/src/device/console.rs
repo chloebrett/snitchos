@@ -191,6 +191,27 @@ pub fn tx_push(byte: u8) {
   });
 }
 
+/// Queue a whole encoded telemetry frame for transmit, or none of it. Returns
+/// `false` if the ring hadn't room, in which case nothing was queued and the
+/// caller counts one dropped frame.
+///
+/// The all-or-nothing contract is [`ConsoleRing::push_all`]'s, and it is why the
+/// telemetry path cannot reuse [`tx_push`] in a loop: the wire is a COBS stream,
+/// so a partially-queued frame corrupts its successor rather than merely losing
+/// itself. Same masking discipline as [`tx_push`].
+pub fn tx_push_all(bytes: &[u8]) -> bool {
+  crate::trap::without_interrupts(|| {
+    let accepted = TX_RING.lock().push_all(bytes);
+    if accepted {
+      // A fresh RX-layout handle (not the println `UART` mutex — see `drain_rx`);
+      // only IER is touched here.
+      let uart = unsafe { emergency_uart_at(emergency_uart_base()) };
+      uart.set_tx_interrupt(true);
+    }
+    accepted
+  })
+}
+
 /// Drain the TX ring into the UART FIFO — the THRE-interrupt handler's body. Push
 /// bytes while the transmit register has room; when the ring empties, disable the
 /// THRE interrupt (else it would fire continuously on the empty FIFO). Runs with

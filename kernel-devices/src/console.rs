@@ -70,6 +70,32 @@ impl<const N: usize> ConsoleRing<N> {
         true
     }
 
+    /// Append every byte, or none of them. Returns `false` (storing nothing) if
+    /// they don't all fit.
+    ///
+    /// **Why all-or-nothing, when [`push`](Self::push) drops freely.** Telemetry
+    /// on this ring is a COBS stream delimited by `0x00`. A half-written frame is
+    /// not a lost frame but a *corrupt* one: the host decoder cannot tell the
+    /// truncation from data, so it discards everything up to the next delimiter
+    /// and takes a healthy frame down with it. Refusing whole frames keeps the
+    /// stream self-describing under back-pressure, which is what makes a dropped
+    /// frame merely absent rather than damaging.
+    ///
+    /// The free-space test is written as a comparison rather than a subtraction
+    /// on purpose — `N - self.len` is safe here (`len <= N` always), but the
+    /// mirror-image `bytes.len() - free` form underflows for a run larger than
+    /// the ring and silently reports space that does not exist.
+    pub fn push_all(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() > N - self.len {
+            return false;
+        }
+        for &byte in bytes {
+            let stored = self.push(byte);
+            debug_assert!(stored, "push_all checked space for every byte up front");
+        }
+        true
+    }
+
     /// Remove and return the oldest byte, or `None` if the ring is empty.
     pub fn pop(&mut self) -> Option<u8> {
         if self.is_empty() {
@@ -157,5 +183,81 @@ mod tests {
     fn pop_from_empty_is_none() {
         let mut r = ConsoleRing::<4>::new();
         assert_eq!(r.pop(), None);
+    }
+
+    /// A whole encoded frame goes in, or none of it does. Telemetry is a COBS
+    /// stream delimited by `0x00`: half a frame in the ring is not a lost frame,
+    /// it is a *corrupt* one, and the host decoder resynchronises by discarding
+    /// whatever follows until the next delimiter. So partial writes cost more
+    /// than the frame they truncate.
+    #[test]
+    fn push_all_stores_every_byte_when_they_fit() {
+        let mut r = ConsoleRing::<4>::new();
+        assert!(r.push_all(&[b'a', b'b', b'c']));
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.pop(), Some(b'a'));
+        assert_eq!(r.pop(), Some(b'b'));
+        assert_eq!(r.pop(), Some(b'c'));
+    }
+
+    #[test]
+    fn push_all_stores_nothing_when_they_do_not_all_fit() {
+        let mut r = ConsoleRing::<4>::new();
+        assert!(r.push(b'x'));
+        assert!(r.push(b'y'));
+        // Two free slots, three bytes offered: refuse, and leave the ring alone.
+        assert!(!r.push_all(&[b'a', b'b', b'c']));
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.pop(), Some(b'x'));
+        assert_eq!(r.pop(), Some(b'y'));
+        assert_eq!(r.pop(), None);
+    }
+
+    /// The boundary case, called out because an off-by-one here is invisible in
+    /// the common path: a frame that exactly fills the remaining space must be
+    /// accepted, not refused.
+    #[test]
+    fn push_all_accepts_a_run_that_exactly_fills_the_ring() {
+        let mut r = ConsoleRing::<4>::new();
+        assert!(r.push_all(&[b'1', b'2', b'3', b'4']));
+        assert!(r.is_full());
+        assert_eq!(r.len(), 4);
+    }
+
+    /// Refusing must not consume, even when the run is longer than the whole
+    /// ring — the "too large to ever fit" case, which a naive free-space check
+    /// written as a subtraction gets wrong by underflowing.
+    #[test]
+    fn push_all_refuses_a_run_larger_than_capacity() {
+        let mut r = ConsoleRing::<2>::new();
+        assert!(!r.push_all(&[b'a', b'b', b'c']));
+        assert!(r.is_empty());
+    }
+
+    /// Empty input is trivially satisfiable and must not report failure — a
+    /// caller counting drops would otherwise count one for a frame that never
+    /// existed.
+    #[test]
+    fn push_all_of_nothing_succeeds() {
+        let mut r = ConsoleRing::<2>::new();
+        assert!(r.push_all(&[]));
+        assert!(r.is_empty());
+    }
+
+    /// All-or-nothing must hold across the wrap boundary too: free space is not
+    /// contiguous there, so a check that reasons about `tail`'s distance to the
+    /// end of the buffer rather than about occupancy will refuse a run that fits.
+    #[test]
+    fn push_all_fits_across_the_wrap_boundary() {
+        let mut r = ConsoleRing::<4>::new();
+        assert!(r.push_all(&[b'1', b'2', b'3']));
+        assert_eq!(r.pop(), Some(b'1'));
+        assert_eq!(r.pop(), Some(b'2'));
+        // Two free slots, but they straddle the end of the backing array.
+        assert!(r.push_all(&[b'4', b'5']));
+        assert_eq!(r.pop(), Some(b'3'));
+        assert_eq!(r.pop(), Some(b'4'));
+        assert_eq!(r.pop(), Some(b'5'));
+        assert!(r.is_empty());
     }
 }

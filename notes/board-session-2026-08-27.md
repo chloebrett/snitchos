@@ -235,6 +235,108 @@ Note also that the harness **sandbox** denial surfaces as `OpenFailed{Other}`,
 which is a *different* failure wearing similar clothes — a host-side permission
 problem that is neither of the above. Arguably its own variant.
 
+## ✅ Zero-touch netboot works — SnitchOS runs on the board
+
+`run bootcmd` → DHCP → TFTP (1778208 bytes, exact) → `booti` → banner, every `ph:`
+marker, **4 U74 harts up**, 85+ heartbeats. `saveenv` persisted `serverip=192.168.0.7`
+and the deleted `ipaddr`, so this is now hands-off. Item 1 closed for real.
+
+Two U-Boot facts that cost time and are worth keeping:
+
+- **`dhcp` overwrites `serverip`** with the DHCP server (the router). That is why the
+  saved `bootcmd` orders it `dhcp` *then* `setenv serverip` — the sequence is load-bearing.
+- **`dhcp` does NOT set `ipaddr`** in this U-Boot (2025.10, lwIP-based); it binds the
+  lease internally. A stale `ipaddr` therefore never refreshes and must be *deleted*.
+  But it is **cosmetic** — `our IP address is <NULL>` still transferred fine, because
+  lwIP sources from its bound address. It looked like the fault and was not.
+- **`md.l <addr> 16` dumps 22 words** — U-Boot parses counts as hex.
+
+## 🔴 THE BLOCKER: the kernel has no UART telemetry sink
+
+**Item 2 cannot pass with this tree, and item 4a is blocked by the same fault.**
+
+- `kernel/src/obs/tracing.rs` module doc: *"All frames go out the virtio-console."*
+- `KernelSink` routes to exactly two sinks: the UDP batcher (`net=`, needs virtio-net)
+  and virtio-console.
+- **`UartFrameSink` appears nowhere in `kernel/src`** — it lives only in
+  `kernel-obs/src/uart_sink.rs`.
+
+The VF2 has neither virtio-console (`init failed: NotFound`) nor virtio-net, so
+telemetry frames have **no sink at all**. B3 step 9 landed the sink *implementation*
+and its host tests (8/8 mutants killed — genuinely done); nothing ever installed it.
+The plan's status is true of the crate and misleading about the system, which is
+exactly the risk its own header names: *"No byte of this has crossed a real UART."*
+
+**`console=frames` would make it worse, not better** — it routes `println!` into the
+same dead sink, costing the human log as well.
+
+### The probe cannot speak on the hardware it was written for
+
+`device::gmac::probe` reports via `crate::tracing::emit_log`, so it ran and emitted
+into the dead sink. `kernel/src/device/console.rs` states the rule three lines from
+the bug:
+
+> early output must never depend on the frame sink (the stale-image / `ph!`-markers
+> lessons)
+
+Same lesson, unlearned in a new place. **Fix: the probe should `println!`** — it is
+reconnaissance output for a human, on a board whose only working channel is raw UART.
+That is a small change and it unblocks item 4a independently of the sink work.
+
+## ✅ TELEMETRY CROSSES A REAL UART
+
+```
+ContextSwitch { from: 3, to: 6, t: 58553396, reason: Yield, hart_id: 1 }
+ContextSwitch { from: 0, to: 1, t: 58557212, reason: Yield, hart_id: 0 }
+```
+
+Decoded off the serial line, both harts represented, timestamps monotonic. The
+sink work above was necessary but **not sufficient** — it fed a ring that never
+drained. The actual blocker was the PLIC.
+
+### The PLIC context is not a constant — the boot hart moves
+
+`plic.rs` hardcoded QEMU `virt`'s numbers, with a standing `// board: derive from
+DTB` note. Two things were wrong:
+
+- **UART source**: QEMU `virt` is 10; the JH7110 is **32**.
+- **S-mode context**: contexts follow `interrupts-extended` order. QEMU `virt` is
+  symmetric (every hart contributes M then S) so hart `m` owns `2m+1`. The JH7110
+  is one S7 + four U74s and the **S7 contributes only an M context**, so the
+  missing `cpu0 S` shifts everything down one: U74 `m` owns S-context `2m`.
+
+**And the boot hart is not fixed.** Two consecutive power cycles reported
+secondaries `mhartid 1, 2, 4` then `1, 3, 4` — so the kernel booted on mhartid 3,
+then on 2. OpenSBI hands off to whichever hart wins the race. A hardcoded context
+is right only by luck; my first fix hardcoded `2` and failed for exactly this
+reason. It is now computed from `LOGICAL_TO_MHARTID[0]`, which `kmain` fills from
+the DTB before `plic::init`.
+
+**This failure mode is silent by construction.** The source gets enabled in some
+other context's bitmap: every MMIO write succeeds, nothing faults, and the
+interrupt simply never arrives. It presents as a working UART with a TX ring that
+fills and never drains — indistinguishable from "the sink isn't wired".
+
+**The oracle was already in the tree.** `main.rs` pushes `tx-irq-ok` through the
+ring right after enabling external interrupts, precisely to prove PLIC + SEIE +
+THRE + drain end to end. Its *absence* from the board's boot log was the whole
+diagnosis, and the `tx-irq-delivers` itest passes under snemu — a genuine
+emulator/hardware divergence that only a board could find.
+
+### Remaining: `console=frames`
+
+Text and frames now interleave and corrupt each other on the one wire:
+
+```
+ph��:� postr-eilpeaise
+snitchos.time.tickpsh	: p�o��s�t-f%r	a!msnei-taclholso.cirq
+```
+
+That is Decision 4 of the design doc arriving on schedule — *"one UART, and the
+human log becomes frames."* Setting `console=frames` in the saved bootargs is the
+last step before `cargo xtask reader --serial` gives a clean stream. Blocked only
+on getting back to the U-Boot prompt (autoboot interrupt, still untested).
+
 ## The input-echo design (supersedes `--input-file` alone)
 
 `--input-file` on its own is a **regression in observability**: an agent writes a

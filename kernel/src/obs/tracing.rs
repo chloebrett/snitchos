@@ -40,6 +40,41 @@ impl NetDevice for VirtioNet {
 static UDP_TX: crate::sync::Once<crate::sync::Mutex<UdpBatcher<VirtioNet>>> =
     crate::sync::Once::new();
 
+/// Whether telemetry goes out the UART, installed by [`init_uart_sink`].
+///
+/// A plain flag rather than a `Once<Mutex<…>>` because the transport it selects
+/// is not an object: the bytes go to [`crate::console::tx_push_all`], which owns
+/// the ring and its locking. There is nothing here to hold.
+///
+/// **This is the only telemetry transport on real hardware.** A VisionFive 2 has
+/// neither virtio-console nor virtio-net, so without this the kernel encodes
+/// frames and has nowhere to put them — which is exactly what the board did
+/// before this landed: a silent `gmac-probe` and an empty `--serial` reader.
+static UART_TX: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Frames refused by a full TX ring. Counted rather than logged: the log would
+/// itself be a frame, and a full ring is precisely when another frame cannot go
+/// out. Drained as `Frame::Dropped` — see the note in [`transmit_bytes`].
+static UART_DROPPED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Route telemetry out the UART's interrupt-driven TX ring. The fallback when no
+/// virtio transport exists; the caller follows with [`open_stream`] exactly as
+/// the other transports do, so the wire still opens with `Hello`.
+pub fn init_uart_sink() {
+    UART_TX.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Whether the UART telemetry sink is live.
+fn uart_sink_active() -> bool {
+    UART_TX.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Frames dropped for want of TX-ring space, for the heartbeat to report.
+#[must_use]
+pub fn uart_dropped() -> u32 {
+    UART_DROPPED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Bring up the virtio-net device and install the UDP telemetry sink from a
 /// parsed `net=` bootarg. Returns whether the sink is now live (`false` if no
 /// virtio-net device was found — the caller falls back to the console).
@@ -85,6 +120,14 @@ fn transmit_bytes(bytes: &[u8]) {
         let mut batcher = udp.lock();
         batcher.push_bytes(bytes);
         batcher.flush();
+    } else if uart_sink_active() {
+        // Whole-frame atomic: a refused frame is absent, never truncated, so the
+        // COBS stream stays decodable. The count is reported by the heartbeat
+        // rather than here — emitting a frame to complain that a frame would not
+        // fit is the one thing this path must not do.
+        if !crate::console::tx_push_all(bytes) {
+            UART_DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
     } else {
         virtio_console::send(bytes);
     }
@@ -183,7 +226,7 @@ impl FrameSink for KernelSink {
         // so relying on batch-overflow would never flush. A heartbeat-driven
         // flush that packs many frames per datagram is the efficiency follow-up
         // (design open-question #2).
-        if UDP_TX.get().is_some() || virtio_console::CONSOLE.get().is_some() {
+        if UDP_TX.get().is_some() || uart_sink_active() || virtio_console::CONSOLE.get().is_some() {
             transmit_bytes(bytes);
         } else {
             PRE_INIT_BUFFER.lock().append(bytes);
