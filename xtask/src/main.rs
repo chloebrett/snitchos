@@ -9,7 +9,7 @@ use xtask_qemu as qemu;
 // Standalone commands moved to the `xtask-cmds` crate; re-imported at root so
 // existing `crate::links::…` / `crate::source::…` references (and the dispatch
 // calls below) keep resolving unchanged.
-use xtask_cmds::{audit, counters, links, loc, measure, snip, web};
+use xtask_cmds::{audit, counters, links, loc, measure, plan_status, snip, web};
 
 mod plan;
 
@@ -219,6 +219,14 @@ enum Cmd {
     /// a counter. A counter missing from `counter::COUNTERS` is incremented
     /// forever and never emitted, which looks exactly like a quiet system.
     Counters,
+    /// Check that every plan carries a dated status header and is indexed.
+    ///
+    /// Also runs inside `cargo xtask test`; standalone here for the same reason
+    /// as `links` and `counters`. Prints every plan sorted by its status date,
+    /// stalest first — so "what have I not looked at in a while?" is one
+    /// command. Does not fail on age, only on a missing date or a plan the
+    /// index doesn't link.
+    PlanStatus,
     /// Run kernel integration tests in QEMU.
     ///
     /// Runs integration only — it does **not** run the host-side checks
@@ -796,6 +804,7 @@ fn main() -> ExitCode {
         Cmd::Web { e2e } => web::web(e2e),
         Cmd::Links => links::check(),
         Cmd::Counters => counters::check(),
+        Cmd::PlanStatus => plan_status::check(),
         Cmd::ItestShow { args } => delegate_itest("itest-show", &args),
         Cmd::Itest { args } => delegate_itest("itest", &args),
         Cmd::Cram { args } => delegate_to("xtask-cram", None, &args, Profile::Release),

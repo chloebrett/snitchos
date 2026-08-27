@@ -417,6 +417,17 @@ pub fn run_unit_tests(forwarded: &[String]) -> ExitCode {
     if crate::counters::check() != ExitCode::SUCCESS {
         return ExitCode::from(1);
     }
+    // Fourth member of the family: `plans/README.md` is the five-second answer
+    // to "what is actually live?", and nothing compiles it. Every sweep this
+    // repo has done found it stale — always correct when written, always wrong
+    // within weeks, and wrong precisely where work was happening. The plan
+    // headers themselves were accurate every time; only the index drifted. This
+    // checks the two things a machine can check without guessing at meaning: a
+    // dated header on every plan, and every plan reachable from the index.
+    eprintln!("=== plan status ===");
+    if crate::plan_status::check() != ExitCode::SUCCESS {
+        return ExitCode::from(1);
+    }
     // The sibling of the markdown check above, for the links the *compiler*
     // owns. Rustdoc resolves intra-doc links but only **warns** on a broken one,
     // and nothing ran rustdoc — so they rot invisibly. The kernel-core split

@@ -14,6 +14,7 @@ pub mod counters;
 pub mod links;
 pub mod loc;
 pub mod measure;
+pub mod plan_status;
 pub mod snip;
 pub mod source;
 pub mod web;

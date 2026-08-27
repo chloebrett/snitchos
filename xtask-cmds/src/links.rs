@@ -104,7 +104,7 @@ fn collect_md_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io:
     Ok(())
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask has a workspace-root parent")
