@@ -204,7 +204,33 @@ gmac-probe: dtb /soc/ethernet@16040000 status=okay phy-mode=rgmii-id phy-handle=
 rests on this being false; if the board disagrees with mainline, the plan needs
 re-scoping around a cache-maintenance layer the kernel has no primitives for.
 
-### 4b. Still manual — one question
+### 4b. Ground-truth the descriptor layout from U-Boot's own ring
+
+**Done at the U-Boot prompt** — either before you boot the probe, or on any later
+return to it; you are there anyway for item 1. U-Boot has a *working*
+GMAC driver for this exact board, so after any network operation its descriptor ring
+is real, correctly-encoded silicon-accepted data — which is the only independent
+check available on a descriptor layout otherwise transcribed from mainline headers
+by hand.
+
+```
+dhcp                          # or any tftp op, so the ring is live
+md.l 0x16040110 1             # version — expect low byte 0x52
+md.l 0x16041114 1             # DMA_CHAN_TX_BASE_ADDR: the ring's physical base
+md.l <that value> 16          # the first four descriptors, 4 words each
+```
+
+Read the descriptors against `kernel_devices::gmac`'s TDES encoding: word 0/1 are the
+buffer address low/high, word 2 has the buffer size in bits `[13:0]`, word 3 has
+`OWN`(31) `FD`(29) `LD`(28) and the frame length in `[14:0]`. **A mismatch here
+invalidates desk work rather than costing a debugging session** — which is the whole
+point of taking the reading before writing more of the driver.
+
+`md.l 0x16040110 1` also answers the version question without booting our kernel at
+all, so it is a free cross-check on the probe: if U-Boot's `md` says `0x52` and the
+probe says otherwise, the fault is ours, not the board's.
+
+### 4c. Still manual — one question
 
 **Which physical RJ45 is GMAC1?** Plug one jack and see which PHY links, or read
 U-Boot's `ethact`. The DTB report says which *nodes* are enabled, not which *socket*

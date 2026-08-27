@@ -177,6 +177,94 @@ pub fn gmac1_resets_released(status_word: u32) -> bool {
     status_word & bits == bits
 }
 
+/// `TDES2_BUFFER1_SIZE_MASK` — the buffer length field, `GENMASK(13, 0)`. Its width
+/// is the hard cap on a single-descriptor frame.
+pub const TDES2_BUFFER1_SIZE_MASK: u32 = (1 << 14) - 1;
+/// `TDES2_INTERRUPT_ON_COMPLETION`. Left clear: completion is polled off the
+/// heartbeat, so the TX path routes no PLIC interrupt at all.
+pub const TDES2_IOC: u32 = 1 << 31;
+/// `TDES3_PACKET_SIZE_MASK` — total frame length, `GENMASK(14, 0)`.
+pub const TDES3_PACKET_SIZE_MASK: u32 = (1 << 15) - 1;
+/// `TDES3_LAST_DESCRIPTOR`.
+pub const TDES3_LD: u32 = 1 << 28;
+/// `TDES3_FIRST_DESCRIPTOR`. One frame is one descriptor here, so `FD` and `LD` are
+/// always set together — no scatter-gather, no TSO.
+pub const TDES3_FD: u32 = 1 << 29;
+/// `TDES3_CONTEXT_TYPE`. Always clear: a context descriptor carries timestamps and
+/// TSO parameters, neither of which this driver uses.
+pub const TDES3_CTXT: u32 = 1 << 30;
+/// `TDES3_OWN` — set means the device owns the descriptor. **Written last, always.**
+pub const TDES3_OWN: u32 = 1 << 31;
+
+/// One `dwmac4` transmit descriptor: four little-endian words the device reads by
+/// DMA. `#[repr(C)]` because the layout is the hardware's, not Rust's.
+///
+/// **The ownership handoff is a separate operation by construction.** [`prepare`]
+/// builds the body and leaves [`TDES3_OWN`] clear; [`give_to_device`] sets it. There
+/// is no way to write both in one step, because a device that observes `OWN` over a
+/// half-written descriptor transmits garbage — silently, intermittently, and from a
+/// site three layers from the symptom. Making that impossible in the type is
+/// cheaper than a comment asking the next reader to be careful.
+///
+/// The kernel glue still owes a `fence` between the body write and the `OWN` write,
+/// and another before the tail-pointer kick: ordering the *operations* is all a pure
+/// type can do, and RISC-V gives no ordering between plain stores.
+///
+/// [`prepare`]: Descriptor::prepare
+/// [`give_to_device`]: Descriptor::give_to_device
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct Descriptor {
+    /// Buffer 1 physical address, low 32 bits.
+    pub tdes0: u32,
+    /// Buffer 1 physical address, high 32 bits. Board RAM starts at `0x4000_0000`
+    /// and runs 4 GiB, so a physical address genuinely can exceed 32 bits.
+    pub tdes1: u32,
+    /// Buffer length in `[13:0]`; `IOC` at bit 31.
+    pub tdes2: u32,
+    /// Control and frame length — and `OWN` at bit 31.
+    pub tdes3: u32,
+}
+
+impl Descriptor {
+    /// Build a single-descriptor frame of `len` bytes at physical address
+    /// `buffer_pa`, **not yet owned by the device**.
+    ///
+    /// `None` when `len` is zero or wider than [`TDES2_BUFFER1_SIZE_MASK`] — refused
+    /// rather than truncated, because a silently shortened frame leaves the board
+    /// malformed and is diagnosed nowhere near here.
+    #[must_use]
+    pub fn prepare(buffer_pa: u64, len: u32) -> Option<Self> {
+        if len == 0 || len > TDES2_BUFFER1_SIZE_MASK {
+            return None;
+        }
+        Some(Self {
+            tdes0: (buffer_pa & 0xFFFF_FFFF) as u32,
+            tdes1: (buffer_pa >> 32) as u32,
+            tdes2: len & TDES2_BUFFER1_SIZE_MASK,
+            // `FD` (29), `LD` (28) and the masked length (`[14:0]`) are disjoint, so
+            // `|` and `^` agree and mutation testing reports the `| → ^` mutants as
+            // survivors. Genuine equivalent mutants, as in `syscrg::pwmdac_bringup`.
+            tdes3: TDES3_FD | TDES3_LD | (len & TDES3_PACKET_SIZE_MASK),
+        })
+    }
+
+    /// Hand the descriptor to the device by setting [`TDES3_OWN`]. The caller must
+    /// have written the body to memory first, with a `fence` between.
+    #[must_use]
+    pub fn give_to_device(self) -> Self {
+        Self { tdes3: self.tdes3 | TDES3_OWN, ..self }
+    }
+
+    /// Whether the device still owns this descriptor. Clearing `OWN` is how the MAC
+    /// reports completion — the reclaim signal, and (at T3) the first proof the DMA
+    /// engine read anything at all.
+    #[must_use]
+    pub fn is_owned_by_device(&self) -> bool {
+        self.tdes3 & TDES3_OWN != 0
+    }
+}
+
 /// The Synopsys core version, `DWMAC_SNPSVER` — the low byte of the MAC's version
 /// register. The high byte is the vendor-defined `DWMAC_USERVER` and is ignored.
 #[must_use]
@@ -302,6 +390,82 @@ mod tests {
         assert!(!gmac1_resets_released(0b1000));
         assert!(!gmac1_resets_released(0b0100));
         assert!(!gmac1_resets_released(0));
+    }
+
+    #[test]
+    fn a_prepared_descriptor_splits_the_buffer_address() {
+        let d = Descriptor::prepare(0x1_4000_5678, 64).expect("64 fits");
+        assert_eq!(d.tdes0, 0x4000_5678, "low half");
+        assert_eq!(d.tdes1, 0x1, "high half — board RAM reaches past 4 GiB");
+    }
+
+    #[test]
+    fn a_prepared_descriptor_carries_the_length_in_both_places() {
+        let d = Descriptor::prepare(0x4020_0000, 1514).expect("1514 fits");
+        assert_eq!(d.tdes2 & 0x3FFF, 1514, "buffer size, TDES2[13:0]");
+        assert_eq!(d.tdes3 & 0x7FFF, 1514, "frame length, TDES3[14:0]");
+    }
+
+    #[test]
+    fn a_prepared_descriptor_is_one_whole_frame() {
+        let d = Descriptor::prepare(0x4020_0000, 60).expect("60 fits");
+        assert!(d.tdes3 & TDES3_FD != 0, "first segment");
+        assert!(d.tdes3 & TDES3_LD != 0, "last segment");
+        assert_eq!(d.tdes3 & TDES3_CTXT, 0, "a normal descriptor, not a context one");
+        assert_eq!(d.tdes2 & TDES2_IOC, 0, "we poll for completion; no interrupt");
+    }
+
+    #[test]
+    fn preparing_a_descriptor_never_sets_the_ownership_bit() {
+        // The whole point of the two-phase type. If `prepare` could hand the device
+        // a descriptor, a caller could publish one before its body was written —
+        // a real, silent, hard-to-reproduce hardware race.
+        let d = Descriptor::prepare(0x4020_0000, 64).expect("64 fits");
+        assert_eq!(d.tdes3 & TDES3_OWN, 0);
+        assert_eq!(d.give_to_device().tdes3 & TDES3_OWN, TDES3_OWN);
+    }
+
+    #[test]
+    fn the_descriptor_bit_constants_sit_where_the_spec_puts_them() {
+        // Named masks keep the encoding readable, but `x & MASK == 0` passes
+        // vacuously if MASK is ever zero — and so does `x & MASK == MASK`. Pinning
+        // the literals independently of the shifts that build them is what makes
+        // every other assertion in this module mean something.
+        assert_eq!(TDES2_BUFFER1_SIZE_MASK, 0x0000_3FFF);
+        assert_eq!(TDES2_IOC, 0x8000_0000);
+        assert_eq!(TDES3_PACKET_SIZE_MASK, 0x0000_7FFF);
+        assert_eq!(TDES3_LD, 0x1000_0000);
+        assert_eq!(TDES3_FD, 0x2000_0000);
+        assert_eq!(TDES3_CTXT, 0x4000_0000);
+        assert_eq!(TDES3_OWN, 0x8000_0000);
+    }
+
+    #[test]
+    fn handing_over_a_descriptor_twice_leaves_it_owned() {
+        // Not pedantry: `|` is idempotent and `^` is not, and a reclaim path that
+        // re-published a descriptor would otherwise silently un-hand it.
+        let handed = Descriptor::prepare(0x4020_0000, 64).expect("64 fits").give_to_device();
+        assert!(handed.give_to_device().is_owned_by_device());
+    }
+
+    #[test]
+    fn a_frame_too_long_for_the_size_field_is_refused() {
+        // Refused, not truncated: a silently shortened frame goes out malformed and
+        // looks like a driver bug three layers away.
+        assert!(Descriptor::prepare(0x4020_0000, 0x3FFF).is_some(), "the largest that fits");
+        assert!(Descriptor::prepare(0x4020_0000, 0x4000).is_none());
+    }
+
+    #[test]
+    fn a_zero_length_frame_is_refused() {
+        assert!(Descriptor::prepare(0x4020_0000, 0).is_none());
+    }
+
+    #[test]
+    fn the_device_returns_a_descriptor_by_clearing_ownership() {
+        let ours = Descriptor::prepare(0x4020_0000, 64).expect("64 fits");
+        assert!(!ours.is_owned_by_device(), "not handed over yet");
+        assert!(ours.give_to_device().is_owned_by_device());
     }
 
     #[test]
