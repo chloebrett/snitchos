@@ -17,6 +17,7 @@ mod fetch_cache;
 pub mod fp;
 mod framebuffer;
 mod fwcfg;
+mod gmac;
 mod jit;
 pub mod loader;
 pub mod machine;

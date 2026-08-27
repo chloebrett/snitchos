@@ -265,6 +265,137 @@ impl Descriptor {
     }
 }
 
+/// Why a submission was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxError {
+    /// Every usable slot is outstanding. The caller drops the frame; telemetry is
+    /// fire-and-forget and blocking the emitter would be worse than losing a frame.
+    Full,
+    /// Zero-length, or longer than [`TDES2_BUFFER1_SIZE_MASK`].
+    BadLength,
+}
+
+/// A circular transmit descriptor ring of `N` slots — pure bookkeeping over the
+/// descriptor array the device DMAs from. No MMIO, no alloc.
+///
+/// **Usable capacity is `N - 1`, not `N`.** The device walks from its own position
+/// to wherever the tail pointer says, so a head that wrapped all the way onto the
+/// reclaim point would read as "nothing to do" and lose the entire ring rather than
+/// overflow it. One slot always stays free.
+///
+/// **Reclaim is split across the crate boundary on purpose.** This ring lives in the
+/// static the device writes into, so an ownership check has to be a *volatile* read
+/// — a notion `kernel-devices` deliberately does not have. So the glue drives
+/// [`peek_reclaimable`] / [`release_one`] around its own volatile read, and the
+/// ordering rule (stop at the first slot still owned) stays here, tested.
+///
+/// [`peek_reclaimable`]: TxRing::peek_reclaimable
+/// [`release_one`]: TxRing::release_one
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct TxRing<const N: usize> {
+    /// The descriptor array itself — what the device reads. `repr(C)` and first, so
+    /// the glue can hand the device this field's physical address.
+    descriptors: [Descriptor; N],
+    head: usize,
+    reclaim: usize,
+    outstanding: usize,
+}
+
+impl<const N: usize> Default for TxRing<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> TxRing<N> {
+    /// An empty ring. `const` so it can live in a `static` without an initialiser
+    /// running at boot.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            descriptors: [Descriptor { tdes0: 0, tdes1: 0, tdes2: 0, tdes3: 0 }; N],
+            head: 0,
+            reclaim: 0,
+            outstanding: 0,
+        }
+    }
+
+    /// Usable slots — one fewer than `N`; see the type's note.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        N - 1
+    }
+
+    /// How many slots the device has not yet returned.
+    #[must_use]
+    pub const fn outstanding(&self) -> usize {
+        self.outstanding
+    }
+
+    /// Write a frame's descriptor body into the next free slot and return that slot.
+    /// **Does not hand it to the device** — call [`publish`] after fencing.
+    ///
+    /// [`publish`]: TxRing::publish
+    pub fn submit(&mut self, buffer_pa: u64, len: u32) -> Result<usize, TxError> {
+        if self.outstanding >= self.capacity() {
+            return Err(TxError::Full);
+        }
+        let descriptor = Descriptor::prepare(buffer_pa, len).ok_or(TxError::BadLength)?;
+        let slot = self.head;
+        self.descriptors[slot] = descriptor;
+        self.head = (self.head + 1) % N;
+        self.outstanding += 1;
+        Ok(slot)
+    }
+
+    /// Set `OWN` on a slot, handing it to the device.
+    pub fn publish(&mut self, slot: usize) {
+        self.descriptors[slot] = self.descriptors[slot].give_to_device();
+    }
+
+    /// The slot the glue should check next, or `None` when nothing is outstanding.
+    /// The glue reads its `OWN` bit volatilely and calls [`release_one`] only if the
+    /// device has cleared it.
+    ///
+    /// [`release_one`]: TxRing::release_one
+    #[must_use]
+    pub const fn peek_reclaimable(&self) -> Option<usize> {
+        if self.outstanding == 0 {
+            None
+        } else {
+            Some(self.reclaim)
+        }
+    }
+
+    /// Take back the slot [`peek_reclaimable`] named. Completion is in order, so the
+    /// glue must stop at the first slot the device still owns rather than scanning
+    /// past it — releasing a live descriptor reuses its buffer mid-transmit.
+    ///
+    /// [`peek_reclaimable`]: TxRing::peek_reclaimable
+    pub fn release_one(&mut self) {
+        if self.outstanding == 0 {
+            return;
+        }
+        self.reclaim = (self.reclaim + 1) % N;
+        self.outstanding -= 1;
+    }
+
+    /// Read a slot's descriptor. The glue uses the physical address of the ring for
+    /// DMA; this is for assertions and for the reclaim check's non-volatile half.
+    #[must_use]
+    pub const fn descriptor(&self, slot: usize) -> &Descriptor {
+        &self.descriptors[slot]
+    }
+
+    /// Clear a slot's `OWN` bit, standing in for the device completing it. Tests
+    /// only — on hardware the MAC does this by DMA.
+    #[cfg(test)]
+    fn simulate_completion(&mut self, slot: usize) {
+        self.descriptors[slot].tdes3 &= !TDES3_OWN;
+    }
+}
+
 /// The Synopsys core version, `DWMAC_SNPSVER` — the low byte of the MAC's version
 /// register. The high byte is the vendor-defined `DWMAC_USERVER` and is ignored.
 #[must_use]
@@ -466,6 +597,100 @@ mod tests {
         let ours = Descriptor::prepare(0x4020_0000, 64).expect("64 fits");
         assert!(!ours.is_owned_by_device(), "not handed over yet");
         assert!(ours.give_to_device().is_owned_by_device());
+    }
+
+    fn ring() -> TxRing<4> {
+        TxRing::new()
+    }
+
+    #[test]
+    fn a_fresh_ring_has_nothing_outstanding() {
+        let r = ring();
+        assert_eq!(r.outstanding(), 0);
+        assert_eq!(r.peek_reclaimable(), None);
+    }
+
+    #[test]
+    fn a_submission_fills_the_next_slot_and_advances() {
+        let mut r = ring();
+        assert_eq!(r.submit(0x4020_0000, 64), Ok(0));
+        assert_eq!(r.submit(0x4020_1000, 64), Ok(1));
+        assert_eq!(r.outstanding(), 2);
+    }
+
+    #[test]
+    fn a_submitted_slot_is_not_yet_owned_by_the_device() {
+        // The two-phase discipline survives the ring: `submit` writes the body,
+        // `publish` hands it over, and the glue fences between them.
+        let mut r = ring();
+        let slot = r.submit(0x4020_0000, 64).expect("empty ring");
+        assert!(!r.descriptor(slot).is_owned_by_device());
+        r.publish(slot);
+        assert!(r.descriptor(slot).is_owned_by_device());
+    }
+
+    #[test]
+    fn the_ring_refuses_a_submission_that_would_catch_the_reclaim_point() {
+        // One slot always stays free. The device walks from its own position to the
+        // tail pointer, so a head that wrapped onto the reclaim point would read as
+        // "nothing to do" and lose the whole ring rather than overflowing it.
+        let mut r = ring();
+        assert_eq!(r.capacity(), 3, "N - 1");
+        for _ in 0..3 {
+            r.submit(0x4020_0000, 64).expect("within capacity");
+        }
+        assert_eq!(r.submit(0x4020_0000, 64), Err(TxError::Full));
+    }
+
+    #[test]
+    fn a_refused_submission_consumes_nothing() {
+        let mut r = ring();
+        for _ in 0..3 {
+            r.submit(0x4020_0000, 64).expect("within capacity");
+        }
+        let _ = r.submit(0x4020_0000, 64);
+        assert_eq!(r.outstanding(), 3, "a refusal must not advance the head");
+    }
+
+    #[test]
+    fn a_bad_length_is_refused_without_consuming_a_slot() {
+        let mut r = ring();
+        assert_eq!(r.submit(0x4020_0000, 0), Err(TxError::BadLength));
+        assert_eq!(r.outstanding(), 0);
+    }
+
+    #[test]
+    fn slots_wrap_once_the_device_returns_them() {
+        let mut r = ring();
+        for _ in 0..3 {
+            let slot = r.submit(0x4020_0000, 64).expect("within capacity");
+            r.publish(slot);
+        }
+        // The device completes all three.
+        for slot in 0..3 {
+            r.simulate_completion(slot);
+            r.release_one();
+        }
+        assert_eq!(r.outstanding(), 0);
+        assert_eq!(r.submit(0x4020_0000, 64), Ok(3), "the last free slot");
+        assert_eq!(r.submit(0x4020_0000, 64), Ok(0), "then wraps");
+    }
+
+    #[test]
+    fn reclaim_stops_at_the_first_slot_the_device_still_owns() {
+        // Completion is in order, so a scan that ran past a still-owned descriptor
+        // would free a live one — the buffer gets reused mid-transmit.
+        let mut r = ring();
+        for _ in 0..3 {
+            let slot = r.submit(0x4020_0000, 64).expect("within capacity");
+            r.publish(slot);
+        }
+        r.simulate_completion(0);
+        assert_eq!(r.peek_reclaimable(), Some(0));
+        r.release_one();
+        assert_eq!(r.peek_reclaimable(), Some(1), "still owned — the glue stops here");
+        assert!(r.descriptor(1).is_owned_by_device());
+        assert_eq!(r.outstanding(), 2);
     }
 
     #[test]

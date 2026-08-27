@@ -5,6 +5,7 @@
 use crate::fwcfg::{Fwcfg, RamfbCfg};
 use crate::mem::{BusError, Memory};
 use crate::plic::Plic;
+use crate::gmac;
 use crate::pwmdac::Pwmdac;
 use crate::uart::Uart;
 use crate::virtio::Virtio;
@@ -153,6 +154,9 @@ impl Bus {
         if Pwmdac::in_window(addr) {
             return Ok(Pwmdac::read(addr) as u8);
         }
+        if gmac::in_window(addr) {
+            return Ok(gmac::read(addr) as u8);
+        }
         if addr == FWCFG_REG_DATA {
             return Ok(self.fwcfg.read_data_byte());
         }
@@ -169,6 +173,9 @@ impl Bus {
         if Pwmdac::in_window(addr) {
             return Ok(Pwmdac::read(addr) as u16);
         }
+        if gmac::in_window(addr) {
+            return Ok(gmac::read(addr) as u16);
+        }
         if in_fwcfg(addr) {
             return Ok(0);
         }
@@ -181,6 +188,9 @@ impl Bus {
     pub(crate) fn read_u32(&self, addr: u64) -> Result<u32, BusError> {
         if Pwmdac::in_window(addr) {
             return Ok(Pwmdac::read(addr) as u32);
+        }
+        if gmac::in_window(addr) {
+            return Ok(gmac::read(addr) as u32);
         }
         if in_fwcfg(addr) {
             return Ok(0);
@@ -202,6 +212,9 @@ impl Bus {
     pub(crate) fn read_u64(&self, addr: u64) -> Result<u64, BusError> {
         if Pwmdac::in_window(addr) {
             return Ok(Pwmdac::read(addr));
+        }
+        if gmac::in_window(addr) {
+            return Ok(gmac::read(addr));
         }
         if in_fwcfg(addr) {
             return Ok(0);
