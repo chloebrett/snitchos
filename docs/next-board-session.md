@@ -162,17 +162,9 @@ typed by hand — `cargo xtask image` prints the line to retype. A bare reset pi
 a fresh *image* but the *old* bootargs.)
 
 **Once step 6b lands this whole item collapses to one command** —
-`cargo xtask board boot --workload gmac-probe` — and at that point the item stops
-being an instruction to a human and becomes a script, or something an agent runs
-unattended. That is worth designing *for* rather than discovering later, so:
-
-> **The probe's output lines are a parse contract, not prose.** Every register
-> report is `gmac-probe: <region>.<label> = 0x<8 hex digits>`, every access is
-> preceded by `gmac-probe: read <region>.<label> @ 0x<addr>`, and the run is
-> bracketed by `gmac-probe: start` / `gmac-probe: done`. A missing `done` with a
-> trailing `read` line is the hang signature. Reword those lines and you break
-> whatever the bridge asserts on — the verdict sentences after them are free text
-> and safe to edit, the `key = value` lines are not.
+`cargo xtask board boot --workload gmac-probe` — and could be run unattended.
+If you drive it from the bridge, `gmac-probe: done` is the natural stop marker, and
+its *absence* after a trailing `read …` line is the hang.
 
 **Read the version line first.** The dump opens with
 
