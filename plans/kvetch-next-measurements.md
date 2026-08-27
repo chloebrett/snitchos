@@ -9,7 +9,7 @@ the model exists to do, and which of the remaining levers is worth spending days
 
 ## Context
 
-[batch11 findings](../notes/batch11-training-findings.md) settled three things across 23
+[batch11 findings](../notes/batch11-training-findings.md) settled three things across 19
 runs: corpus volume has largely stopped paying (+55.7% bought 0.025 nats), the 30
 hand-polished exemplars are worth ~13× their token count, and **scaling the rung
 overturned "corpus first"** — quip beats drivel by 0.258 nats at convergence.

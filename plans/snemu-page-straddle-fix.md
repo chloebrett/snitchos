@@ -1,11 +1,37 @@
 # Plan — snemu page-straddling access fix + fidelity-debugging robustness
 
-**Status (2026-08-27)**: Fix 1 (fetch) **SHIPPED**; frame-scramble stress mode = follow-up **D,
-SHIPPED** and wired into the gate. Open: Fix 2 (data load/store straddle,
-defensive), debugging-robustness follow-ups **A/B/C**, and the sweep clock-skew
+**Status (2026-08-27)**: Fix 1 (fetch) **SHIPPED**; Fix 2 (data load/store straddle)
+**SHIPPED**; frame-scramble stress mode = follow-up **D, SHIPPED** and wired into the
+gate. Open: debugging-robustness follow-ups **A/B/C**, and the sweep clock-skew
 verdict.
 
 ## Shipped
+
+- **Straddle-aware data load/store** (Fix 2, 2026-08-27) in `Memory`'s width-typed
+  accessors (`snemu/src/mem.rs`). `span` permuted the base frame once and returned a
+  *contiguous* storage range, so under scramble the tail of a boundary-crossing access
+  landed in `permute(f) + 1` — an unrelated guest frame. Measured, not argued: a
+  straddling `write_u64` produced `[1,2,3,4,0,0,0,0]` on byte-wise read-back, the high
+  half having been written over another guest page.
+
+  The fix mirrors `write_bytes`, which already split per page for this exact reason:
+  `needs_split` gates a per-page path, and the non-straddling case keeps its single
+  bounds check and single slice, so the emulator's hot path is unchanged. `raw_offset`
+  was split out of `span` because a straddling access must be bounds-checked *before*
+  permutation — `span`'s storage-space bound would reject a legal guest access whose
+  permuted base sits in the last storage frame.
+
+  **The property under test is that scramble is invisible to the guest**, asserted
+  directly (same bytes with it on and off) rather than by guessing at QEMU's misaligned
+  semantics. Byte reads are the oracle: a 1-byte access can never straddle, so
+  `read_u8` sees true guest memory even while the wide path is broken. 315/315 snemu
+  tests; itest 132/132 plain **and** scrambled.
+
+  *Mutation note:* the six survivors on `needs_split` are equivalent mutants. It is a
+  pure optimization predicate — its contract is "true whenever a split is needed", and
+  every survivor widens it, costing speed and never correctness. That equivalence is
+  itself tested (`the_split_path_agrees_with_the_fast_path_when_nothing_straddles`)
+  rather than merely asserted.
 
 - **Straddle-aware fetch** in `Hart::step` (interpreter/oracle) *and*
   `fetch_for_compile` (block-JIT frontend): when `pc & 0xfff > 0xffc`, translate

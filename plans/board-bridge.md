@@ -115,6 +115,73 @@ implementation of one seam, not a second project.
   a *human* terminal). That is the interactive sibling of this plan's `exec`, and it
   is already planned there. Do it before or after; the two share the serial handle
   but not the surface, and this plan builds the **programmatic** one.
+- **A snemu-backed transport — `board exec` against the emulator.** Out of Phase 1,
+  but named here because it **constrains step 4's seam** and is cheap only if the
+  seam is right the first time. See the follow-on section below.
+
+## Follow-on: pointing the bridge at the emulator
+
+**Sequence it directly after step 4, not "someday".** Recorded here because step 4
+designs the seam it needs, and because the cost is small *only* if that seam is
+right the first time.
+
+**It is also the one backend that needs no hardware, no cable and no mutex on a
+single board** — which makes it the one an agent can actually use, and the one that
+works while somebody else is holding the VF2.
+
+The bridge's transport is a seam because Phase 2 swaps a TCP socket behind it.
+snemu is a natural third implementation, and the argument for it is *not* the
+obvious one:
+
+- **The first argument is that an agent cannot drive the emulator at all today**,
+  and the gap is specifically **input**. Reading works on a pipe — `snemu boot
+  --max-steps N` streams UART fine. Typing does not: keystrokes are read only while
+  raw mode is active, raw mode requires a TTY (`snemu/src/interactive.rs`,
+  `RawMode::enter`), and snemu says so itself when stdin is a pipe — *"streaming
+  output, but nothing typed will reach the guest"*. That is deliberate and correct:
+  a blocking read on a pipe would stall the emulator mid-run, and `O_NONBLOCK` on
+  stdin would leak onto the parent shell's file description. `--interactive` also
+  sets `max_steps = u64::MAX`, bounded by the person at the keyboard — a person an
+  unattended agent does not have.
+
+  The escape hatch snemu names — *"use `xtask itest` to script input"* — means
+  authoring a Rust scenario, registering it in `SCENARIOS` and rebuilding. That is
+  the right shape for a **regression test** and the wrong shape for a **question**.
+  So "ask the running OS something" has no cheap path at all right now, on emulator
+  *or* board, and `exec` is what a cheap path looks like.
+- **The second argument** is that it closes a hole in *this* plan. Step 4 says the
+  serial `open`/`read`/`write` is glue "exercised by hand against the board" — so
+  the CLI assembly, the capture loop and the exit-code mapping have **no automated
+  coverage at all**. Steps 1–3 are pure precisely because board round-trips are
+  expensive, which means everything above them is untested until someone plugs in a
+  cable. An emulator backend puts `board exec` in the gate.
+- **The third argument** is that a seam with one implementation is a guess. Phase 2
+  is weeks out; snemu would make the abstraction real while it is still cheap to
+  change.
+- **The architectural pull** is the one in
+  [docs/board-agent-bridge-design.md](../docs/board-agent-bridge-design.md): one
+  thing a browser talks to, backed by either a real board or a host emulator.
+
+**Three constraints, all of which make this smaller than it sounds — or larger:**
+
+1. **It covers `exec` and decode, not the U-Boot layer.** snemu has no U-Boot, so
+   steps 4b/4c/6b — reaching the `=>` prompt, `provision`, `boot --workload` — have
+   no emulated counterpart and stay board-only. That is half of Phase 1.
+2. **It would not faithfully exercise step 3.** Under snemu, telemetry and console
+   are *separate* channels (`virtio_tx_output()` vs `uart_output()` in
+   `xtask-itest/src/itest/harness.rs`), so the mixed-stream problem step 3 exists to
+   solve does not arise there. Exercising the splitter needs snemu run in the VF2's
+   UART-telemetry mode, or the merge is a fiction that tests nothing.
+3. **It cannot live in `xtask-board`.** That crate deliberately pulls `collector`
+   without `native`; linking snemu would recompile the emulator on every bridge
+   edit — exactly what the `xtask-itest` and `xtask-cram` splits exist to prevent.
+   A separate crate is the established answer here.
+
+**The one decision that must be made now, in step 4:** keep the seam a plain byte
+stream. An emulator *could* hand back `OwnedFrame`s directly, skipping step 3's
+`split` and the COBS decode entirely — and that would be a bypass wearing a test's
+clothes, green while the real path rots. Emulated bytes must travel the same road
+as board bytes.
 
 ## Acceptance Criteria (Phase 1)
 
@@ -455,6 +522,43 @@ it and step 3 of this ladder may want a third. This costs nothing now and is ann
 to retrofit, and the collector's `Source::open() -> Box<dyn Read>` already proved the
 shape one milestone ago. The serial *specifics* (baud, the `cu.*` check) belong to the
 serial branch, not to `exec`.
+
+**`exec` is single-shot; the rest of Phase 1 is not — `script.rs` is the shape.**
+✅ Built (`xtask-board/src/script.rs`, 6 tests, mutants 4 caught / 2 unviable / 0
+survivors). `exec` sends one thing and captures one answer, which is the right
+primitive and the wrong shape for steps 4b, 4c and 6b — each of those is a
+send/expect *conversation*, and written as three hand-rolled loops they are three
+chances to get the same thing wrong:
+
+| command | the conversation it is |
+|---|---|
+| `uboot "<cmd>"` | keystroke → until `=> ` → cmd → until `=> ` |
+| `provision` | N × (`setenv …` → until `=> `), then `saveenv` → until `=> ` |
+| `boot --workload X` | setenv bootargs → until `=> ` → `boot` → until a boot marker |
+
+`Step { send, until }` plus `run(&[Step], perform)` makes those *configurations*.
+Same move step 2 already made one level down — composing the three stop conditions
+into one value meant there was never a special case to unify later. Three
+decisions in it:
+
+- **A step that never saw what it awaited abandons the rest, unsent.** The safety
+  property, not an optimisation: if the prompt did not come, the board is booting
+  or wedged or mid-`saveenv`, and the next command is not a failed step but an
+  *unpredictable* one. A `provision` that writes half an environment is worse than
+  one that writes none. The test asserts on what did **not** reach the wire.
+- **`Interrupted` is a distinct variant from `Abandoned`.** A dead transport is not
+  a silent board. This layer says *where* it stopped; the caller, holding the
+  `io::Error` or step 1's `Unreachable`, says why.
+- **The I/O is a closure, not a port** — which is what makes "which steps never
+  reached the wire" observable at all, since a test can then stand where the wire
+  does. The real driver passes a one-line write-then-capture closure.
+
+**A third backend is already identified — snemu — and it constrains this seam, so
+read the follow-on below before finalising the handle type.** The short version:
+keep the seam a plain byte stream even for an emulator that could hand back
+structured frames directly. Feeding emulated bytes through the same decode path is
+what makes the emulator a *test* of the bridge instead of a bypass of it.
+
 **MUTATE**: `cargo xtask mutants` on the exit-code and flag-mapping logic.
 **KILL MUTANTS**: a mutant that returns success when the stop condition never fired
 must fail — that is the difference between a working loop and one that silently

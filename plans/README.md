@@ -50,7 +50,7 @@ Parked — nothing since mid-July:
 | [xtask-crate-split.md](xtask-crate-split.md) | Cut the xtask incremental rebuild | Phases 1–2 shipped. **Phase 1 did not speed the hot loop** (measured, 7.996s vs 7.98s). Phase 2 took `scenarios.rs` into `xtask-itest` rather than leaving it in the bin, so **Phase 3's win may already be partly banked — unmeasured since the move** |
 | [xtask-surface-consolidation.md](xtask-surface-consolidation.md) | Trim the xtask CLI surface | Phases 0–2 done, Phase 3 part done. Open: `View` as one type; deferred: reverse-direction `--engine qemu` gating. **The trim did not hold** — 24 → 20 then back to **24** (measured 2026-08-27) |
 | [snemu-milestone-4-measurement.md](snemu-milestone-4-measurement.md) | snemu's measurement spine | Steps 2/3/4 shipped, 5 in substance. **Steps 6 (dashboard) and 7 (`H/G`) not built**; 2 of 4 criteria unmet |
-| [snemu-page-straddle-fix.md](snemu-page-straddle-fix.md) | The page-straddle access bug | Fix 1 + follow-up D shipped and gated. Open: Fix 2 (data straddle), follow-ups A/B/C, the clock-skew verdict |
+| [snemu-page-straddle-fix.md](snemu-page-straddle-fix.md) | The page-straddle access bug | **Both fixes shipped** — Fix 1 (fetch) and Fix 2 (data load/store, 2026-08-27), plus follow-up D, all gated. Open: debugging-robustness follow-ups A/B/C, the clock-skew verdict |
 
 ## Not started
 
