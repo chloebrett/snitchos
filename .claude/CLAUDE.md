@@ -445,6 +445,17 @@ reason — a deny-list, because this repo has already been bitten by
 allow-lists-by-omission. The date bounds the *header block* on purpose: `stim-v1.md`
 and `visionfive2-port.md` both carry per-step `**Status**:` notes deep in the body.
 
+**Rustdoc's own links are a *separate* gate, and one lint catches almost everyone:
+`private_intra_doc_links`.** `[`FOO`]` from a public item — or from module docs — is a
+gate failure when `FOO` is private, and module docs referencing a private constant is
+the most natural thing in the world to write. It bit three times in one session
+(`collector::serial`, `snemu-wasm::probe`, `xtask-board::split`). **The fix is
+backticks, not `pub`**: widening the API so a doc link resolves exports an
+implementation detail to satisfy a lint. Note `cargo xtask links` will *not* catch
+this — it checks relative `.md` targets and never sees Rust intra-doc links, so the
+two gates are genuinely complementary. Check a crate alone with
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -q -p <crate>`.
+
 **Doc links (`cargo xtask links`, also inside `xtask test`).** A markdown link is a
 contract nothing compiles, so a `git mv` breaks it silently — which happened on
 *every* plan-archiving sweep this repo has done. A moved file breaks links in **both

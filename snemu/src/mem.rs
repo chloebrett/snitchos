@@ -336,6 +336,29 @@ mod tests {
         }
     }
 
+    /// The split path must agree with the fast path on accesses that don't straddle.
+    ///
+    /// This is what makes [`Memory::needs_split`] a pure *optimization*: its contract
+    /// is "true whenever a split is required", and answering true more often must only
+    /// ever cost speed, never correctness. Worth pinning because every surviving
+    /// mutant on that predicate is an over-approximation (`&&`→`||`, `>`→`>=`, and the
+    /// arithmetic swaps all widen it), so this test is the reason they are equivalent
+    /// rather than a gap — and it would fail loudly if the split path were ever
+    /// changed in a way that made it wrong for the ordinary case.
+    #[test]
+    fn the_split_path_agrees_with_the_fast_path_when_nothing_straddles() {
+        let mut mem = Memory::new(0x8000);
+        mem.set_scramble(true);
+        let addr = RAM_BASE + PAGE as u64 + 16; // comfortably inside one page
+        mem.write_u64(addr, 0x0123_4567_89ab_cdef).unwrap();
+        assert!(!mem.needs_split(addr, 8), "this address must take the fast path");
+
+        let fast = mem.read_u64(addr).unwrap();
+        let mut split = [0u8; 8];
+        mem.read_split(addr, &mut split).unwrap();
+        assert_eq!(u64::from_le_bytes(split), fast);
+    }
+
     /// A straddling *read* must see what the guest wrote, not the contents of
     /// whichever storage frame happens to sit next in the array.
     #[test]

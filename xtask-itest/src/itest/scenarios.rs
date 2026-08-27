@@ -350,6 +350,66 @@ pub fn stitch_telemetry_on_the_wire(h: &mut View) -> Result<(), String> {
 /// the expression consumes "hello" → emits `io.len`=5. Proves console *input*
 /// reaches a Stitch program end-to-end on-target (the write side is proven by the
 /// REPL rendering its own output through the same platform).
+/// **Increment-0 probe for `plans/kitsch-v1.md`** — how much does one Stitch
+/// operation cost on target? kitsch's policy layer is a Stitch program, so the
+/// answer decides whether an interpreted compositor can hold a frame budget.
+///
+/// Two evals of the same shape at different sizes; the **slope** between them
+/// cancels the REPL's fixed per-line cost (parse + prelude re-registration)
+/// exactly, which a baseline subtraction would only approximate.
+///
+/// Self-synchronising: each probe line `emit`s its own result from *inside* the
+/// eval, and the interpreter emits `stitch.eval.duration_ticks` at the *end* of
+/// that eval — so the first duration frame after the marker is unambiguously the
+/// one we asked for, with no reliance on draining boot self-test emissions.
+///
+/// Reports by failing: a probe's job is to print a number, not to gate.
+pub fn stitch_op_cost_probe(h: &mut View) -> Result<(), String> {
+    const SMALL: u32 = 500;
+    const LARGE: u32 = 2500;
+
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    let mut measure = |marker: &str, n: u32| -> Result<i64, String> {
+        let line = format!(
+            "emit(\"{marker}\", 1.. |> take({n}) |> toList |> fold(0, (a, b) -> a + b))\n"
+        );
+        h.send_input(line.as_bytes()).map_err(|e| format!("inject probe {marker}: {e}"))?;
+
+        h.wait_for(SEC * 60, |f, strings| match f {
+            OwnedFrame::Metric { name_id, .. } => {
+                strings.get(name_id).map(String::as_str) == Some(marker)
+            }
+            _ => false,
+        })
+        .ok_or_else(|| format!("probe {marker} never emitted within 60s — did the line parse?"))?;
+
+        let frame = h
+            .wait_for(SEC * 60, is_metric_named("stitch.eval.duration_ticks"))
+            .ok_or_else(|| format!("no eval duration after {marker} within 60s"))?;
+
+        match frame {
+            OwnedFrame::Metric { value, .. } => Ok(value),
+            _ => Err("duration frame was not a Metric".to_string()),
+        }
+    };
+
+    let small = measure("probe.small", SMALL)?;
+    let large = measure("probe.large", LARGE)?;
+
+    let d_elems = i64::from(LARGE - SMALL);
+    let slope = (large - small) as f64 / d_elems as f64;
+
+    Err(format!(
+        "PROBE RESULT (not a failure): {SMALL} elems = {small} ticks, {LARGE} elems = {large} ticks; \
+         slope = {slope:.2} ticks/element over {d_elems} elements. \
+         Each element costs roughly one Seq.iterate step, one take step and one fold lambda call, \
+         so per-interpreter-operation is roughly slope/3 = {:.2} ticks.",
+        slope / 3.0
+    ))
+}
+
 pub fn stitch_reads_a_line(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
         .ok_or("stitch REPL never reached its boot self-test within 30s")?;

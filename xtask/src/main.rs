@@ -137,6 +137,16 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Drive the VisionFive 2 over its UART: write input, capture until a stop
+    /// condition, and get the board's text plus decoded frames back.
+    ///
+    /// `cargo xtask board exec "<input>" --device /dev/cu.usbserial-X --until "=> "`.
+    /// Delegated to `xtask-board` so lean `xtask` never links `serialport` —
+    /// same split as `itest`. See plans/board-bridge.md.
+    Board {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Build and run the collector in text-only mode (decoded frames
     /// printed to stdout). Shorthand for `collect -- --text`.
     Reader {
@@ -788,6 +798,9 @@ fn main() -> ExitCode {
         Cmd::Mutants { krate, args } => run_mutants(krate.as_deref(), &args),
         Cmd::Clippy { args } => run_clippy(&args),
         Cmd::Collect { args } => run_collector(&args),
+        // Dev, not release: the bridge waits on a 115200 line, so its own speed is
+        // irrelevant and a release build would only slow the edit loop it serves.
+        Cmd::Board { args } => delegate_to("xtask-board", None, &args, Profile::Dev),
         Cmd::Reader { args } => {
             // Reader = text-only debug view; no docker dependency.
             let mut all = vec![

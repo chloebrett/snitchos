@@ -108,6 +108,7 @@
 | stitch-kvetch-completes | stitch-kvetch | cpu | kvetch, stitch |
 | stitch-float-evaluates-on-target | stitch-repl | wfi | userspace, stitch, fp |
 | stitch-hold-lists-caps | stitch-repl | wfi | userspace, stitch |
+| stitch-op-cost-probe | stitch-repl | wfi | userspace, stitch |
 | stitch-print-writes-to-console | stitch-repl | wfi | userspace, stitch |
 | stitch-reads-a-line | stitch-repl | wfi | userspace, stitch |
 | stitch-telemetry-on-the-wire | stitch-repl | wfi | userspace, stitch |
