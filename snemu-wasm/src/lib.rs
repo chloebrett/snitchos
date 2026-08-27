@@ -10,6 +10,7 @@
 pub mod boot;
 pub mod budget;
 pub mod cursor;
+pub mod input;
 pub mod probe;
 pub mod series;
 pub mod shell;

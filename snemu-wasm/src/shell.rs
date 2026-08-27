@@ -21,6 +21,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::budget;
 use crate::cursor::Cursor;
+use crate::input::InputLog;
 use crate::telemetry::Decoder;
 use snemu::machine::Machine;
 
@@ -42,6 +43,7 @@ pub struct Handle {
     uart: Cursor,
     virtio: Cursor,
     decoder: Decoder,
+    input: InputLog,
 }
 
 #[wasm_bindgen]
@@ -74,6 +76,7 @@ impl Handle {
             uart: Cursor::new(),
             virtio: Cursor::new(),
             decoder: Decoder::new(),
+            input: InputLog::default(),
         })
     }
 
@@ -111,7 +114,16 @@ impl Handle {
     /// survive, in order. The guest reads them at its own pace by polling the UART,
     /// exactly as it would from a serial line.
     pub fn push_input(&mut self, text: &str) {
-        self.machine.push_console_input(text.as_bytes());
+        crate::input::deliver(&mut self.machine, &mut self.input, text);
+    }
+
+    /// Every keystroke so far as `(instret, text)`, in delivery order — the replay
+    /// script for this session.
+    ///
+    /// # Errors
+    /// If the log cannot be serialized.
+    pub fn input_log(&self) -> Result<String, JsError> {
+        serde_json::to_string(self.input.entries()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The capability derivation tree, as JSON — who granted what to whom.
