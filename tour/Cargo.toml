@@ -9,6 +9,10 @@ publish = false
 # rather than a list copied into this crate. `snemu-wasm/src/boot.rs` is the
 # precedent — the only thing entitled to an opinion about what parses is the guest.
 kernel-boot = { path = "../kernel-boot" }
+# An anchor is a predicate over decoded frames; `OwnedFrame` is behind `std`.
+protocol = { path = "../protocol", features = ["std"] }
+# `CAP_NAME_LEN` / `name_str` — cap names ride the wire NUL-padded.
+snitchos-abi = { path = "../abi" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 

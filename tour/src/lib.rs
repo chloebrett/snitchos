@@ -9,6 +9,8 @@
 //! See [`../../plans/tour-v1.md`](../../plans/tour-v1.md) for the design and the
 //! decisions behind it.
 
+pub mod anchor;
+
 use serde::Deserialize;
 
 /// One chapter: prose beside a guest booted to the world-state it describes.
