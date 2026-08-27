@@ -122,6 +122,7 @@ fn object_kind(object: CapObject) -> &'static str {
         CapObject::Notification => "notification",
         CapObject::Process => "process",
         CapObject::AudioSink => "audio-sink",
+        CapObject::DisplaySink => "display-sink",
     }
 }
 

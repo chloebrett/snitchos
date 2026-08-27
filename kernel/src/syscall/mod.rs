@@ -9,6 +9,7 @@
 //! machinery (`TrapFrame` layout, timer, CSR setup) lives in [`crate::trap`].
 
 mod audio;
+mod display;
 mod cap;
 mod clock;
 mod console;
@@ -70,6 +71,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::EndpointCreate) => ipc::handle_endpoint_create(frame),
         Some(Syscall::AudioWrite) => audio::handle_audio_write(frame),
         Some(Syscall::AudioEnqueue) => audio::handle_audio_enqueue(frame),
+        Some(Syscall::Present) => display::handle_present(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);

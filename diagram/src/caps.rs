@@ -20,6 +20,7 @@ fn object_name(object: CapObject) -> &'static str {
         CapObject::Notification => "Notification",
         CapObject::Process => "Process",
         CapObject::AudioSink => "AudioSink",
+        CapObject::DisplaySink => "DisplaySink",
     }
 }
 

@@ -271,6 +271,13 @@ pub enum Syscall {
     /// the tail (back-pressure). A timer-driven drain feeds the DAC from the ring. This
     /// is the async path the mixing / sonifier / modem work builds on.
     AudioEnqueue = 33,
+    /// Present a frame through an `Object::DisplaySink` capability (`a0` =
+    /// `Handle`, `a1` = ptr to the caller's XRGB8888 pixels, `a2` = pixel
+    /// count). Gated on the DISPLAY right. The kernel owns the framebuffer and
+    /// **copies** the caller's pixels into it — a client's buffer is never
+    /// scanned out directly, which is what makes compositor-applied effects
+    /// undefeatable (`docs/kitsch-design.md` §4).
+    Present = 34,
 }
 
 impl Syscall {
@@ -314,6 +321,7 @@ impl Syscall {
             31 => Some(Self::SpawnOn),
             32 => Some(Self::AudioWrite),
             33 => Some(Self::AudioEnqueue),
+            34 => Some(Self::Present),
             _ => None,
         }
     }
@@ -344,6 +352,13 @@ pub mod rights {
     /// noise. Held by the `glitch` audio server; the DAC is a scarce resource
     /// mediated by one holder.
     pub const AUDIO: u32 = 0b1000_0000;
+
+    /// May present pixels through an `Object::DisplaySink` — the right to put
+    /// something on the glass. Held by `kitsch`; the scanout is a scarce
+    /// resource mediated by one holder, exactly like the DAC. Disjoint from
+    /// [`AUDIO`] so device authority never generalises: a server holding one
+    /// device's cap cannot reach another's.
+    pub const DISPLAY: u32 = 0b1_0000_0000;
 }
 
 /// Object-kind discriminants for a [`CapDesc`]'s `kind` field — what sort of
@@ -366,6 +381,8 @@ pub mod object_kind {
     pub const PROCESS: u32 = 5;
     /// An `AudioSink` — the right to emit audio samples (the `glitch` server).
     pub const AUDIO_SINK: u32 = 6;
+    /// A `DisplaySink` — the right to present pixels (the `kitsch` compositor).
+    pub const DISPLAY_SINK: u32 = 7;
 }
 
 /// One capability in a process's own table, as written by [`Syscall::CapList`] —
@@ -643,7 +660,9 @@ mod tests {
         assert_eq!(Syscall::from_usize(32), Some(Syscall::AudioWrite));
         assert_eq!(Syscall::AudioEnqueue as usize, 33);
         assert_eq!(Syscall::from_usize(33), Some(Syscall::AudioEnqueue));
-        assert_eq!(Syscall::from_usize(34), None);
+        assert_eq!(Syscall::Present as usize, 34);
+        assert_eq!(Syscall::from_usize(34), Some(Syscall::Present));
+        assert_eq!(Syscall::from_usize(35), None);
     }
 
     #[test]
@@ -655,6 +674,8 @@ mod tests {
         assert_eq!(object_kind::REPLY, 3);
         assert_eq!(object_kind::NOTIFICATION, 4);
         assert_eq!(object_kind::PROCESS, 5);
+        assert_eq!(object_kind::AUDIO_SINK, 6);
+        assert_eq!(object_kind::DISPLAY_SINK, 7);
     }
 
     #[test]

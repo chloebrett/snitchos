@@ -379,11 +379,44 @@ span contains a clean cell, spans never cross a row.
 **Done when**: `cargo nextest run -p kitsch-render` covers composition, damage
 coalescing and rasterization, and a known scene rasterizes to a byte-identical PPM.
 
-### 3 — The display capability
+### 3 — The display capability 🚧 **MECHANISM LANDED (2026-08-28)**
 
-`Object::Display` plus a cap-guarded present syscall. **The kernel does the copy for
-v1** — no framebuffer-mapping machinery, since there is nothing to be fast for yet
-and the cap story is identical either way.
+The whole chain exists and is gate-green (135/135 itests plain **and**
+`--scramble`, 472 unit tests across the touched crates):
+
+| Piece | Where |
+|---|---|
+| `Object::DisplaySink` + `Rights::DISPLAY` + `authorize_display` | `kernel-proc/src/cap.rs`, host-tested |
+| `rights::DISPLAY` (`0b1_0000_0000`), `object_kind::DISPLAY_SINK` (7), `Syscall::Present` (34) | `abi` |
+| `CapObject::DisplaySink` (appended — postcard is positional) | `protocol`, plus the `collector` and `diagram` name maps |
+| `handle_present` | `kernel/src/syscall/display.rs`, modelled on `audio.rs` |
+| `ramfb::present_span` | `kernel/src/device/ramfb.rs` |
+
+**`Present` carries a run, not a frame** — and that shape was forced, then turned
+out to be right. A 1280x720 frame is 3.6 MB against a 256-byte per-syscall copy cap,
+so a whole frame was never possible; a horizontal **run** is exactly what
+`kitsch-render`'s damage spans already produce. The cost profile lands the right way
+round: **a damage-driven update is a few cells and a handful of calls**, and only the
+cold full-screen paint is expensive (~14.4k calls, once, ~14M instructions). Two ways
+to make the cold paint cheap when it matters, neither taken: a display-specific
+larger copy bound, or mapping the framebuffer into `kitsch` once memory objects
+exist. Widening the *shared* copy-validation limit on a whim was rejected — it is
+security-relevant code and audio lives behind the same cap.
+
+**Deliberately not generalising device authority**: `DISPLAY` is disjoint from
+`AUDIO`, and a test asserts `glitch`'s cap cannot open the screen. One server per
+device only means something if the caps do not bleed.
+
+Two things the compiler and the gate caught, both working as designed: the
+`CapObject` addition broke a non-exhaustive match (the wire-format obligation
+CLAUDE.md documents), and `syscall_numbers_round_trip`'s one-past-the-end guard
+failed until the boundary moved. While there, `object_kind_discriminants_are_stable`
+was extended to cover 6 and 7 — it stopped at 5, so `AUDIO_SINK` had never been
+pinned by the test whose entire job is pinning that order.
+
+**Remaining — the acceptance itest**: a holder presents, a non-holder is refused, and
+the refusal snitches. It needs a spawnable program plus a workload, which is exactly
+the plumbing increment 4 builds, so it lands there rather than being duplicated.
 
 **Done when**: a process holding the display cap can present; one lacking it is
 refused, and the refusal snitches.

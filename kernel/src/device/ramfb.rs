@@ -118,3 +118,29 @@ pub fn present() {
     fb.clear(0x20_20_40);
     FRAMES_PRESENTED.inc();
 }
+
+/// Copy one horizontal run of already-packed XRGB8888 pixels to `(x, y)`.
+///
+/// The `Present` syscall's back end: `kitsch` rasterizes a damage span and hands
+/// the pixels over, the kernel copies them in. **The copy is the design, not an
+/// inefficiency** — a client buffer scanned out directly could not be greyscaled
+/// or dimmed by the compositor (`docs/kitsch-design.md` §4).
+///
+/// Clips to the framebuffer and, critically, to the **end of the row**: a run is
+/// horizontal, so a too-long one is truncated rather than wrapped into the next
+/// line, which would look like corruption rather than a bug. Silent no-op until
+/// `init` has succeeded.
+pub fn present_span(x: usize, y: usize, run: &[u32]) {
+    if !READY.load(Ordering::Relaxed) || y >= HEIGHT || x >= WIDTH {
+        return;
+    }
+    let n = run.len().min(WIDTH - x);
+    // SAFETY: identical to `present` — `READY` is only set after `init` mapped
+    // exactly this region R+W as a whole number of 4-byte-aligned pixels, and
+    // nothing else touches the VA range.
+    let pixels =
+        unsafe { core::slice::from_raw_parts_mut(FB_VA_BASE as *mut u32, SIZE_BYTES / 4) };
+    let start = y * (STRIDE / 4) + x;
+    pixels[start..start + n].copy_from_slice(&run[..n]);
+    FRAMES_PRESENTED.inc();
+}

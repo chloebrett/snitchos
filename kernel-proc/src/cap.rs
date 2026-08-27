@@ -67,6 +67,10 @@ impl Rights {
     /// (the `glitch` server holds it).
     pub const AUDIO: Rights = Rights(snitchos_abi::rights::AUDIO);
 
+    /// May present pixels through an [`Object::DisplaySink`] — the right to put
+    /// something on the glass (the `kitsch` compositor holds it).
+    pub const DISPLAY: Rights = Rights(snitchos_abi::rights::DISPLAY);
+
     /// Whether `self` grants every right in `other`.
     #[must_use]
     pub const fn contains(self, other: Rights) -> bool {
@@ -150,6 +154,17 @@ pub enum Object {
     /// it to write samples through the `AudioWrite` syscall. One holder mediates the
     /// single scarce DAC; clients reach it over IPC, never the hardware.
     AudioSink,
+    /// Authority to present pixels to the screen — the right to put something on
+    /// the glass. Pure authority (no payload), the display twin of
+    /// [`AudioSink`](Self::AudioSink): the kernel owns the framebuffer, and the
+    /// holder (`kitsch`) asks it to copy a frame in through the `Present`
+    /// syscall. One holder mediates the single scarce scanout; clients reach it
+    /// over IPC by handing `kitsch` cells, never the hardware.
+    ///
+    /// **The copy is the point, not an inefficiency.** A client buffer scanned
+    /// out directly would be a client whose pixels no compositor effect could
+    /// touch — see `docs/kitsch-design.md` §4.
+    DisplaySink,
 }
 
 /// An unforgeable `{ object, rights }` pair.
@@ -312,6 +327,23 @@ pub fn authorize_audio(table: &CapTable, handle: Handle) -> Result<(), Denied> {
         return Err(Denied::MissingRight);
     }
     let Object::AudioSink = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(())
+}
+
+/// Authorize a `DisplaySink` use: `handle` must name a capability in `table`
+/// carrying [`Rights::DISPLAY`] over an [`Object::DisplaySink`]. Returns `Ok(())`
+/// when the holder may present a frame, or why it is refused — the display twin
+/// of [`authorize_audio`]. `Present` gates on this. Pure and host-tested.
+pub fn authorize_display(table: &CapTable, handle: Handle) -> Result<(), Denied> {
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::DISPLAY) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::DisplaySink = cap.object else {
         return Err(Denied::WrongObject);
     };
     Ok(())
@@ -527,6 +559,7 @@ impl CapTable {
                     Object::Notification { .. } => (object_kind::NOTIFICATION, 0, unnamed),
                     Object::Process { .. } => (object_kind::PROCESS, 0, unnamed),
                     Object::AudioSink => (object_kind::AUDIO_SINK, 0, unnamed),
+                    Object::DisplaySink => (object_kind::DISPLAY_SINK, 0, unnamed),
                 };
                 Some(CapDesc {
                     handle: Handle::new(index as u32, slot.generation).raw(),
@@ -1301,6 +1334,60 @@ mod tests {
             rights: Rights::EMIT,
         });
         assert_eq!(authorize_telemetry(&table, h), Err(Denied::WrongObject));
+    }
+
+    #[test]
+    fn authorize_display_accepts_a_displaysink_with_the_display_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::DisplaySink,
+            rights: Rights::DISPLAY,
+        });
+        assert_eq!(authorize_display(&table, h), Ok(()));
+    }
+
+    #[test]
+    fn authorize_display_refuses_an_unknown_handle() {
+        let table = CapTable::new();
+        assert_eq!(
+            authorize_display(&table, Handle::from_raw(0)),
+            Err(Denied::NoSuchCapability)
+        );
+    }
+
+    #[test]
+    fn authorize_display_refuses_a_displaysink_lacking_the_display_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::DisplaySink,
+            rights: Rights::NONE,
+        });
+        assert_eq!(authorize_display(&table, h), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn authorize_display_refuses_the_display_right_over_a_wrong_object() {
+        // Holding DISPLAY over an AudioSink is not authority to draw. The whole
+        // point of kitsch is that the scanout is a *named* object, so a process
+        // with some other device authority cannot reach the screen.
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::AudioSink,
+            rights: Rights::DISPLAY,
+        });
+        assert_eq!(authorize_display(&table, h), Err(Denied::WrongObject));
+    }
+
+    #[test]
+    fn audio_authority_is_not_display_authority() {
+        // The mirror of the above, and the property that makes one server per
+        // device meaningful: `glitch`'s cap must not open the screen.
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::AudioSink,
+            rights: Rights::AUDIO,
+        });
+        assert_eq!(authorize_display(&table, h), Err(Denied::MissingRight));
     }
 
     #[test]

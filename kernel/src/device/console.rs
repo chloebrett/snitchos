@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use kernel_boot::bootargs::ConsoleMode;
 
 use crate::uart::Uart16550;
-use kernel_devices::console::{ConsoleRing, REBOOT_TOKEN, RebootDetector};
+use kernel_devices::console::{ConsoleRing, RebootDetector};
 
 /// The kernel's console UART, initialized lazily from the DTB at boot.
 ///
@@ -169,7 +169,8 @@ pub fn drain_rx() {
   }
 }
 
-/// Watches console input for [`REBOOT_TOKEN`]. Locked rather than per-call so the
+/// Watches console input for [`kernel_devices::console::REBOOT_TOKEN`]. Locked
+/// rather than per-call so the
 /// match survives across reads — the token arrives a keystroke at a time.
 static REBOOT_DETECTOR: crate::sync::Mutex<RebootDetector> =
   crate::sync::Mutex::new(RebootDetector::new());

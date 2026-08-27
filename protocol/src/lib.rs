@@ -352,6 +352,10 @@ pub enum CapObject {
   /// lives kernel-side; this wire tag attributes the grant to the audio-sink kind.
   /// (Appended — postcard is positional.)
   AudioSink,
+  /// The right to present pixels to the screen (the `kitsch` compositor). The
+  /// framebuffer lives kernel-side; this wire tag attributes the grant to the
+  /// display-sink kind. (Appended — postcard is positional.)
+  DisplaySink,
 }
 
 /// Why the kernel refused a syscall (the `reason` in [`Frame::SyscallRefused`]).
