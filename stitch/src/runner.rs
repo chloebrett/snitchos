@@ -20,6 +20,7 @@ use crate::parser::{parse, parse_program};
 use crate::platform::{NullPlatform, Platform};
 use crate::source::SourceMap;
 use crate::telemetry::{RecordingTelemetry, Telemetry};
+use crate::test_runner::{TestResult, Verdict};
 use crate::value::{RuntimeError, TelemetryEvent, Value};
 
 /// Writing to a `String` never fails; this names that contract at each `write!`.
@@ -31,6 +32,82 @@ pub struct RunResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+}
+
+/// Render a suite's results the way `stitch test` reports them.
+///
+/// Split from the running so it is testable without an interpreter, and shared
+/// so the host verb and an on-target `stitch test` cannot drift into two
+/// different reports of the same run.
+///
+/// Exit codes follow the runner's existing vocabulary: 0 all passed, 1 something
+/// did not. A load or parse failure is the caller's 2, unchanged.
+///
+/// **An empty suite is not a pass.** It exits 0 — a file may legitimately carry
+/// no tests, and the ratchet that guards the *canon* against vacuity lives in
+/// the gate (`stitch/tests/canon.rs`), not here — but it says "no tests" rather
+/// than printing a summary that reads like success.
+#[must_use]
+pub fn report_tests(results: &[TestResult]) -> RunResult {
+    if results.is_empty() {
+        return RunResult {
+            stdout: String::new(),
+            stderr: String::from("no tests\n"),
+            exit_code: 0,
+        };
+    }
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for result in results {
+        match &result.verdict {
+            Verdict::Passed => {
+                writeln!(stdout, "ok        {}", result.name).expect(INFALLIBLE);
+            }
+            Verdict::Failed { message, .. } => {
+                writeln!(stdout, "FAILED    {}", result.name).expect(INFALLIBLE);
+                writeln!(stderr, "{}: {message}", result.name).expect(INFALLIBLE);
+            }
+            // Kept distinct from `Failed` all the way to the report: "never
+            // finished" and "was wrong" are different diagnoses, and collapsing
+            // them here would undo the reason `Verdict` separates them.
+            Verdict::Exhausted => {
+                writeln!(stdout, "EXHAUSTED {}", result.name).expect(INFALLIBLE);
+                writeln!(
+                    stderr,
+                    "{}: exhausted its fuel budget without finishing",
+                    result.name
+                )
+                .expect(INFALLIBLE);
+            }
+        }
+    }
+
+    let passed = results.iter().filter(|r| r.passed()).count();
+    writeln!(stdout, "{passed}/{} passed", results.len()).expect(INFALLIBLE);
+    RunResult { stdout, stderr, exit_code: i32::from(passed != results.len()) }
+}
+
+/// Run a program's `test` declarations and report them — what `stitch test`
+/// does with a file.
+///
+/// Parsed as a single program, exactly as `stitch/tests/canon.rs` does it. That
+/// is deliberate: the host gate and this verb must not become two different
+/// answers to "did this file's tests pass", which is the drift `run_tests` was
+/// factored out to prevent.
+///
+/// A parse failure is exit 2, not an empty suite — an unreadable file reporting
+/// "no tests" would be a green run over a file nobody parsed.
+#[must_use]
+pub fn test_program_source(src: &str) -> RunResult {
+    match parse_program(src) {
+        Ok(items) => report_tests(&crate::test_runner::run_tests(&items)),
+        Err(error) => RunResult {
+            stdout: String::new(),
+            stderr: format!("parse error: {}\n", error.render(src)),
+            exit_code: 2,
+        },
+    }
 }
 
 /// Parse and run a single-module Stitch program (no imports — the REPL and
@@ -373,7 +450,118 @@ fn render_telemetry(events: &[TelemetryEvent]) -> String {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::runner::{discover_modules, run_module_files, run_program_source};
+    use crate::runner::{
+        discover_modules, report_tests, run_module_files, run_program_source, test_program_source,
+    };
+    use crate::test_runner::{TestResult, Verdict};
+
+    fn passed(name: &str) -> TestResult {
+        TestResult { name: name.to_string(), verdict: Verdict::Passed }
+    }
+
+    fn failed(name: &str, message: &str) -> TestResult {
+        TestResult {
+            name: name.to_string(),
+            verdict: Verdict::Failed { message: message.to_string(), span: None },
+        }
+    }
+
+    fn exhausted(name: &str) -> TestResult {
+        TestResult { name: name.to_string(), verdict: Verdict::Exhausted }
+    }
+
+    #[test]
+    fn a_passing_suite_exits_zero_and_names_every_test() {
+        let out = report_tests(&[passed("adds two numbers"), passed("emits a span")]);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("adds two numbers"), "{}", out.stdout);
+        assert!(out.stdout.contains("emits a span"), "{}", out.stdout);
+        assert!(out.stderr.is_empty(), "{}", out.stderr);
+    }
+
+    #[test]
+    fn a_passing_suite_summarises_the_count() {
+        let out = report_tests(&[passed("a"), passed("b")]);
+        assert!(out.stdout.contains('2'), "summary should count the tests: {}", out.stdout);
+    }
+
+    /// A failure must carry both operands to stderr — that is the whole value of
+    /// `expect` rendering them, and it is what increment 7 verified end to end.
+    #[test]
+    fn a_failing_test_exits_one_and_reports_the_message_on_stderr() {
+        let out = report_tests(&[passed("a"), failed("adds", "expect failed: 2 == 999")]);
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stderr.contains("adds"), "{}", out.stderr);
+        assert!(out.stderr.contains("expect failed: 2 == 999"), "{}", out.stderr);
+    }
+
+    /// "Never finished" and "was wrong" are different diagnoses — the same
+    /// per-stage-death principle the funnel applies one level up. A report that
+    /// renders exhaustion as a plain failure throws that distinction away.
+    #[test]
+    fn an_exhausted_test_is_reported_as_exhausted_not_as_a_failure() {
+        let out = report_tests(&[exhausted("loops forever")]);
+        assert_eq!(out.exit_code, 1);
+        assert!(
+            out.stderr.to_lowercase().contains("exhaust"),
+            "exhaustion must be named, not folded into failure: {}",
+            out.stderr
+        );
+    }
+
+    #[test]
+    fn one_failure_does_not_hide_the_tests_that_passed() {
+        let out = report_tests(&[passed("a"), failed("b", "nope"), passed("c")]);
+        assert!(out.stdout.contains('a'), "{}", out.stdout);
+        assert!(out.stdout.contains('c'), "{}", out.stdout);
+    }
+
+    /// Green over zero tests is indistinguishable from green over a working
+    /// suite — increment 7's anti-vacuity concern, one level down. The verb does
+    /// not *fail* (a file may legitimately carry none; the ratchet that guards
+    /// the canon lives in the gate), but it must never look like a pass.
+    #[test]
+    fn an_empty_suite_says_so_rather_than_reporting_success() {
+        let out = report_tests(&[]);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stderr.contains("no tests"), "{}", out.stderr);
+        assert!(!out.stdout.contains("passed"), "must not read as a pass: {}", out.stdout);
+    }
+
+    #[test]
+    fn the_test_verb_runs_a_files_native_tests() {
+        let out = test_program_source(r#"test "adds two numbers" { expect 1 + 1 == 2 }"#);
+        assert_eq!(out.exit_code, 0, "{}{}", out.stdout, out.stderr);
+        assert!(out.stdout.contains("adds two numbers"), "{}", out.stdout);
+    }
+
+    #[test]
+    fn the_test_verb_fails_when_an_assertion_fails() {
+        let out = test_program_source(r#"test "wrong" { expect 1 + 1 == 999 }"#);
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stderr.contains("wrong"), "{}", out.stderr);
+    }
+
+    /// A parse failure is exit 2, not "no tests" — matching `run_program_source`.
+    /// Reporting an unparseable file as an empty suite would be a green run over
+    /// a file that was never read.
+    #[test]
+    fn the_test_verb_reports_a_parse_error_as_exit_two() {
+        let out = test_program_source("test \"unclosed\" {");
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stderr.contains("parse error"), "{}", out.stderr);
+    }
+
+    /// The verb ignores non-test declarations rather than running the program.
+    #[test]
+    fn the_test_verb_does_not_run_main() {
+        let out = test_program_source(
+            "main() = 1 / 0\n\
+             test \"t\" { expect 1 == 1 }",
+        );
+        assert_eq!(out.exit_code, 0, "main must not run:\n{}{}", out.stdout, out.stderr);
+        assert!(out.stdout.contains("1/1 passed"), "{}", out.stdout);
+    }
 
     #[test]
     fn the_repl_renders_a_scalar_result_inline() {

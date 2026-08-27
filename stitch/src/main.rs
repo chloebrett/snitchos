@@ -1,5 +1,6 @@
-//! The `stitch` CLI: `stitch <file.st>` runs a program; `stitch` with no args
-//! starts a REPL. All logic lives in `stitch::runner`; this is just wiring.
+//! The `stitch` CLI: `stitch <file.st>` runs a program, `stitch test <file.st>`
+//! runs that file's native `test` declarations, and `stitch` with no args starts
+//! a REPL. All logic lives in `stitch::runner`; this is just wiring.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use stitch::platform::{CapInfo, Platform};
-use stitch::runner::{Repl, run_module_files};
+use stitch::runner::{Repl, run_module_files, test_program_source};
 use stitch::telemetry::RecordingTelemetry;
 
 /// The host CLI's console backend: real stdout/stdin, so `print`/`readLine` work
@@ -58,10 +59,40 @@ impl Platform for StdPlatform {
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    match args.next() {
-        Some(path) => run_file(&path),
+    match args.next().as_deref() {
+        // `test` is a verb, not a path — a file literally named `test` is
+        // reachable as `./test`, which is the same convention every other CLI
+        // with a bare-word subcommand uses.
+        Some("test") => match args.next() {
+            Some(path) => test_file(&path),
+            None => {
+                eprintln!("usage: stitch test <file.st>");
+                ExitCode::from(2)
+            }
+        },
+        Some(path) => run_file(path),
         None => repl(),
     }
+}
+
+/// Run a `.st` file's `test` declarations and report them.
+///
+/// Single-module by design: the file is parsed as one program, exactly as the
+/// host gate in `stitch/tests/canon.rs` does it, so the two cannot disagree
+/// about whether a file's tests pass.
+fn test_file(path: &str) -> ExitCode {
+    let src = match std::fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(error) => {
+            eprintln!("error: cannot read `{path}`: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = test_program_source(&src);
+    print!("{}", result.stdout);
+    eprint!("{}", result.stderr);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, reason = "exit codes are 0-2")]
+    ExitCode::from(result.exit_code as u8)
 }
 
 /// Run a `.st` file as the entry module of a (possibly multi-file) program: its
