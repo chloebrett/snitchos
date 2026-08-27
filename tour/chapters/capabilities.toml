@@ -1,0 +1,54 @@
+slug = "capabilities"
+title = "Who is allowed to do what"
+workload = "init"
+body = "capabilities.mdx"
+
+# The moment the file server is handed the authority to *serve*: the endpoint
+# named `fs` arrives with RECV and MINT. Named by rights rather than by position,
+# because the same endpoint is delegated twice on this boot — once to the server
+# and once, as a bare SEND, to the client.
+[anchor]
+occurrence = 1
+
+[anchor.matches]
+frame = "cap_event"
+kind = "Transferred"
+name = "fs"
+rights = ["RECV", "MINT"]
+
+[[claims]]
+says = "the file server is handed the `fs` endpoint with the right to receive and to mint"
+
+[claims.frame]
+frame = "cap_event"
+kind = "Transferred"
+name = "fs"
+rights = ["RECV", "MINT"]
+
+[[claims]]
+says = "the client is handed the same endpoint with the right to send, and nothing else"
+
+[claims.frame]
+frame = "cap_event"
+kind = "Transferred"
+name = "fs"
+rights = ["SEND"]
+
+# The claim the chapter is really about, and the only shape that can express it:
+# an absence. There is no frame that says "the client cannot receive" — what can
+# be checked is that no frame ever grants it that.
+#
+# Worded to exactly what it checks. Rights match on equality, so this rules out
+# the specific mistake of handing one holder both ends; it is *not* the broader
+# "no mask containing RECV", which would need subset matching the predicate does
+# not have yet. A claim that says more than it verifies is the failure this whole
+# mechanism exists to prevent, so it says less.
+[[claims]]
+says = "that endpoint is never handed to anyone with send and receive together"
+present = false
+
+[claims.frame]
+frame = "cap_event"
+kind = "Transferred"
+name = "fs"
+rights = ["SEND", "RECV"]

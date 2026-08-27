@@ -1,0 +1,97 @@
+# Who is allowed to do what
+
+The machine beside this page has just booted. It is not a simulation of SnitchOS
+and it is not a recording — it is the kernel, compiled for RISC-V, running in your
+tab, stopped at one particular instruction because that is the moment this chapter
+is about.
+
+At that moment a file server has just been given permission to exist.
+
+## Nothing is ambient
+
+On most systems, a program can open a file because it is a program. The ability is
+in the air: inherited from the user who started it, mediated by a check performed
+somewhere else, at some later time, against a name the program supplied.
+
+SnitchOS has no such air to breathe. A process can do exactly what it *holds* —
+and it holds capabilities, which are unforgeable references to specific objects,
+each carrying a specific set of rights. There is no list of permissions to consult,
+because there is nothing to consult it about. If a process is not holding it, the
+question never arises.
+
+That turns "who is allowed to do what" from a policy question into a structural
+one. It has an answer, the answer is a shape, and the shape is on screen.
+
+## What `init` starts with
+
+`init` is the first userspace process, and it is born poor. Two capabilities: one
+to emit telemetry, one to open spans. That is the whole of its authority. It cannot
+read a file, because there is no filesystem yet and no way to reach one if there
+were.
+
+So it makes one. `init` asks the kernel for an IPC endpoint — a place where
+messages can be sent and received. This is worth pausing on: the kernel does not
+know what a filesystem is, and has no opinion about which process should provide
+one. It knows how to create an endpoint and how to carry a message across it. The
+topology — who serves, who calls, what the service *is* — is decided entirely in
+userspace, by a process that had to be given the ability to decide it.
+
+`init` now holds that endpoint with the right to **receive** on it and to **mint**
+new references to it. Holding both is what it means to own the thing.
+
+## The handover
+
+Then it gives that ownership away, and this is where the guest is stopped.
+
+`init` spawns the file server and hands it the endpoint carrying `RECV | MINT`.
+The server can now receive requests and mint per-file references to hand back to
+its callers. It is the owner of the endpoint in every sense that matters, because
+owning is not a status — it is a held capability with those two rights in it.
+
+Look at the derivation panel. The tree is not a diagram someone drew of how the
+system is meant to work. It is folded, live, from the capability events the kernel
+emitted while booting the machine you are looking at. Every edge is a real
+handover that really happened, a few million instructions ago.
+
+## The half that matters
+
+`init` also spawns a client, and hands it the *same* endpoint — with **send**, and
+nothing else.
+
+This is the sentence the whole chapter is built around. Two processes, one object,
+two different powers over it. The client can ask. It cannot serve. Not because
+something will check and refuse it later, but because the ability to receive is
+not among the things it is holding, and there is no way to acquire what you were
+not given.
+
+The asymmetry is not enforced by a rule. It is the same object, reached through
+two references that differ in what they permit — and that difference *is* the
+security property. Nothing checks it at request time because there is nothing left
+to check.
+
+## Why this page cannot lie to you
+
+Three things are asserted about the moment you are looking at:
+
+- the file server is handed the `fs` endpoint with the right to receive and to mint;
+- the client is handed the same endpoint with the right to send, and nothing else;
+- that endpoint is never handed to anyone with send and receive together.
+
+Those are not decorations on the prose. Each is a predicate over the kernel's own
+telemetry, checked against a real boot every time this project's test suite runs.
+If a change to the kernel made one of them false, the build would fail — and this
+page would not quietly go on saying it.
+
+Documentation that executes cannot rot. This is that idea applied to an operating
+system: the claims and the machine are checked against each other, and you are
+reading the ones that still hold.
+
+## One thing that is not yet true
+
+Honesty is the point of this project, so: `init` does not lose the endpoint when it
+delegates it. Delegation copies, so `init` still holds `RECV | MINT` on an endpoint
+it has handed to a server. Nothing depends on that today — `init`'s job after this
+moment is to wait for its children — but it means the delegation graph you are
+looking at is a record of what was *given*, not yet a proof of what is *retained*.
+
+Revocation exists in SnitchOS. Wiring it into this bootstrap does not, yet.

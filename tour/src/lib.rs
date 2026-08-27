@@ -2,15 +2,19 @@
 //!
 //! A chapter is **data**: the workload its guest boots, the anchor it replays to,
 //! and the claims its prose makes. This crate owns that schema and nothing else —
-//! no snemu, no MMIO, no I/O. It is host-tested and also linked into `snemu-wasm`,
-//! so the browser stops at the same frame the gate asserts at. A second definition
-//! of "the anchor" in TypeScript would be free to drift from this one.
+//! no snemu, no MMIO, no I/O beyond reading its own chapters. It is host-tested,
+//! and is meant to be linked by *both* drivers — the gate and (from step 8) the
+//! browser — so that they stop at the same frame. A second definition of "the
+//! anchor" in TypeScript would be free to drift from this one.
 //!
 //! See [`../../plans/tour-v1.md`](../../plans/tour-v1.md) for the design and the
 //! decisions behind it.
 
 pub mod anchor;
 pub mod search;
+
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anchor::{Anchor, FrameMatch};
 use serde::Deserialize;
@@ -24,6 +28,8 @@ pub struct Chapter {
     pub title: String,
     /// The `workload=` bootarg its guest boots.
     pub workload: String,
+    /// The prose, as a path relative to the chapters directory.
+    pub body: String,
     /// Where the guest stops — the world-state the prose describes.
     pub anchor: Anchor,
     /// What the prose asserts is true there. Empty is allowed: a chapter may
@@ -56,6 +62,32 @@ const fn yes() -> bool {
 }
 
 impl Chapter {
+    /// Every chapter declared under `dir`, in slug order.
+    ///
+    /// Slug order rather than directory order: a filesystem's iteration order is
+    /// not a promise, and the tour's chapter sequence must not depend on one.
+    ///
+    /// # Errors
+    /// [`LoadError`] naming the offending file — the gate's failure has to say
+    /// *which* chapter is wrong, or the message sends you looking through all of
+    /// them.
+    pub fn load_dir(dir: &Path) -> Result<Vec<Self>, LoadError> {
+        let entries = fs::read_dir(dir).map_err(|e| LoadError::at(dir, &e))?;
+
+        let mut chapters = Vec::new();
+        for entry in entries {
+            let path = entry.map_err(|e| LoadError::at(dir, &e))?.path();
+            if path.extension().is_none_or(|ext| ext != "toml") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).map_err(|e| LoadError::at(&path, &e))?;
+            chapters.push(Self::parse(&text).map_err(|e| LoadError::at(&path, &e))?);
+        }
+
+        chapters.sort_by(|a, b| a.slug.cmp(&b.slug));
+        Ok(chapters)
+    }
+
     /// Parse a chapter declaration, rejecting one the guest could not honour.
     pub fn parse(declaration: &str) -> Result<Self, ParseError> {
         let chapter: Self = toml::from_str(declaration).map_err(ParseError::Malformed)?;
@@ -67,6 +99,29 @@ impl Chapter {
         Ok(chapter)
     }
 }
+
+/// A chapter that could not be loaded, and where it lives.
+#[derive(Debug)]
+pub struct LoadError {
+    /// The file at fault.
+    pub path: PathBuf,
+    /// What was wrong with it.
+    pub cause: String,
+}
+
+impl LoadError {
+    fn at(path: &Path, cause: &dyn std::fmt::Display) -> Self {
+        Self { path: path.to_path_buf(), cause: cause.to_string() }
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path.display(), self.cause)
+    }
+}
+
+impl std::error::Error for LoadError {}
 
 /// Why a chapter declaration was rejected.
 #[derive(Debug)]
@@ -106,6 +161,7 @@ mod tests {
             slug = "capabilities"
             title = "Who is allowed to do what"
             workload = "{workload}"
+            body = "capabilities.mdx"
 
             [anchor]
             occurrence = 1
@@ -150,6 +206,7 @@ mod tests {
             slug = "capabilities"
             title = "Who is allowed to do what"
             workload = "init"
+            body = "capabilities.mdx"
 
             [anchor]
             occurrence = 1
@@ -211,6 +268,49 @@ mod tests {
 
         let [claim] = &chapter.claims[..] else { panic!("one claim") };
         assert!(claim.present, "an unqualified claim asserts presence, not absence");
+    }
+
+    /// **Every chapter in the repo parses, and its prose is where it says.**
+    ///
+    /// This is the tour's schema validation — the thing Astro's content collections
+    /// would have given us and that an SPA has to own. A chapter that does not parse
+    /// is one the site cannot render and the gate cannot check, and that failure
+    /// belongs in the fast suite rather than in a browser.
+    ///
+    /// The body check is a link check by another name: a manifest naming prose that
+    /// is not there renders an empty chapter, which looks like a styling bug and is
+    /// not one. This repo has broken exactly this kind of unbuilt reference on every
+    /// doc move it has ever done.
+    #[test]
+    fn every_chapter_in_the_repo_parses_and_its_prose_exists() {
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/chapters"));
+        let chapters = Chapter::load_dir(dir).expect("every chapter on disk parses");
+
+        assert!(!chapters.is_empty(), "the tour has at least one chapter");
+        for chapter in &chapters {
+            let body = dir.join(&chapter.body);
+            assert!(body.is_file(), "{} names prose at {body:?}, which is not there", chapter.slug);
+        }
+    }
+
+    /// **A chapter that will not load is named, and so is the reason.**
+    ///
+    /// The entire reason `LoadError` carries a path is that the gate's failure has
+    /// to say *which* chapter is wrong — "a chapter failed to load" sends you
+    /// reading all of them. A `Display` that rendered nothing would still compile,
+    /// still fail the build, and still be useless, which is why this asserts on the
+    /// message rather than merely on the error.
+    #[test]
+    fn a_chapter_that_will_not_load_is_named_in_the_error() {
+        let missing = std::path::Path::new("/no/such/tour/chapters");
+        let error = Chapter::load_dir(missing).expect_err("a missing directory cannot load");
+
+        let message = error.to_string();
+        assert!(message.contains("/no/such/tour/chapters"), "should name the path; got: {message}");
+        assert!(
+            message.len() > "/no/such/tour/chapters".len(),
+            "and should say what was wrong with it; got: {message}"
+        );
     }
 
     /// **A chapter cannot name a workload the kernel does not know.**
