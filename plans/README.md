@@ -18,7 +18,7 @@ the first is work in progress:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| [In flight](#in-flight) | 16 | Real work, partially done. Only ~9 have moved this month. |
+| [In flight](#in-flight) | 15 | Real work, partially done. Only ~9 have moved this month. |
 | [Not started](#not-started) | 7 | Written down, zero code. A plan is cheap; that's deliberate. |
 | [Done bar a detail](#done-bar-a-detail) | 1 | Delivered; something small or deliberate holds back the archive. |
 | [Reference, not plans](#reference-not-plans) | 5 | Living documents that will never "finish". |
@@ -29,10 +29,10 @@ Recently active — the board/network cluster is the current front:
 
 | Plan | What it is | State |
 |---|---|---|
-| [visionfive2-port.md](visionfive2-port.md) | The VF2 hardware port, M0–M4 | M0/M1/M2/M2.5 landed. **M3** (multi-hart on hardware) and **M4** (DTB-driven MMIO) open |
-| [uart-telemetry.md](uart-telemetry.md) | Frames off the board over a physical UART (M2) | Steps 0–4, 6, 8, 9 shipped. **Step 10a/10b** (collector `--serial`) is the critical path; 5b follows; step 7 deferred |
+| [visionfive2-port.md](visionfive2-port.md) | The VF2 hardware port, M0–M4 | M1 achieved on hardware; **M3 shipped** (B6 ✓, all four U74s). M0 bar the TFTP loop. **M2 is code-complete but board-unverified** (uart step 10b), **M2.5** waits on the GMAC, **M4** (B5, DTB-driven MMIO) deferred — `collect_mmio_regions` still parked |
+| [uart-telemetry.md](uart-telemetry.md) | Frames off the board over a physical UART (M2) | Steps 0–4, 6, 8, 9, **10a and 10b all landed and gate-green**. The critical path is now **one hardware run** to verify 10b — until it passes, B3/M2 are not done; 5b (interactive relay) follows; step 7 deferred |
 | [network-telemetry.md](network-telemetry.md) | Telemetry over UDP (M2.5) | PRs 1–7 shipped and gate-green. **PR 8 is the GMAC driver** — its own plan, below |
-| [board-bridge.md](board-bridge.md) | Letting an agent drive the real board | Not started; **starts where uart-telemetry step 10 finishes** |
+| [board-bridge.md](board-bridge.md) | Letting an agent drive the real board | Not started, but **unblocked 2026-08-25** — its prerequisite (uart step 10) has landed. Two phases: host bridge (steps 1–6b) then ESP32 transport (7–9) |
 | [kvetch-next-measurements.md](kvetch-next-measurements.md) | What the ladder's nats actually buy | 7 steps, none done. Answers the batch11 gap: a 0.43-nat gain showed **no** perceivable output difference |
 | [stitch-native-tests.md](stitch-native-tests.md) | `test "…" { expect … }` in Stitch | **8 of 9 done.** Increment 9 only: tests never run on target |
 | [glitch-v2-async-ring.md](glitch-v2-async-ring.md) | The async audio RT ring | Increments 1–5 shipped; **the XRun observable is armed and proven firing** (2026-08-25, inc 9's prerequisite). **6–9 remain** — mixing, init-delegated AudioSink, snemu PCM capture, the last two acceptance itests |
@@ -56,7 +56,7 @@ Written down, nothing built. Ordered roughly by what unblocks what:
 
 | Plan | What it is |
 |---|---|
-| [vf2-gmac-driver.md](vf2-gmac-driver.md) | The JH7110 GMAC driver — **the single item between network-telemetry and done** |
+| [vf2-gmac-driver.md](vf2-gmac-driver.md) | The JH7110 GMAC driver. The single *item* between network-telemetry and done, but **not a small one** — the plan calls it "the monster — weeks", bigger than the rest of the port combined. Phase 0 + steps 1–4 are sized; 5–7 are sketches pending Phase 0's measurements |
 | [board-image-opt-level.md](board-image-opt-level.md) | Debt #19: the board image's opt level |
 | [vf2-display.md](vf2-display.md) | JH7110 DC8200/HDMI — capture a vendor MMIO trace and replay it |
 | [corpus-mvp-spike.md](corpus-mvp-spike.md) | Increment 0 of corpus-mvp: a decision and four numbers, not code |
