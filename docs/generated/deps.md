@@ -60,6 +60,7 @@ graph LR
     kvetch_serve["kvetch-serve"]
     kvetch_vocab["kvetch-vocab"]
     synth["synth"]
+    tour["tour"]
     xtask_board["xtask-board"]
     xtask_cmds["xtask-cmds"]
     xtask_cram["xtask-cram"]
@@ -151,6 +152,9 @@ graph LR
     stitch --> fs_proto
     stitch --> kvetch_proto
     stitch --> snitchos_user
+    tour --> kernel_boot
+    tour --> protocol
+    tour --> snitchos_abi
     xtask --> kernel_boot
     xtask --> xtask_cmds
     xtask --> xtask_qemu

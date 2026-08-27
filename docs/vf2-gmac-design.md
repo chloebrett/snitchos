@@ -391,6 +391,92 @@ cheaper — symptom to *first* hypothesis, not the full list.
 
 ---
 
+## Rung −1: the probe workload, which runs before everything
+
+Everything above marked 🔍 is desk research. There is a cheap way to promote it to
+measured, and it should happen **before the board-bridge and before step 1**, because
+one of the things it reads is perishable.
+
+> **`workload=gmac-probe` — a read-only boot that dumps what the board is already
+> doing, and stops.** Additive in the existing `workload=` registry, so production
+> builds compile none of it. Output is telemetry `Frame`s over the M2 UART channel.
+
+### Why first: U-Boot's configuration is a read-once resource
+
+The board is delivered over **TFTP**. That means U-Boot brought a GMAC and a PHY up,
+negotiated a link, and moved megabytes over it, *seconds before `booti`* — on this
+exact board, with this exact PHY and cable. A working configuration is sitting in the
+register file when the kernel starts.
+
+The design note above guesses at four constants: the MDIO CSR clock-range divider, the
+`sys_syscon` `phy_intf_sel` value, the RGMII delay/`TX_INV` clock selection, and
+`GMAC_CONFIG`. **U-Boot has already written all four correctly.** Reading them is
+strictly better than deriving them, and it collapses three of the four "genuinely still
+open" questions into a register dump.
+
+That state does not survive step 5. The moment bring-up asserts a reset, the answer is
+gone. So the probe is not merely "nice diagnostics ahead of the work" — **it is the
+only opportunity to take the measurement at all**, and it is available now.
+
+(U-Boot may `eth_halt()` after the transfer, which stops the DMA engine. It does not
+wipe the clock tree, the syscon field, or the PHY's configuration — and it is the
+static configuration, not the running state, that is wanted.)
+
+### What one boot answers
+
+| Probe reads | Closes |
+|---|---|
+| Live DTB: `dma-noncoherent` on `soc`; `ethernet@1603/1604` nodes | Phase 0's coherency confirmation — the finding the whole estimate rests on |
+| **Which** MAC's registers are non-default | Which physical jack is which, *for free* — TFTP already proved one jack works end to end, so the configured node is that jack |
+| `GMAC_CONFIG`, MDIO CSR field, `sys_syscon +0x90`, the `TX_INV`/`GTXC` clock regs | Three of the four open questions, as measured values rather than derivations |
+| SYSCRG gate + reset-status bits for 97/98/102/106/107 and 66/67 | Whether U-Boot left GMAC1 ungated — and whether step 1's sequence has anything to do |
+| Whether the first MMIO read at `0x1604_0000` returns at all | The megapage question, and T0's hang risk, before any driver exists |
+| PHY reset GPIO state, if the DTB names one | The remaining open question |
+
+### Verify the instrument
+
+A probe is unreviewed code reading raw memory, and **a wrong base address reads
+plausible garbage rather than erroring**. Give it a known-constant oracle, the same
+trick T1 uses on the PHY OUI: the dwmac version register (expected `0x110`, *itself
+unverified*) reports `DWMAC_CORE_5_20 = 0x52` in bits `[7:0]` 🔍. If that byte reads
+`0x52`, the base and the offset are both right and every other number in the dump can
+be believed. If it does not, the dump is fiction — and resolving *that* ambiguity is
+the first thing the probe is for.
+
+### Constraints
+
+- **Read-only, with one deliberate exception.** No writes. The exception, if taken at
+  all, is an MDIO read — which is physically a *write* to `GMAC_MDIO_ADDR` — and it is
+  worth taking last, after the register dump is captured, because U-Boot's own working
+  MDIO divider makes it nearly free. Order it so a perturbing read cannot contaminate a
+  non-perturbing one.
+- **Breadcrumb before each read, not after.** The failure mode being guarded is a bus
+  hang on a gated peripheral, which produces no output at all. A breadcrumb on the
+  near side of each access is what localises the hang to one line.
+- **DTB walking is fine post-MMU** — the port already reads timebase from the board's
+  DTB. The pre-MMU hazard in CLAUDE.md does not apply here. This also exercises the
+  `collect_mmio_regions` path currently parked behind `#[expect(dead_code)]`.
+- **It does not need the board-bridge.** One human-attended boot. That decouples it
+  from the prerequisite chain entirely, which is why it can go first.
+
+### What it does not buy
+
+It retires **no** driver code and does not shrink steps 1–4, which are pure host logic.
+It cannot tell you whether the ring implementation is right. What it does is convert 🔍
+into measured, capture a perishable known-good reference, and de-risk T0's hang — for
+roughly a day. It is also a tracer bullet for the *development loop itself*: if
+`cargo xtask image` → TFTP → breadcrumbs-come-back does not work, that is much cheaper
+to discover now than at T0.
+
+### Afterwards
+
+Keep it. "What state is this board in?" is a question the display driver will ask next,
+and the board-bridge wants a liveness target that is cheaper than a full boot. Resist
+generalising it into a probe *framework* until there is a second consumer — the same
+threshold applied to AONCRG above.
+
+---
+
 ## Prerequisites, and what they do and don't buy
 
 **The board-agent bridge, both phases, first** — as the plan already argues, and the

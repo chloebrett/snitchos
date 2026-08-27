@@ -88,7 +88,21 @@ ask:
   cache-maintenance layer is in scope. Had it gone the other way this would be a
   different plan, because the U74 has no `Zicbom`.
 
-What remains is board-side, and each item is minutes not days:
+**The method for the board half is a probe workload, and it runs first** — before the
+board-bridge, before step 1. `workload=gmac-probe`: a read-only boot that dumps what
+U-Boot already configured and stops. See the design note's "Rung −1".
+
+The reason it goes first is that **U-Boot's configuration is perishable.** The board is
+delivered over TFTP, so U-Boot brought a GMAC and PHY up and moved megabytes over them
+seconds before `booti` — a working configuration for this exact board is sitting in the
+register file. It answers three of the four open questions below as *measured values*
+rather than derivations, and step 5's first reset destroys it. The measurement is
+available now and not later.
+
+It needs no bridge (one human-attended boot), so it is off the prerequisite chain
+entirely.
+
+What it must answer, and each item is minutes not days:
 
 - **Confirm `dma-noncoherent` is absent from the board's own live DTB**, not just from
   mainline. One grep. If present, stop and re-scope.
