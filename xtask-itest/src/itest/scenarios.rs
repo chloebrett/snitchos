@@ -4929,7 +4929,12 @@ pub fn kitsch_presents_a_scene(h: &mut View) -> Result<(), String> {
     // The scene is a 20x3 cell box at the origin, so 160x48 pixels. Sample the
     // double-line border: CP437 0xCD's top run sits on rows 4-5 of the glyph, and
     // 0xBA's verticals sit at columns 2-3 and 5-6 of an 8-wide cell.
-    let lit = |x: usize, y: usize| pixels[y * w + x] != 0 && pixels[y * w + x] != 0xff00_0000;
+    //
+    // `framebuffer_pixels` hands back `0x00RRGGBB` (minifb's format — the XRGB pad
+    // byte is zeroed), so compare against the scene's *colours* rather than merely
+    // "non-zero": that way a border drawn in the wrong colour fails too.
+    const INK: u32 = 0x00c0_c0c0;
+    let lit = |x: usize, y: usize| pixels[y * w + x] == INK;
 
     if !lit(8, 5) {
         return Err(
@@ -4980,6 +4985,32 @@ pub fn framebuffer_presents(h: &mut View) -> Result<(), String> {
 
     h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
         .ok_or("no heartbeat within 10s after the first present — kernel wedged in the DMA poll?")?;
+
+    // The counter above says `present()` *ran*; it does not say anything reached
+    // the glass. Every way of clearing to the wrong colour — or to nothing —
+    // still bumps it. So check the pixels: `present` clears to 0x202040.
+    //
+    // Note the capture convention: `framebuffer_pixels` hands back **`0x00RRGGBB`**
+    // (minifb's format — the XRGB pad byte is zeroed), not the `0xff`-padded word
+    // the kernel actually stored. Expecting the stored value fails with a
+    // confusingly plausible off-by-one-byte diff.
+    let (pixels, _w, _h) = h
+        .framebuffer_pixels()
+        .ok_or("no framebuffer captured — etc/ramfb was never configured")?;
+    let expected = 0x0020_2040;
+    if pixels[0] != expected {
+        return Err(format!(
+            "framebuffer pixel (0,0) is {:#010x}, expected {expected:#010x} — the present \
+             counter incremented but the clear did not land",
+            pixels[0]
+        ));
+    }
+    if let Some((i, px)) = pixels.iter().enumerate().find(|(_, px)| **px != expected) {
+        return Err(format!(
+            "framebuffer pixel {i} is {px:#010x}, expected {expected:#010x} — the clear \
+             covered only part of the screen"
+        ));
+    }
 
     Ok(())
 }

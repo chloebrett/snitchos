@@ -185,12 +185,19 @@ pub fn check_portable(p: &Probe) {
 }
 
 /// The host's `state_hash()` for this probe, pinned. Host-only by measurement, not
-/// by assumption: wasm32 produces `10084449359911607788` for byte-identical machine
-/// state, because the digest folds in `usize`-width lengths.
+/// by assumption: wasm32 produces a *different* value for byte-identical machine
+/// state, because the digest folds in `usize`-width lengths. That divergence is
+/// asserted as an inequality in `tests/wasm.rs`, so no wasm-side number is pinned
+/// here and none needs re-measuring when this moves.
 ///
 /// If a legitimate change to snemu's hashing or to `PROGRAM` moves it, re-pin it
 /// **from a host run**.
-pub const EXPECTED_STATE_HASH: u64 = 980_759_326_325_069_301;
+///
+/// Re-pinned 2026-08-28: `Bus::hash_state` began folding in the GMAC's transmitted
+/// frames. Frames that left the NIC are semantic device state not derivable from
+/// RAM, so two runs differing only in what was transmitted must hash differently or
+/// `--share-snapshots` would treat them as the same machine.
+pub const EXPECTED_STATE_HASH: u64 = 960_478_828_866_492_136;
 
 /// Three `DefaultHasher` results that isolate *why* a hash can differ between a
 /// 64-bit host and wasm32, rather than leaving it to inference:

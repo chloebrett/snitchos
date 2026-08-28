@@ -1,9 +1,10 @@
 # `kitsch` v1 — the desktop
 
-**Status (2026-08-27)**: 🚧 **INCREMENT 0 COMPLETE; increment 1 next.** All four
-numbers measured, and the mode change they prompted has **landed and is gate-green**
-(132/132 itests plain and `--scramble`, host gate 149 passed). No kitsch code yet.
-Design: [../docs/kitsch-design.md](../docs/kitsch-design.md).
+**Status (2026-08-28)**: 🚧 **INCREMENTS 0–4 DONE — first light.** `kitsch` draws a
+bordered, titled box on the framebuffer under snemu, **verified at the pixels**, with
+the display capability gating it and the refusal snitching. Increment 5 (the Stitch
+native bridge) is next. Gate-green throughout: **136/136 itests plain and
+`--scramble`**. Design: [../docs/kitsch-design.md](../docs/kitsch-design.md).
 
 **Scope of v1**: a keyboard-driven tiling desktop on real framebuffer pixels, with
 cell-mode surfaces, telemetry-derived window furniture, and three apps. Explicitly
@@ -438,6 +439,42 @@ for Present" while the refusal had plainly happened. `wait_for` **consumes** the
 frame stream, and the kernel snitches the refusal *before* the program can log that
 it saw one — so waiting for the program's span first scanned past the frame.
 Assertion order must match emission order, not narrative order.
+
+#### Asserting on telemetry was hiding two real bugs
+
+The scenario first passed while asserting only on frames. Asking "does it actually
+work on snemu?" and going to look at the **pixels** — via a new
+`View::framebuffer_pixels()`, the embryo of the design's scanout tap — turned up two
+defects immediately, and one is a genuine kernel bug.
+
+**1. `Present` returned success when there was no framebuffer.** `present_span`
+no-op'd if `ramfb::init` had never run, the syscall returned 0, and the program
+happily logged `kitsch.presented`. From inside the guest, *"the screen is blank" and
+"the screen is correct" were indistinguishable* — precisely the silent failure the
+refusal machinery exists to prevent. Fixed: `present_span` returns whether it
+presented, and the syscall refuses with a new `RefusalReason::DeviceNotReady`.
+(Off-screen coordinates still succeed: a clip is not a failure.)
+
+**2. snemu and QEMU disagreed about who gets a framebuffer.** QEMU keys off the
+scenario's `ramfb` **tag**; snemu keyed off the **workload string**
+(`workload == Some("ramfb")`, `xtask-snemu/src/snemu_diff.rs`). A scenario correctly
+tagged but on a differently-named workload got a framebuffer under QEMU and none
+under snemu — invisible, because of bug 1. Two sources of truth for one fact.
+Patched, with the hazard written into the code; **the real fix is deriving it from
+the catalog's tags**, which needs the flag threaded down to the loader.
+
+**`framebuffer-presents` had the same weakness** and is now strengthened: it asserted
+a counter, which every way of clearing to the wrong colour also increments. It now
+checks every pixel is the clear colour.
+
+**Capture convention, since it cost a confusing failure**: `framebuffer_pixels`
+returns **`0x00RRGGBB`** (minifb's format — the XRGB pad byte zeroed), not the
+`0xff`-padded word the kernel stored. Expecting the stored value fails with a
+plausible-looking off-by-one-byte diff.
+
+> **The general lesson**: a display test asserting only on telemetry proves the code
+> path ran, which is strictly weaker than the screen being right — every way of
+> presenting the *wrong* pixels also emits "presented".
 
 ### 4 (original scope) — First pixels
 

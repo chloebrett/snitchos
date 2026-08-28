@@ -319,6 +319,36 @@ point of taking the reading before writing more of the driver.
 all, so it is a free cross-check on the probe: if U-Boot's `md` says `0x52` and the
 probe says otherwise, the fault is ours, not the board's.
 
+### 4bb. Then try `workload=gmac-tx` — T3 and T4 for free, if you're lucky
+
+**Added 2026-08-28.** A second workload now exists: it programs the TX descriptor
+ring, hands the MAC a raw broadcast frame, then a real `kernel-net` UDP datagram, and
+reports whether the engine took each. Under snemu (against its GMAC model) both
+transmit; on the board this has never run.
+
+```
+setenv bootargs 'workload=gmac-tx'
+```
+
+**It does no clock, reset, or PHY bring-up.** That is the experiment: if the probe
+showed U-Boot left GMAC1 ungated and out of reset, the engine may simply work —
+handing you **T3** (the DMA engine moves) and possibly **T4** (bytes on the wire)
+without a line of bring-up code being written. If it doesn't, that is equally
+informative and costs one boot.
+
+| What you see | What it means |
+|---|---|
+| `engine transmitted the frame` **and** `… the udp datagram` | T3 passed on silicon. Run `tcpdump -i <iface> -XX` on the host during the boot for T4 — a broadcast frame with ethertype `0x88B5`, then a UDP datagram to `10.0.0.1:5001`. |
+| `engine returned the descriptor but reported failure` | The MAC took the descriptor and failed the fetch. Buffer PA wrong — `va_to_pa` on a non-`KERNEL_OFFSET` address is the first suspect, and the message says so. |
+| `engine never cleared OWN` | The engine is not running: clocks gated, reset asserted, `ST` unset, or the ring base never landed. Cross-check against the probe's dump from 4a. |
+| First frame transmits, datagram doesn't | Ring bookkeeping across two submissions, not frame contents. This exact bug existed in the snemu model and is why the second frame is asserted separately. |
+
+**Frames leaving the MAC is not the same as frames leaving the socket.** Without PHY
+bring-up the link may be down, in which case the engine happily consumes descriptors
+and nothing reaches the wire — so a clean `transmitted` with a silent `tcpdump` is the
+*expected* outcome if U-Boot left the PHY down, not a bug. That gap is T2's job, and
+T2 is still unwritten.
+
 ### 4c. Still manual — one question
 
 **Which physical RJ45 is GMAC1?** Plug one jack and see which PHY links, or read
