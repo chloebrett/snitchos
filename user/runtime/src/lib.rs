@@ -600,6 +600,27 @@ pub fn audio_write(sink: usize, samples: &[i16]) -> Result<(), Denied> {
     if ret == usize::MAX { Err(Denied) } else { Ok(()) }
 }
 
+/// Largest pixel run one [`present`] carries. A pixel is 4 bytes against the
+/// 256-byte per-syscall copy cap, so a longer damage span is presented in
+/// several calls — which is why `kitsch` presents *spans*, not frames.
+pub const PRESENT_MAX: usize = 64;
+
+/// Present one horizontal run of XRGB8888 pixels at `(x, y)` through a
+/// `DisplaySink` capability. Refused unless the caller holds `DISPLAY` over a
+/// `DisplaySink`; a run longer than [`PRESENT_MAX`] is refused as a bad range.
+///
+/// The kernel **copies** the pixels — a client buffer is never scanned out
+/// directly, which is what keeps compositor effects undefeatable.
+pub fn present(sink: usize, x: usize, y: usize, run: &[u32]) -> Result<(), Denied> {
+    // SAFETY: `ecall`; the kernel validates the `DisplaySink` cap at a0 and the
+    // `(ptr, count)` range, copies the pixels out (never dereferencing the pointer
+    // in U-mode), and returns 0 in a0 — `usize::MAX` if refused.
+    let ret = unsafe {
+        ecall(Syscall::Present, [sink, run.as_ptr() as usize, run.len(), x, y, 0, 0])
+    }[0];
+    if ret == usize::MAX { Err(Denied) } else { Ok(()) }
+}
+
 /// Largest sample batch one [`audio_enqueue`] carries — the same per-syscall copy cap
 /// as [`AUDIO_WRITE_MAX`].
 pub const AUDIO_ENQUEUE_MAX: usize = AUDIO_WRITE_MAX;

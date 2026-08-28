@@ -738,6 +738,7 @@ version = "0.0.1"
 dependencies = [
  "fs-proto",
  "hitch",
+ "kitsch-render",
  "snitchos-std",
  "snitchos-user",
  "stitch",

@@ -27,6 +27,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("user_hog", "SNITCHOS_USER_HOG_ELF"),
     ("syscall_hog", "SNITCHOS_SYSCALL_HOG_ELF"),
     ("console_echo", "SNITCHOS_CONSOLE_ECHO_ELF"),
+    ("kitsch_static", "SNITCHOS_KITSCH_STATIC_ELF"),
     ("stitch_repl", "SNITCHOS_STITCH_REPL_ELF"),
     ("probe", "SNITCHOS_PROBE_ELF"),
     ("spawner", "SNITCHOS_SPAWNER_ELF"),

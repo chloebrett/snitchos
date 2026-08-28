@@ -348,6 +348,7 @@ catalog! {
     // `framebuffer-presents` gets its own workload so it never shares a boot
     // with a non-ramfb scenario under `--shared`.
     wfi "framebuffer-presents"            scenarios::framebuffer_presents           [display, ramfb] {"ramfb"};
+    wfi "kitsch-presents-a-scene"         scenarios::kitsch_presents_a_scene         [display, ramfb, kitsch] {"kitsch-static"};
     wfi "framebuffer-absent-degrades-gracefully" scenarios::framebuffer_absent_degrades_gracefully [display];
     wfi "gmac-probe-identifies-the-core"  scenarios::gmac_probe_identifies_the_core  [gmac]          {"gmac-probe"};
     wfi "gmac-tx-transmits-a-frame"       scenarios::gmac_tx_transmits_a_frame       [gmac]          {"gmac-tx"};

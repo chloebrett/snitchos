@@ -70,6 +70,10 @@ pub static SYSCALL_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SYSCALL_HOG_EL
 /// The `workload=console-echo` program: loops `ConsoleRead` → `DebugWrite`,
 /// echoing typed UART input — the Tier-0 polled-console-input demo.
 pub static CONSOLE_ECHO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_CONSOLE_ECHO_ELF"));
+
+/// `workload=kitsch-static`: `kitsch` first light — composes a fixed scene and
+/// presents it through a `DisplaySink` cap.
+pub static KITSCH_STATIC_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KITSCH_STATIC_ELF"));
 pub static STITCH_REPL_ELF: &[u8] = include_bytes!(env!("SNITCHOS_STITCH_REPL_ELF"));
 
 /// The `workload=probe` program: registers its own metric (`snitchos.probe.custom`)
@@ -351,6 +355,12 @@ enum Launch {
     /// the DAC. The `AudioSink` lands at cap-table slot 3 (`delegated_handle(1)`),
     /// right after the endpoint (slot 2), which is what `glitch::serve` reads.
     IpcAudio { rights_bits: u32 },
+    /// Ambient authorities plus a `DisplaySink` cap — `kitsch`'s launch. No
+    /// endpoint: the compositor's clients reach it over IPC *it* creates, and
+    /// giving it one here would hand it authority it should mint for itself.
+    /// The `DisplaySink` lands at cap-table slot 2 (`delegated_handle(0)`),
+    /// right after the two bootstrap caps.
+    Display,
 }
 
 /// A userspace program: its embedded ELF plus how to launch it. One `'static`
@@ -401,6 +411,10 @@ pub static SYSCALL_HOG: ProgramSpec = ProgramSpec { elf: SYSCALL_HOG_ELF, launch
 /// `workload=console-echo`: the Tier-0 console echo loop (ambient — `ConsoleRead`
 /// and `DebugWrite` need no caps).
 pub static CONSOLE_ECHO: ProgramSpec = ProgramSpec { elf: CONSOLE_ECHO_ELF, launch: Launch::Plain };
+
+/// `workload=kitsch-static`: the only program launched with a `DisplaySink`.
+pub static KITSCH_STATIC: ProgramSpec =
+    ProgramSpec { elf: KITSCH_STATIC_ELF, launch: Launch::Display };
 
 /// `workload=stitch-repl`: the Stitch interpreter as a userspace REPL. Ambient —
 /// `ConsoleRead`/`ConsoleWrite` need no caps.
@@ -608,6 +622,18 @@ pub extern "C" fn program_entry() -> ! {
             let rights = Rights::from_bits(*rights_bits);
             run_ipc(spec.elf, ep, rights, true)
         }
+        Launch::Display => run_with_caps(
+            spec.elf,
+            alloc::vec![(
+                kernel_proc::cap::Capability {
+                    object: kernel_proc::cap::Object::DisplaySink,
+                    rights: Rights::DISPLAY,
+                },
+                // A kernel-minted root grant — the ur-source of the scanout's
+                // derivation tree, so it has no parent holding to name.
+                0,
+            )],
+        ),
     }
 }
 
@@ -764,6 +790,14 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::Userspace, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "user_main", program: &HELLO, priority: Priority::Normal }],
+    }),
+    (WorkloadKind::KitschStatic, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn {
+            name: "kitsch_static",
+            program: &KITSCH_STATIC,
+            priority: Priority::Normal,
+        }],
     }),
     (WorkloadKind::UserspaceBadPtr, UserLayout {
         needs_endpoint: false,

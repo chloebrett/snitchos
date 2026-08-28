@@ -66,6 +66,7 @@ const NAMED_RIGHTS: &[(&str, u32)] = &[
     ("WAIT", snitchos_abi::rights::WAIT),
     ("KILL", snitchos_abi::rights::KILL),
     ("AUDIO", snitchos_abi::rights::AUDIO),
+    ("DISPLAY", snitchos_abi::rights::DISPLAY),
 ];
 
 /// The rights mask named by `names`, e.g. `["RECV", "MINT"]`.

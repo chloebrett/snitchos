@@ -4886,6 +4886,41 @@ pub fn shell_view_command_revokes_cap(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `kitsch` first light (`workload=kitsch-static`): a userspace program holding a
+/// `DisplaySink` cap composes a scene through `kitsch-render`, rasterizes it with
+/// the IBM VGA 8x16 font, and presents it through the cap-gated `Present`
+/// syscall. Asserts the whole chain reached the glass, then that the *same* call
+/// with a handle the process does not hold is refused.
+///
+/// The refusal half is the point as much as the success half: a display syscall
+/// that silently did nothing would look identical to one that worked, from
+/// anywhere except the screen.
+pub fn kitsch_presents_a_scene(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("kitsch.first_light"))
+        .ok_or("kitsch_static never reached U-mode within 30s")?;
+
+    h.wait_for(SEC * 30, is_span_start_named("kitsch.presented")).ok_or(
+        "no 'kitsch.presented' span within 30s — the DisplaySink grant, the Present \
+         syscall, or the rasterizer failed before the scene reached the framebuffer",
+    )?;
+
+    // Order matters: `wait_for` consumes the stream, and the kernel snitches the
+    // refusal *before* the program can log that it saw one. Waiting for the span
+    // first would scan past the frame and report it missing.
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(f, OwnedFrame::SyscallRefused { syscall, .. }
+            if *syscall == snitchos_abi::Syscall::Present as u8)
+    })
+    .ok_or("no SyscallRefused frame for Present — the refusal happened but never snitched")?;
+
+    h.wait_for(SEC * 30, is_span_start_named("kitsch.unheld_handle_refused")).ok_or(
+        "no 'kitsch.unheld_handle_refused' span within 30s — presenting through a handle \
+         the process does not hold was ACCEPTED, so the display cap gates nothing",
+    )?;
+
+    Ok(())
+}
+
 /// Framebuffer Milestone 0: booted with `-device ramfb` (the `ramfb` tag —
 /// see `Boot::spawn`), the kernel finds `etc/ramfb`, brings up the
 /// framebuffer, and presents (clears to a color) once per heartbeat.

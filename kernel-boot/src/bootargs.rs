@@ -214,6 +214,14 @@ workloads! {
         /// `Kill` and is refused (`SyscallRefused{Kill}`) — proving the kill authorization
         /// is real, not ambient. It survives the refusal and reports it.
         KillNoCap,
+        /// `kitsch` first light: a userspace program holding a `DisplaySink` cap
+        /// composes a fixed scene through `kitsch-render`, rasterizes it with the
+        /// IBM VGA 8x16 font, and presents it a damage span at a time through the
+        /// `Present` syscall. Static — no clients, no input, no layout — because
+        /// its whole job is proving the chain end to end: font → compose →
+        /// rasterize → cap-gated present → glass. See `plans/kitsch-v1.md`
+        /// increment 4.
+        KitschStatic,
         /// The completion endpoint served by a model with **no weights**: a
         /// `kvetch` server backed by `babble` (rung 0 of the generative ladder)
         /// plus a client asking for one completion of a fixed prefix. Proves
@@ -548,6 +556,47 @@ pub fn console_mode(bootargs: &str) -> ConsoleMode {
         })
 }
 
+/// Whether telemetry may go out the UART, given what the console is doing with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UartTelemetry {
+    /// Install the sink. Every byte on the wire is a frame, so the stream decodes.
+    Install,
+    /// Refuse. `text` mode would put `println!` output and COBS frames on the same
+    /// wire, where they interleave and destroy each other.
+    RefusedTextMode,
+}
+
+/// Whether to install the UART telemetry sink, given the console mode.
+///
+/// On real hardware the UART is the **only** transport — a VisionFive 2 has
+/// neither virtio-console nor virtio-net — so telemetry frames and the human log
+/// contend for one wire. In `text` mode they interleave mid-line and corrupt each
+/// other. Measured on the board, 2026-08-27:
+///
+/// ```text
+/// ph��:� postr-eilpeaise
+/// ```
+///
+/// (One line of it — the rest is in `notes/board-session-2026-08-27.md`,
+/// transcribed there with the tabs the real output contained.)
+///
+/// That is the worst of the three possible outcomes: the human loses the boot log
+/// *and* the collector cannot decode. So the combination is refused, and the
+/// caller says so — a silent choice here is what produced the mush above.
+///
+/// **Text is the default, so refusing is the default.** Deliberate: bring-up is
+/// when the raw log is the only working channel, and precisely when you cannot
+/// afford to lose it to binary. `console=frames` is the opt-in, and in that mode
+/// `println!` is itself a `Frame::Log` — see `docs/uart-telemetry-design.md`
+/// Decision 4, *"one UART, and the human log becomes frames."*
+#[must_use]
+pub const fn uart_telemetry(mode: ConsoleMode) -> UartTelemetry {
+    match mode {
+        ConsoleMode::Frames => UartTelemetry::Install,
+        ConsoleMode::Text => UartTelemetry::RefusedTextMode,
+    }
+}
+
 /// Parse a `workload=<name>` selection out of the bootargs string, where `<name>`
 /// is the kebab-case of a [`WorkloadKind`] variant.
 ///
@@ -805,6 +854,11 @@ mod tests {
     }
 
     #[test]
+    fn selects_kitsch_static() {
+        assert_eq!(select("workload=kitsch-static"), Some(WorkloadKind::KitschStatic));
+    }
+
+    #[test]
     fn selects_glitch_beep() {
         assert_eq!(select("workload=glitch-beep"), Some(WorkloadKind::GlitchBeep));
     }
@@ -1019,6 +1073,47 @@ mod tests {
     #[test]
     fn console_mode_parses_frames() {
         assert_eq!(console_mode("console=frames"), ConsoleMode::Frames);
+    }
+
+    /// On hardware the UART is the *only* transport, so telemetry frames and
+    /// `println!` text go out the same wire. In `text` mode they interleave
+    /// mid-line and corrupt each other — measured on the board 2026-08-27:
+    ///
+    /// ```text
+    /// ph��:� postr-eilpeaise
+    /// ```
+    ///
+    /// (One line of it — the rest is in `notes/board-session-2026-08-27.md`,
+    /// transcribed there with the tabs the real output contained.)
+    ///
+    /// Neither channel survives, which is the worst of the three outcomes: the
+    /// human loses the boot log *and* the collector cannot decode. So the
+    /// combination is refused rather than accepted.
+    #[test]
+    fn text_mode_refuses_uart_telemetry_rather_than_corrupting_both() {
+        assert_eq!(uart_telemetry(ConsoleMode::Text), UartTelemetry::RefusedTextMode);
+    }
+
+    /// In `frames` mode `println!` is itself a `Frame::Log`, so every byte on the
+    /// wire is a frame and the stream decodes cleanly. This is the combination
+    /// the design note's Decision 4 describes.
+    #[test]
+    fn frames_mode_installs_the_uart_sink() {
+        assert_eq!(uart_telemetry(ConsoleMode::Frames), UartTelemetry::Install);
+    }
+
+    /// The default boot has no `console=`, so it lands in `text` — and therefore
+    /// refuses. **That is deliberate**: bring-up is when the raw human log is the
+    /// only thing that works, and it is exactly when you cannot afford to lose it
+    /// to binary. Telemetry is the thing you opt into, having read the line that
+    /// says how.
+    #[test]
+    fn the_default_boot_keeps_the_human_log() {
+        assert_eq!(uart_telemetry(console_mode("")), UartTelemetry::RefusedTextMode);
+        assert_eq!(
+            uart_telemetry(console_mode("workload=stitch-repl")),
+            UartTelemetry::RefusedTextMode
+        );
     }
 
     #[test]

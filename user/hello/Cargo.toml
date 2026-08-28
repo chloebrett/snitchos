@@ -17,6 +17,9 @@ publish = false
 # API all come from the shared `snitchos-user` runtime.
 [dependencies]
 snitchos-user = { path = "../runtime" }
+# The native half of the desktop — compose a scene into a cell grid and
+# rasterize it. Only the `kitsch_static` bin links it.
+kitsch-render = { path = "../../kitsch-render" }
 # The value model — `#[entry(in, out, uses)]` emits a `hitch`-encoded manifest
 # into a `.snitch.iface` ELF note (the `manifest_demo` bin).
 hitch = { path = "../../hitch" }

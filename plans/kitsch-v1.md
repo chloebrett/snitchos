@@ -414,14 +414,32 @@ failed until the boundary moved. While there, `object_kind_discriminants_are_sta
 was extended to cover 6 and 7 — it stopped at 5, so `AUDIO_SINK` had never been
 pinned by the test whose entire job is pinning that order.
 
-**Remaining — the acceptance itest**: a holder presents, a non-holder is refused, and
-the refusal snitches. It needs a spawnable program plus a workload, which is exactly
-the plumbing increment 4 builds, so it lands there rather than being duplicated.
+**Acceptance landed with increment 4** — `kitsch-presents-a-scene` asserts both
+halves in one boot: the holder presents, and the same call through a handle the
+process does not hold is refused *and* snitches a `SyscallRefused{Present}`.
 
-**Done when**: a process holding the display cap can present; one lacking it is
-refused, and the refusal snitches.
+### 4 — First pixels ✅ **DONE (2026-08-28)** — *first light*
 
-### 4 — First pixels
+`workload=kitsch-static`: a userspace program holding a `DisplaySink` composes a
+bordered, titled box from CP437 box-drawing glyphs, rasterizes it with the IBM VGA
+8x16 font, and presents it through the cap-gated `Present` syscall. **The whole
+chain — font → compose → rasterize → cap gate → framebuffer — is proven end to
+end.** 136/136 itests plain **and** `--scramble`.
+
+Wiring, for the next person adding a workload: `WorkloadKind::KitschStatic`
+(**declared in sorted order** — the file's own test reads its source to check, and
+my first placement was wrong), a `kmain` match arm (**a variant without one breaks
+everyone's kernel build**, and the host gate does not catch it), `Launch::Display`
+granting the cap at `delegated_handle(0)`, a `build.rs` program-table row, a
+`ProgramSpec`, a `LAYOUTS` entry, and `snitchos_user::present`.
+
+**A scenario bug worth remembering**: the first run failed on "no `SyscallRefused`
+for Present" while the refusal had plainly happened. `wait_for` **consumes** the
+frame stream, and the kernel snitches the refusal *before* the program can log that
+it saw one — so waiting for the program's span first scanned past the frame.
+Assertion order must match emission order, not narrative order.
+
+### 4 (original scope) — First pixels
 
 A Rust workload composes a static scene through `kitsch-render` and presents it. No
 Stitch, no clients, no protocol. Proves font + compose + rasterize + display cap end
