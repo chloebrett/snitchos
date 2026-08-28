@@ -298,14 +298,40 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
                         tracing::open_stream(timebase_hz as u32);
                         println!("virtio-console: ready");
                     }
-                    // No virtio transport — real hardware. Telemetry goes out the
-                    // UART's TX ring, sharing the wire with the human log; the
-                    // host separates them (`collector --serial`, `board exec`).
-                    // Without this the kernel encodes frames into nothing.
+                    // No virtio transport — real hardware. The UART's TX ring is
+                    // the only place telemetry can go, and the human log is
+                    // already using it. Whether both can share it depends
+                    // entirely on the console mode, so ask before installing:
+                    // in `text` they interleave mid-line and destroy each other
+                    // (measured on the board 2026-08-27), which loses the boot
+                    // log *and* the frame stream.
                     Err(e) => {
-                        println!("virtio-console: init failed: {:?} — telemetry over UART", e);
-                        tracing::init_uart_sink();
-                        tracing::open_stream(timebase_hz as u32);
+                        println!("virtio-console: init failed: {:?}", e);
+                        // Parsed from the DTB here rather than read from
+                        // `console::console_mode()`: `set_console_mode` runs much
+                        // later in this function, so the global is still at its
+                        // default. Hoisting that call instead would be worse — it
+                        // would turn every `println!` between there and here into
+                        // a `Frame::Log` before any sink exists to receive it,
+                        // silently losing the early boot log in `frames` mode.
+                        let mode = kernel_boot::bootargs::console_mode(
+                            dtb.chosen().bootargs().unwrap_or(""),
+                        );
+                        match kernel_boot::bootargs::uart_telemetry(mode) {
+                            kernel_boot::bootargs::UartTelemetry::Install => {
+                                tracing::init_uart_sink();
+                                tracing::open_stream(timebase_hz as u32);
+                                println!("telemetry: frames over UART");
+                            }
+                            // Say what was refused and how to get it. A silent
+                            // choice here is what produced the corrupted wire.
+                            kernel_boot::bootargs::UartTelemetry::RefusedTextMode => {
+                                println!(
+                                    "telemetry: OFF — console=text keeps this UART human-readable. \
+                                     Boot with `console=frames` to stream frames instead."
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -606,6 +632,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::Fs
             | WorkloadKind::GlitchBeep
             | WorkloadKind::GlitchStarve
+            | WorkloadKind::KitschStatic
             | WorkloadKind::ViewDemo
             | WorkloadKind::Shell
             | WorkloadKind::FrameOom

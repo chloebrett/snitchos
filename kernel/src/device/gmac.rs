@@ -263,6 +263,87 @@ pub struct Reclaimed {
     pub failed: usize,
 }
 
+/// Build one real UDP datagram with `kernel-net` and push it through the
+/// [`NetDevice`] impl — the production path, not a hand-built frame.
+///
+/// Deliberately **after** the raw-frame submission above rather than instead of it.
+/// The raw frame asks "did the engine take a descriptor"; this asks "does the whole
+/// stack produce something the engine takes". Merging them would give a single
+/// failure three layers of suspects, which is the exact mistake the ladder exists to
+/// avoid.
+///
+/// [`NetDevice`]: kernel_net::NetDevice
+fn send_one_datagram() {
+    use kernel_net::NetDevice;
+
+    // A self-contained config: broadcast destination so nothing needs ARP, and a
+    // locally-administered source MAC. The real `net=` path takes these from the
+    // bootarg; this workload is a transmit smoke, not a configuration test.
+    let config = kernel_net::NetConfig {
+        src_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        src_ip: [10, 0, 0, 2],
+        dst_mac: [0xFF; 6],
+        dst_ip: [10, 0, 0, 1],
+        src_port: 5001,
+        dst_port: 5001,
+    };
+    let mut buf = [0u8; 128];
+    let datagram = match kernel_net::build_udp_datagram(&config, b"gmac-tx probe", &mut buf) {
+        Ok(d) => d,
+        Err(_) => {
+            crate::tracing::emit_log("gmac-tx: datagram did not fit its buffer");
+            return;
+        }
+    };
+    let len = datagram.len();
+    match Gmac.send(datagram) {
+        Ok(()) => crate::tracing::emit_log(&alloc::format!(
+            "gmac-tx: submitted a {len}-byte udp datagram"
+        )),
+        Err(_) => crate::tracing::emit_log("gmac-tx: ring full for the udp datagram"),
+    }
+
+    let result = reclaim_until_idle();
+    if result.freed > 0 && result.failed == 0 {
+        crate::tracing::emit_log("gmac-tx: engine transmitted the udp datagram");
+    } else {
+        crate::tracing::emit_log("gmac-tx: udp datagram was not transmitted");
+    }
+}
+
+/// Poll [`reclaim`] until it frees something or the bound runs out. Bounded for the
+/// same reason MDIO's poll is: an engine that never answers must say so.
+fn reclaim_until_idle() -> Reclaimed {
+    let mut result = Reclaimed::default();
+    for _ in 0..100_000u32 {
+        result = reclaim();
+        if result.freed > 0 {
+            break;
+        }
+    }
+    result
+}
+
+/// Bridges the UDP batcher to this driver. Unlike `virtio_net`'s `send`, which
+/// spins to completion and so can report `Ok` unconditionally, a descriptor ring
+/// genuinely runs out of slots — so [`TxFull`] here is real back-pressure, not a
+/// formality. The caller drops the frame and counts it, which is the right trade for
+/// fire-and-forget telemetry: blocking the emitter to save one frame would be worse
+/// than losing it.
+///
+/// [`TxFull`]: kernel_net::TxFull
+pub struct Gmac;
+
+impl kernel_net::NetDevice for Gmac {
+    fn send(&mut self, frame: &[u8]) -> Result<(), kernel_net::TxFull> {
+        // Reclaim first: without it the ring fills after `TX_SLOTS - 1` frames and
+        // never drains, because nothing else polls. Cheap — it stops at the first
+        // descriptor the device still owns.
+        reclaim();
+        transmit(frame).map_err(|_| kernel_net::TxFull)
+    }
+}
+
 /// `workload=gmac-tx`: program the ring, hand the MAC one frame, report whether the
 /// engine took it. T3 and T4 of the design note's ladder — against snemu's model at
 /// the desk, against silicon on the board.
@@ -298,6 +379,7 @@ pub fn tx_smoke() {
 
     if result.freed > 0 && result.failed == 0 {
         crate::tracing::emit_log("gmac-tx: engine transmitted the frame");
+        send_one_datagram();
     } else if result.failed > 0 {
         crate::tracing::emit_log("gmac-tx: engine returned the descriptor but reported failure");
     } else {

@@ -192,6 +192,13 @@ appears in the board DTS. What exists instead is the `sys_syscon` PHY-mode field
 selection — both of which belong to step 1. Confirm against the board's own DTB, then
 **retire this step with a note rather than inventing work for it.**
 
+**Costs no board time.** The confirmation is a grep of the board's live DTB for a
+`gmac`/`ethernet` pinctrl group, and that DTB is already on the "what to capture"
+list in [../docs/next-board-session.md](../docs/next-board-session.md) — so this
+resolves at the desk afterwards, not during the session. Left open rather than
+retired now because the desk evidence is mainline's DTS, and the board's own tree is
+the authority; `workload=gmac-probe` reports the ethernet *nodes* but not pinctrl.
+
 **RED/GREEN/MUTATE/KILL/REFACTOR**: as step 1.
 **Done when**: the sequence matches the DTS, or the step is retired with a note.
 
@@ -248,6 +255,34 @@ time out — it must assert the error value).
 **REFACTOR**: assess.
 **Done when**: sequences and the timeout path pass, mutation reviewed, gate green,
 approved.
+
+---
+
+### Step 4b: `NetDevice` for the GMAC — closing the vertical slice
+
+**Not in the original plan; added 2026-08-28** once snemu's GMAC model made it
+testable. Everything below the `NetDevice` trait now exists (ring, descriptor, MDIO,
+glue); everything above it shipped in PRs 1–7. This is the one line that joins them,
+and it is what makes `net=` reach the wire.
+
+**Acceptance criteria**: `impl NetDevice for Gmac` over [`transmit`], and a workload
+that routes a real telemetry `Frame` through `UdpFrameSink` → `kernel-net` →
+descriptor ring → device.
+
+**The interesting half is snemu, not the kernel.** Under snemu the harness observes
+telemetry on the *virtio-console*; if telemetry instead leaves via the GMAC, the
+harness goes blind — which is exactly what happens on the board, and exactly why
+`virtio_net` already has `NET_HEADER_STRIP` feeding snemu's telemetry decoder. The
+GMAC model should do the same: strip Ethernet/IP/UDP headers off each transmitted
+frame and hand the payload to the same decoder.
+
+**That converts T5 into a desk rung.** With it, "a decodable telemetry datagram left
+the NIC" is assertable off-hardware, leaving T5 on the board as a confirmation rather
+than a discovery. Sequenced after T4's model work for the same reason as everything
+else here: build the model only once the thing it models exists.
+
+**Still board-only afterwards**: T1/T2 (PHY identity and link — snemu models no PHY),
+and the RGMII/clock fidelity questions the model cannot answer by construction.
 
 ---
 
