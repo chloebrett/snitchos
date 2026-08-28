@@ -78,6 +78,14 @@ pub(super) fn handle_present(frame: &mut TrapFrame) {
         *px = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
 
-    crate::ramfb::present_span(frame.a3 as usize, frame.a4 as usize, &run[..count]);
+    // A present that reached no framebuffer must be refused, not reported as
+    // success: otherwise "the screen is blank" and "the screen is correct" are
+    // indistinguishable from inside the guest — the exact silent failure this
+    // kernel's refusal machinery exists to prevent. Caught by asserting on
+    // pixels rather than on telemetry; see `plans/kitsch-v1.md` increment 4.
+    if !crate::ramfb::present_span(frame.a3 as usize, frame.a4 as usize, &run[..count]) {
+        super::refuse(frame, sc, RefusalReason::DeviceNotReady);
+        return;
+    }
     frame.a0 = 0;
 }

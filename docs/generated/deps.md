@@ -54,6 +54,7 @@ graph LR
     glitch_core["glitch-core"]
     glitch_proto["glitch-proto"]
     kernel_net["kernel-net"]
+    kitsch_render["kitsch-render"]
     kvetch["kvetch"]
     kvetch_model["kvetch-model"]
     kvetch_proto["kvetch-proto"]
@@ -99,6 +100,7 @@ graph LR
     glitch_proto --> snitchos_abi
     hello --> fs_proto
     hello --> hitch
+    hello --> kitsch_render
     hello --> snitchos_std
     hello --> snitchos_user
     hello --> stitch
@@ -121,6 +123,7 @@ graph LR
     kernel_proc --> kernel_mem
     kernel_proc --> protocol
     kernel_proc --> snitchos_abi
+    kitsch_render --> kernel_devices
     kvetch --> babble
     kvetch --> kvetch_model
     kvetch --> kvetch_proto

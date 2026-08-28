@@ -403,6 +403,16 @@ pub enum RefusalReason {
   /// duplicate a single-use authority (reborn Persistent in the child), so the
   /// kernel refuses the whole delegation rather than silently widening it.
   CapNotDelegable,
+  /// The syscall's device is not initialised, so the request could not be
+  /// carried out — `Present` on a machine booted without `-device ramfb`, where
+  /// `ramfb::init` found no `etc/ramfb`.
+  ///
+  /// Exists because the alternative is worse: returning success for a present
+  /// that reached no framebuffer makes "the screen is blank" and "the screen is
+  /// correct" indistinguishable from inside the guest, which is exactly the
+  /// silent failure the refusal machinery is for. (Appended — postcard is
+  /// positional.)
+  DeviceNotReady,
 }
 
 #[cfg(test)]

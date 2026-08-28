@@ -4918,6 +4918,43 @@ pub fn kitsch_presents_a_scene(h: &mut View) -> Result<(), String> {
          the process does not hold was ACCEPTED, so the display cap gates nothing",
     )?;
 
+    // Now look at the glass. Everything above proves the code path ran; every way
+    // of presenting the *wrong* pixels also emits "presented", so the telemetry is
+    // a strictly weaker claim than the screen being right.
+    let (pixels, width, _height) = h
+        .framebuffer_pixels()
+        .ok_or("no framebuffer captured — the guest never handed etc/ramfb a config")?;
+    let w = width as usize;
+
+    // The scene is a 20x3 cell box at the origin, so 160x48 pixels. Sample the
+    // double-line border: CP437 0xCD's top run sits on rows 4-5 of the glyph, and
+    // 0xBA's verticals sit at columns 2-3 and 5-6 of an 8-wide cell.
+    let lit = |x: usize, y: usize| pixels[y * w + x] != 0 && pixels[y * w + x] != 0xff00_0000;
+
+    if !lit(8, 5) {
+        return Err(
+            "framebuffer row 5 is blank where the box's top border should be — the guest \
+             reported presenting but nothing reached the pixels"
+                .to_string(),
+        );
+    }
+    if !lit(2, 20) {
+        return Err(
+            "framebuffer column 2 is blank where the box's left border should be — a row \
+             reached the screen but the vertical rules did not"
+                .to_string(),
+        );
+    }
+    // ...and past the scene it must be untouched, or something is spraying pixels
+    // well beyond the geometry it was handed.
+    if lit(400, 300) {
+        return Err(
+            "a pixel far outside the 160x48 scene is lit — the present ran past its run \
+             length or wrapped rows"
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -5053,6 +5090,21 @@ pub fn gmac_tx_transmits_a_frame(h: &mut View) -> Result<(), String> {
          suspect va_to_pa on a non-KERNEL_OFFSET address first. 'never cleared OWN' \
          means the engine never took it — ring base unprogrammed, ST unset, or the \
          tail pointer never kicked. Neither means the probe didn't run at all",
+    )?;
+
+    // The second frame matters more than the first. A device model that rescanned
+    // the ring from its base instead of resuming at its current descriptor
+    // transmitted frame one and silently dropped every frame after it — caught here,
+    // because one-frame coverage would have passed.
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg == "gmac-tx: engine transmitted the udp datagram")
+    })
+    .ok_or(
+        "no 'engine transmitted the udp datagram' within 10s — the raw frame went out \
+         but a real kernel-net datagram did not. Suspect ring bookkeeping across two \
+         submissions (reclaim not advancing, or the tail pointer computed from the \
+         wrong slot) rather than anything about the frame's contents",
     )?;
 
     Ok(())

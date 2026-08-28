@@ -514,6 +514,7 @@ mod mutant_plan_tests {
             "kernel-net",
             "kernel-obs",
             "kernel-proc",
+            "kitsch-render",
             "kvetch-model",
             "kvetch-proto",
             // New here: the grammar-masked sampler and completion loop.

@@ -130,9 +130,16 @@ pub fn present() {
 /// horizontal, so a too-long one is truncated rather than wrapped into the next
 /// line, which would look like corruption rather than a bug. Silent no-op until
 /// `init` has succeeded.
-pub fn present_span(x: usize, y: usize, run: &[u32]) {
-    if !READY.load(Ordering::Relaxed) || y >= HEIGHT || x >= WIDTH {
-        return;
+/// Returns `false` when there is no framebuffer to present to, so the caller can
+/// **refuse** rather than report a success that reached nothing.
+pub fn present_span(x: usize, y: usize, run: &[u32]) -> bool {
+    if !READY.load(Ordering::Relaxed) {
+        return false;
+    }
+    if y >= HEIGHT || x >= WIDTH {
+        // Off-screen is a clip, not a failure: the geometry was valid, there is
+        // simply nothing of it on the glass.
+        return true;
     }
     let n = run.len().min(WIDTH - x);
     // SAFETY: identical to `present` — `READY` is only set after `init` mapped
@@ -143,4 +150,5 @@ pub fn present_span(x: usize, y: usize, run: &[u32]) {
     let start = y * (STRIDE / 4) + x;
     pixels[start..start + n].copy_from_slice(&run[..n]);
     FRAMES_PRESENTED.inc();
+    true
 }

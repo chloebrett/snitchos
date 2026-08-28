@@ -677,6 +677,18 @@ impl View {
         self.source.live().map(|live| live.machine.instret())
     }
 
+    /// The guest's framebuffer as `(pixels, width, height)` — what is actually on
+    /// the glass, not what the guest *said* it drew. `None` for QEMU/replay, or
+    /// before the guest has handed `etc/ramfb` a config.
+    ///
+    /// A display scenario that asserts only on telemetry proves the code path ran,
+    /// which is a strictly weaker claim than the screen being right: every way of
+    /// presenting the wrong pixels also emits "presented". This is the beginning of
+    /// the design's scanout tap — the read cap a test holds.
+    pub fn framebuffer_pixels(&self) -> Option<(Vec<u32>, u32, u32)> {
+        self.source.live().and_then(|live| live.machine.framebuffer_pixels())
+    }
+
     /// Peak guest RAM footprint (`Machine::ram_high_water`) reaching the scenario's
     /// assertion — for right-sizing each workload's machine. `None` for QEMU/replay.
     pub(crate) fn ram_high_water(&self) -> Option<u64> {

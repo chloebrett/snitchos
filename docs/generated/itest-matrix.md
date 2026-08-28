@@ -38,11 +38,14 @@
 | fs-write-read | fs | wfi | userspace, ipc |
 | glitch-beep-plays | glitch-beep | cpu | audio |
 | glitch-starve-underruns | glitch-starve | cpu | audio |
+| gmac-probe-identifies-the-core | gmac-probe | wfi | gmac |
+| gmac-tx-transmits-a-frame | gmac-tx | wfi | gmac |
 | heap-grows-on-demand | heap-grow | wfi | userspace |
 | heap-oom | heap-oom | cpu | heap, oom |
 | supervisor-detects-and-kills-a-hung-service | hung-detect | cpu | userspace |
 | boot-reaches-heartbeat | init | wfi | boot |
 | build-regime-is-reported | init | wfi | boot |
+| console-reboot-requests-srst | init | cpu | boot |
 | frame-allocator-metrics | init | wfi | frame |
 | heartbeat-cadence | init | wfi | boot |
 | init-brings-up-fs-server | init | cpu | userspace |
@@ -68,6 +71,7 @@
 | rpc-trace-nests | ipc-rpc | wfi | userspace, ipc |
 | ipi-pong | ipi-pong | cpu | smp, ipi, stress |
 | kill-without-a-process-cap-is-refused | kill-no-cap | cpu | userspace |
+| kitsch-presents-a-scene | kitsch-static | wfi | display, ramfb, kitsch |
 | kvetch-babble-serves | kvetch-babble | cpu | kvetch |
 | kvetch-drivel-serves | kvetch-drivel | cpu | kvetch |
 | sched-task-lookup-is-o1 | live-tasks | cpu | sched |

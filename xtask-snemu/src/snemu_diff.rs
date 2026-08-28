@@ -960,11 +960,19 @@ pub fn load_workload_machine(
             .map_err(|e| format!("snemu load: {e:?}"))?;
     machine.set_fetch_cache(true);
     // Mirrors the real QEMU harness's `ramfb` scenario tag → `-device ramfb`
-    // (`Boot::spawn`, xtask/src/itest/harness.rs): only the `framebuffer-
-    // presents` scenario's dedicated `{"ramfb"}` workload should see
-    // `etc/ramfb`. Every other workload (including `None`, the default)
-    // stays off, matching real QEMU's `ramfb: false` default.
-    if workload == Some("ramfb") {
+    // (`Boot::spawn`). Workloads not listed here (including `None`, the default)
+    // stay off, matching real QEMU's `ramfb: false` default — which is what
+    // `framebuffer-absent-degrades-gracefully` needs to stay meaningful.
+    //
+    // **This is a second source of truth and it has already bitten.** QEMU keys
+    // off the scenario's `ramfb` *tag*; snemu keys off the *workload string*
+    // below. A scenario correctly tagged `ramfb` but on a workload missing from
+    // this list gets a framebuffer under QEMU and none under snemu — and since
+    // `Present` used to return success either way, it looked like it worked.
+    // (`kitsch-presents-a-scene`, 2026-08-28.) The fix is to derive this from the
+    // catalog's tags, which needs the flag threaded down to here; until then,
+    // adding a display scenario means adding its workload to this list.
+    if matches!(workload, Some("ramfb" | "kitsch-static")) {
         machine.enable_fwcfg_ramfb();
     }
     Ok(machine)

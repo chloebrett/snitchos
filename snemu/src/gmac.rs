@@ -72,6 +72,11 @@ const MAX_WALK: u32 = 64;
 pub(crate) struct Gmac {
     tx_base: u64,
     tx_ring_len: u32,
+    /// Where the engine is in the ring. **Not reset per kick**: the device resumes
+    /// from its current descriptor, it does not rescan from the base. Restarting at
+    /// slot 0 would make the first transmit work and every one after it stop dead on
+    /// the already-returned slot 0 — a failure that looks like a guest bug.
+    tx_current: u32,
     frames: Vec<Vec<u8>>,
 }
 
@@ -135,7 +140,11 @@ impl Gmac {
         if self.tx_base == 0 {
             return;
         }
-        for slot in 0..self.tx_ring_len.min(MAX_WALK) {
+        if self.tx_ring_len == 0 {
+            return;
+        }
+        for _ in 0..self.tx_ring_len.min(MAX_WALK) {
+            let slot = self.tx_current;
             let desc = self.tx_base + u64::from(slot) * DESCRIPTOR_BYTES;
             let tdes3 = ram.read_u32(desc + 12).unwrap_or(0);
             if tdes3 & TDES3_OWN == 0 {
@@ -161,6 +170,7 @@ impl Gmac {
                 None => (tdes3 & !TDES3_OWN) | TDES3_ERROR_SUMMARY,
             };
             let _ = ram.write_u32(desc + 12, writeback);
+            self.tx_current = (self.tx_current + 1) % self.tx_ring_len;
         }
     }
 }
@@ -243,6 +253,40 @@ mod tests {
         let mut g = armed(ring_pa);
         g.service_tx(&mut mem);
         assert_eq!(mem.read_u32(ring_pa + 12).unwrap() & 0x8000, 0);
+    }
+
+    #[test]
+    fn successive_kicks_resume_where_the_last_one_stopped() {
+        // The device keeps a current-descriptor cursor; it does not rescan from the
+        // ring base. Restarting at slot 0 makes the *second* transmit stop dead —
+        // slot 0's OWN is already clear — so one frame works and every frame after
+        // it silently doesn't. Exactly the shape that looks like a guest bug.
+        let (ring_pa, buf_a, buf_b) = (RAM_BASE + 0x1000, RAM_BASE + 0x2000, RAM_BASE + 0x3000);
+        let mut mem = Memory::new(0x10000);
+        let mut g = armed(ring_pa);
+
+        rig(&mut mem, ring_pa, buf_a, b"first");
+        g.service_tx(&mut mem);
+
+        rig(&mut mem, ring_pa + 16, buf_b, b"second");
+        g.service_tx(&mut mem);
+
+        assert_eq!(g.frames(), &[b"first".to_vec(), b"second".to_vec()]);
+        assert_eq!(mem.read_u32(ring_pa + 16 + 12).unwrap() & 0x8000_0000, 0, "slot 1 returned");
+    }
+
+    #[test]
+    fn the_cursor_wraps_at_the_end_of_the_ring() {
+        let ring_pa = RAM_BASE + 0x1000;
+        let mut mem = Memory::new(0x10000);
+        let mut g = armed(ring_pa);
+        // Ring length is 4; fill and drain it five times to cross the wrap.
+        for round in 0..5u64 {
+            let slot = round % 4;
+            rig(&mut mem, ring_pa + slot * 16, RAM_BASE + 0x2000, b"x");
+            g.service_tx(&mut mem);
+        }
+        assert_eq!(g.frames().len(), 5, "the fifth kick wrapped back to slot 0");
     }
 
     #[test]
