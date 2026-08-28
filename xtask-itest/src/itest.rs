@@ -349,9 +349,11 @@ catalog! {
     // with a non-ramfb scenario under `--shared`.
     wfi "framebuffer-presents"            scenarios::framebuffer_presents           [display, ramfb] {"ramfb"};
     wfi "kitsch-presents-a-scene"         scenarios::kitsch_presents_a_scene         [display, ramfb, kitsch] {"kitsch-static"};
+    cpu "kitsch-stitch-policy-draws"      scenarios::kitsch_stitch_policy_draws      [display, ramfb, kitsch, stitch] {"kitsch-stitch"};
     wfi "framebuffer-absent-degrades-gracefully" scenarios::framebuffer_absent_degrades_gracefully [display];
     wfi "gmac-probe-identifies-the-core"  scenarios::gmac_probe_identifies_the_core  [gmac]          {"gmac-probe"};
     wfi "gmac-tx-transmits-a-frame"       scenarios::gmac_tx_transmits_a_frame       [gmac]          {"gmac-tx"};
+    wfi "gmac-phy-identifies-and-links"   scenarios::gmac_phy_identifies_and_links   [gmac]          {"gmac-phy"};
 }
 
 /// Set the process-wide failure-capture transcript depth. Call once at

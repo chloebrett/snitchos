@@ -523,7 +523,59 @@ to end, and gives the PPM-dump comparison something real to look at.
 **Done when**: `workload=kitsch-static` produces a PPM showing a framed, glyph-filled
 grid, byte-identical across runs.
 
-### 5 — The Stitch native bridge
+### 5 — The Stitch native bridge ✅ **DONE (2026-08-28)**
+
+**The compositor's policy is a Stitch program, and it draws on the screen.**
+`workload=kitsch-stitch`: interpreted code describes the scene and calls
+`present`; compiled code does the cell-picking, glyph rasterizing and the syscall.
+The itest asserts the box the *Stitch* program described is on the glass.
+
+- **`Platform::present(x, y, rows)`** — text, never pixels. The boundary increment
+  0 measured: Stitch iterates over windows, never cells.
+- **`present` native**, gated on a `Display` authority in the language and on a
+  `DisplaySink` capability in the kernel. The language check is a courtesy; the
+  cap is the enforcement.
+- **`KitschPlatform`** lives in the *program*, not in `stitch`. The language crate
+  should not learn about the desktop, and a program supplying its own backend is
+  exactly the seam `Platform` exists to provide.
+- **One env, reused.** A compositor re-registering the prelude per frame would pay
+  the REPL's ~2.2M-instruction per-line cost forever.
+
+**A third bug the pixel assertion caught, and the best one yet.** The screen came
+back with the bottom row correct, the top row blank and the middle garbled — a
+pattern no telemetry could produce. Cause: the heartbeat's milestone-0
+`ramfb::present()` **clears the whole framebuffer every tick**, so the kernel was
+erasing the compositor at tick rate. Fine when the kernel was the only thing that
+could draw; a tick-rate eraser the moment userspace can. Now the kernel's demo
+clear *yields*: granting a `DisplaySink` sets `ramfb::claim()` and the heartbeat
+stops drawing. **`kitsch-static` had been passing on timing luck.**
+
+Three Stitch details, each a wrong guess first:
+
+- Top-level Stitch is `name(args) -> T = body`; there is **no `let`**, and
+  `eval_line` evaluates an *expression*.
+- The policy must be a **non-raw** Rust string, so Rust processes `\u{…}` and
+  Stitch's lexer sees real characters — a raw string hands it the literal seven
+  characters `\u{cd}`.
+- The escapes are **CP437 code points** (U+00CD, not U+2550): the font is indexed
+  by code-page byte, so Unicode box-drawing indexes past the table and renders
+  blank.
+
+The border run is **computed by a fold, not typed**: the first attempt hand-wrote
+seventeen escapes where eighteen were meant.
+
+**Image cost, and a wrong hypothesis worth recording.** `kitsch_stitch` statically
+links the interpreter — **~1 MB**, a second copy beside `stitch_repl`'s — so it
+embeds only under `itest-workloads`, like the drivel weights. That gating is right
+on its own merits, but it was reached via a **wrong diagnosis**: `heap-oom` began
+failing and image bloat looked like the culprit. It was not. `heap-oom` failed
+identically with `kitsch_stitch` removed from the image entirely; the host was at
+load average 5, and **`heap-oom` asserts on a wall-clock deadline** while being the
+most instruction-hungry scenario in the suite. A deterministic emulator does not
+make a wall-clock assertion deterministic. Worth fixing separately — that scenario
+should be bounded by guest instret, not seconds.
+
+### 5 (original scope) — The Stitch native bridge
 
 The natives kitsch needs: present, IPC send/recv, `console_read`, cap operations.
 This is the known "natives need syscall backing" gap, and kitsch is a better forcing

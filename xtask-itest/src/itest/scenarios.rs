@@ -4987,6 +4987,50 @@ fn expected_scene() -> String {
     out
 }
 
+/// `kitsch` policy in Stitch (`workload=kitsch-stitch`): the scene is described
+/// by a **Stitch program** calling `present`, while the backend does the
+/// cell-picking, glyph rasterizing and the syscall. Asserts the box the Stitch
+/// program described actually reached the glass.
+///
+/// The interesting assertion is the last one. This is the first long-running
+/// Stitch process — everything before it ran and exited — so the scenario checks
+/// it survives repeated evals rather than merely producing one frame.
+pub fn kitsch_stitch_policy_draws(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 60, is_span_start_named("kitsch.stitch.start"))
+        .ok_or("kitsch_stitch never reached U-mode within 60s")?;
+
+    h.wait_for(SEC * 60, is_span_start_named("kitsch.stitch.first_present")).ok_or(
+        "no 'kitsch.stitch.first_present' within 60s — the Stitch policy never completed one \
+         eval, or `present` was refused (missing Display authority, or no DisplaySink cap)",
+    )?;
+
+    h.wait_for(SEC * 60, is_span_start_named("kitsch.stitch.presented")).ok_or(
+        "no 'kitsch.stitch.presented' within 60s — the interpreter did not survive repeated \
+         evals, which is the whole question a long-running Stitch process asks",
+    )?;
+
+    // Read the screen back through the font that drew it. The Stitch program
+    // describes a 20x3 double-line box titled `kitsch`; every cell of it was
+    // chosen by interpreted code and rendered by native code.
+    let (pixels, width, _height) = h
+        .framebuffer_pixels()
+        .ok_or("no framebuffer captured — etc/ramfb was never configured")?;
+    let font = kitsch_render::ibm_vga_8x16();
+    let screen = kitsch_render::decode_text(&pixels, width as usize, 20, 3, &font, 0x00c0_c0c0);
+    let expected = expected_scene();
+    if screen != expected {
+        // One line: the runner prints a failure's first line and then the guest
+        // console, so a multi-line diff is truncated exactly when it is wanted.
+        return Err(format!(
+            "the screen is not the scene the Stitch policy described. glass={:?} expected={:?}",
+            screen.replace('\n', " | "),
+            expected.replace('\n', " | ")
+        ));
+    }
+
+    Ok(())
+}
+
 /// Framebuffer Milestone 0: booted with `-device ramfb` (the `ramfb` tag —
 /// see `Boot::spawn`), the kernel finds `etc/ramfb`, brings up the
 /// framebuffer, and presents (clears to a color) once per heartbeat.
@@ -5126,6 +5170,44 @@ pub fn gmac_probe_identifies_the_core(h: &mut View) -> Result<(), String> {
 ///
 /// As with the probe, this covers the *glue*, not the register map: snemu's model and
 /// `kernel_devices::gmac` are both transcribed from the same mainline headers.
+/// `workload=gmac-phy` identifies the PHY over MDIO and brings the link up — T1 and
+/// T2 of the ladder in `docs/vf2-gmac-design.md`, against snemu's modelled PHY.
+///
+/// **T1's oracle is a known constant**, which is what makes it worth a rung of its
+/// own: `0x4f51e91b` cannot arise from noise, whereas the two failure words can —
+/// `0xffffffff` is a floating bus and `0x00000000` is a PHY held in reset. Asserting
+/// the id rather than "MDIO returned something" is the whole point.
+///
+/// **What this cannot tell you.** snemu's PHY answers because it is told to; a
+/// modelled link coming up exercises the guest's negotiation *sequence* (advertise,
+/// restart with both bits, poll with the latch-low double read) and says nothing
+/// about RGMII pads, delays, or the `TX_INV` clock selection. Those stay board-only
+/// by construction — see the desk-rehearsal table in the design note.
+pub fn gmac_phy_identifies_and_links(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("phy id 0x4f51e91b") && msg.contains("a YT853x"))
+    })
+    .ok_or(
+        "no 'phy id 0x4f51e91b — a YT853x' within 10s. If the Log says GBUSY never \
+         cleared, the MDIO sequencer or the bounded poll is at fault; if it names a \
+         different id, the address-word encoding is (PA at 21, RDA at 16) or the PHY \
+         address is wrong. 0xffffffff and 0x00000000 are the two poison words",
+    )?;
+
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg.starts_with("gmac-phy: link up after"))
+    })
+    .ok_or(
+        "no 'link up' within 10s though the PHY answered — so MDIO works and the \
+         fault is in the negotiation sequence: RESTART set without ENABLE is a silent \
+         no-op, and a single BMSR read reports a live link as down because the link \
+         bit is latch-low",
+    )?;
+
+    Ok(())
+}
+
 pub fn gmac_tx_transmits_a_frame(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, |f, _| {
         matches!(f, OwnedFrame::Log { msg, .. } if msg == "gmac-tx: submitted 1 frame")

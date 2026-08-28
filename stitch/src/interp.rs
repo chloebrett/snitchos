@@ -101,7 +101,13 @@ fn build_env_batches(env: Env, batches: &[(&[Item], SourceId)], uses_from: &[Ite
     // it *was* handed a `TelemetrySink` cap. Authority threads down from here;
     // named functions then narrow it to their declared `uses`.
     let env = env.with_authority(
-        ["Telemetry", "ConsoleOut", "ConsoleIn", "FsRead", "FsWrite"]
+        // `Display` joins the ambient set on the same terms as the rest: holding
+        // it in the language only means a program *may call* `present`. Whether
+        // anything reaches a screen is the kernel's decision, gated on a
+        // `DisplaySink` capability — and a backend with no screen answers
+        // `false` regardless. The language check is a courtesy; the cap is the
+        // enforcement.
+        ["Telemetry", "ConsoleOut", "ConsoleIn", "FsRead", "FsWrite", "Display"]
             .into_iter()
             .map(String::from)
             .collect(),

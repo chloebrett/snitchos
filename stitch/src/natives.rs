@@ -28,6 +28,7 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "writeConsole", arity: 1, func: native_write_console, module: None, export_as: None },
     NativeFn { name: "fsWrite",      arity: 2, func: native_fs_write,      module: None, export_as: None },
     NativeFn { name: "emit",      arity: 2, func: native_emit,      module: None, export_as: None },
+    NativeFn { name: "present",   arity: 3, func: native_present,   module: None, export_as: None },
     NativeFn { name: "span",      arity: 2, func: native_span,      module: None, export_as: None },
     NativeFn { name: "toList",    arity: 1, func: native_to_list,   module: None, export_as: None },
     NativeFn { name: "take",      arity: 2, func: native_take,      module: None, export_as: None },
@@ -332,6 +333,44 @@ fn native_read_byte(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
 /// `writeConsole(text)` — write `text` to the console *raw*, with no trailing
 /// newline (unlike `print`) — so the stim driver can push ANSI escape frames.
 /// Gated by `ConsoleOut`.
+/// `present(x, y, rows)` — put `rows` of text on the screen with its top-left
+/// cell at `(x, y)`. Returns `true` if it reached a screen.
+///
+/// Text rather than pixels: see [`Platform::present`](crate::platform::Platform::present).
+/// A Stitch program describes windows; the backend does the cells and the pixels.
+fn native_present(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [x, y, rows] = args else {
+        return Err(RuntimeError::new("present expects (x, y, rows)"));
+    };
+    let (Value::Int(x), Value::Int(y)) = (x, y) else {
+        return Err(RuntimeError::new(format!(
+            "present x and y must be Ints, got ({}, {})",
+            x.kind(),
+            y.kind()
+        )));
+    };
+    let (Ok(x), Ok(y)) = (u32::try_from(*x), u32::try_from(*y)) else {
+        return Err(RuntimeError::new("present x and y must be non-negative"));
+    };
+    let lines = expect_list("present", rows)?;
+    let mut text = alloc::vec::Vec::with_capacity(lines.len());
+    for line in lines {
+        let Value::Str(s) = line else {
+            return Err(RuntimeError::new(format!(
+                "present rows must be Strs, got {}",
+                line.kind()
+            )));
+        };
+        text.push(s.as_ref().clone());
+    }
+    if !env.has_authority("Display") {
+        return Err(refuse(env, "present", "Display"));
+    }
+    perform_effect("present", args, env, || {
+        Ok(Value::Bool(env.platform().present(x, y, &text)))
+    })
+}
+
 fn native_write_console(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     let [value] = args else {
         return Err(RuntimeError::new("writeConsole expects (text)"));

@@ -711,6 +711,7 @@ pub fn check_expr(expr: &CoreExpr, items: &[CoreItem]) -> Vec<TypeError> {
 fn native_cap(name: &str) -> Option<&'static str> {
     match name {
         "emit" | "span" => Some("Telemetry"),
+        "present" => Some("Display"),
         "print" | "writeConsole" => Some("ConsoleOut"),
         "readLine" | "readByte" => Some("ConsoleIn"),
         "fsWrite" => Some("FsWrite"),

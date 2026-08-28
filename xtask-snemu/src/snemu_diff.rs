@@ -972,7 +972,7 @@ pub fn load_workload_machine(
     // (`kitsch-presents-a-scene`, 2026-08-28.) The fix is to derive this from the
     // catalog's tags, which needs the flag threaded down to here; until then,
     // adding a display scenario means adding its workload to this list.
-    if matches!(workload, Some("ramfb" | "kitsch-static")) {
+    if matches!(workload, Some("ramfb" | "kitsch-static" | "kitsch-stitch")) {
         machine.enable_fwcfg_ramfb();
     }
     Ok(machine)

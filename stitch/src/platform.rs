@@ -205,6 +205,26 @@ pub trait Platform {
         None
     }
 
+    /// Present `rows` of text with its top-left cell at `(x, y)`, returning
+    /// `true` if it reached a screen. Backs `present`; gated in the language by
+    /// the `Display` authority, and gated again by the kernel on a `DisplaySink`
+    /// capability — the language check is a courtesy, the cap check is the
+    /// enforcement.
+    ///
+    /// **Text, not pixels, and deliberately so.** A Stitch loop over a screen's
+    /// ~7,200 cells would cost ~173M guest instructions — about 85x a full-screen
+    /// native clear (measured; `plans/kitsch-v1.md` increment 0). So the boundary
+    /// sits here: Stitch describes *what* to show and the backend does the
+    /// cell-picking and pixel-writing, one call per present. Stitch iterates over
+    /// windows; it must never iterate over cells.
+    ///
+    /// Defaults to "no screen" — most backends have none, and that is not an
+    /// error.
+    fn present(&self, x: u32, y: u32, rows: &[&str]) -> bool {
+        let _ = (x, y, rows);
+        false
+    }
+
     /// Revoke every capability *derived from* the holding at `handle` — the
     /// transitive reclaim. Returns the number of descendant caps invalidated
     /// (`0` if none were derived), or `None` if the caller holds no cap at
