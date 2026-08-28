@@ -160,7 +160,39 @@ Awaiting a power cycle.
   **Done 2026-08-28.** Item 1 now records the saved environment verbatim, the three
   U-Boot facts (`dhcp` overwrites `serverip`; `dhcp` does not set `ipaddr`; `md.l`
   counts are hex), and the drift hazard with its ICMP signature.
-- Add input echo-to-stderr (below), plus optional `exec --input-file`.
+- ~~Add input echo-to-stderr (below), plus optional `exec --input-file`.~~
+  **Echo done 2026-08-28** (`xtask_board::echo::visible`, 5 tests, 7/7 mutants
+  caught). It renders rather than dumps — control bytes become caret notation
+  (`\r` ⇒ `^M`), non-ASCII becomes `\xNN`, empty input reads `(nothing)`. Dumping
+  raw would have reproduced the exact unreadability it exists to fix: a `\r` would
+  *perform* a carriage return instead of showing one, and whether a line is
+  submitted turns entirely on that invisible byte. `reboot` is implemented over
+  `exec`, so one echo site covers both commands. `--input-file` is now optional —
+  the echo makes the input mechanism irrelevant, which was the argument for it.
+
+### A closed avenue: `serialport` will not open a pseudo-terminal
+
+Tried 2026-08-28, to exercise the one path no test reaches — `serialport::open`,
+the write, and the capture loop — without a board. A `pty.openpty()` pair
+allocates fine (`/dev/ttys014`) and passes `check_device`, but the open fails:
+
+```
+board: OpenFailed { device: "/dev/ttys014", kind: Other }
+```
+
+`serialport` queries termios/ioctls a pty does not provide. **So the glue is
+genuinely board-gated**, not merely untested through laziness — worth knowing
+before someone else spends the same twenty minutes.
+
+Two side findings:
+
+- **The sandbox blocks pty allocation too**, surfacing as `OSError: out of pty
+  devices`. Same class as the `/dev/cu.*` denial above; both need the override.
+- **`OpenFailed { kind: Other }` now has two very different causes on record** —
+  the sandbox denial (a host permission problem) and a device that exists but
+  cannot be driven. That strengthens the case above for giving host-side denial
+  its own `Unreachable` variant: as it stands, `Other` is where unlike things go
+  to look alike.
 
 ## Board liveness settled by tcpdump — the UART is the only fault
 

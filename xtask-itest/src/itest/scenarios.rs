@@ -4926,41 +4926,65 @@ pub fn kitsch_presents_a_scene(h: &mut View) -> Result<(), String> {
         .ok_or("no framebuffer captured — the guest never handed etc/ramfb a config")?;
     let w = width as usize;
 
-    // The scene is a 20x3 cell box at the origin, so 160x48 pixels. Sample the
-    // double-line border: CP437 0xCD's top run sits on rows 4-5 of the glyph, and
-    // 0xBA's verticals sit at columns 2-3 and 5-6 of an 8-wide cell.
+    // Read the screen back as text, through the same font that drew it, so the
+    // assertion is a snapshot of what is on the glass rather than a list of lit
+    // pixel coordinates. `\u{cd}`/`\u{ba}`/`\u{c9}`… are CP437's double-line box
+    // glyphs; rendered, the expected value is literally the box:
     //
-    // `framebuffer_pixels` hands back `0x00RRGGBB` (minifb's format — the XRGB pad
-    // byte is zeroed), so compare against the scene's *colours* rather than merely
-    // "non-zero": that way a border drawn in the wrong colour fails too.
+    //     ╔══════════════════╗
+    //     ║  kitsch          ║
+    //     ╚══════════════════╝
     const INK: u32 = 0x00c0_c0c0;
-    let lit = |x: usize, y: usize| pixels[y * w + x] == INK;
+    let font = kitsch_render::ibm_vga_8x16();
+    let screen = kitsch_render::decode_text(&pixels, w, 20, 3, &font, INK);
 
-    if !lit(8, 5) {
-        return Err(
-            "framebuffer row 5 is blank where the box's top border should be — the guest \
-             reported presenting but nothing reached the pixels"
-                .to_string(),
-        );
+    let expected = expected_scene();
+    if screen != expected {
+        return Err(format!(
+            "the screen is not the scene kitsch composed.\n--- on the glass ---\n{screen}\n\
+             --- expected ---\n{expected}"
+        ));
     }
-    if !lit(2, 20) {
-        return Err(
-            "framebuffer column 2 is blank where the box's left border should be — a row \
-             reached the screen but the vertical rules did not"
-                .to_string(),
-        );
-    }
-    // ...and past the scene it must be untouched, or something is spraying pixels
-    // well beyond the geometry it was handed.
-    if lit(400, 300) {
-        return Err(
-            "a pixel far outside the 160x48 scene is lit — the present ran past its run \
-             length or wrapped rows"
-                .to_string(),
-        );
+
+    // Past the scene the screen must be untouched, or something is spraying
+    // pixels well beyond the geometry it was handed. One cell well clear of the
+    // 20x3 box is enough to catch a run that ran long or wrapped rows.
+    let outside = kitsch_render::decode_text(&pixels[300 * w..], w, 1, 1, &font, INK);
+    if outside != " " {
+        return Err(format!(
+            "a cell far outside the 20x3 scene is not blank ({outside:?}) — the present ran \
+             past its run length or wrapped rows"
+        ));
     }
 
     Ok(())
+}
+
+/// The scene `kitsch_static` composes, as text: a double-line box with a title.
+/// Built rather than pasted, so it states the *intent* (a border, a title at
+/// column 2) instead of blessing whatever the screen currently shows.
+fn expected_scene() -> String {
+    let (cols, rows) = (20, 3);
+    let mut out = String::new();
+    for y in 0..rows {
+        if y > 0 {
+            out.push('\n');
+        }
+        for x in 0..cols {
+            let glyph = match (x, y) {
+                (0, 0) => '\u{c9}',
+                (x, 0) if x == cols - 1 => '\u{bb}',
+                (0, y) if y == rows - 1 => '\u{c8}',
+                (x, y) if x == cols - 1 && y == rows - 1 => '\u{bc}',
+                (_, 0) | (_, 2) => '\u{cd}',
+                (0 | 19, _) => '\u{ba}',
+                (x, 1) if (2..10).contains(&x) => " kitsch ".chars().nth(x - 2).unwrap(),
+                _ => ' ',
+            };
+            out.push(glyph);
+        }
+    }
+    out
 }
 
 /// Framebuffer Milestone 0: booted with `-device ramfb` (the `ramfb` tag —

@@ -476,6 +476,44 @@ plausible-looking off-by-one-byte diff.
 > path ran, which is strictly weaker than the screen being right — every way of
 > presenting the *wrong* pixels also emits "presented".
 
+#### Display assertions are snapshots, not pixel coordinates
+
+The first pixel assertions were `lit(8, 5)` and `lit(2, 20)` — magic numbers derived
+by hand from glyph bitmaps, unreadable and hostage to any font or layout change.
+Replaced by `kitsch_render::decode_text`: **read the framebuffer back through the
+same font that drew it.** Exact rather than fuzzy, because the ground-truth bitmaps
+are right there — a table lookup run backwards, not OCR. A display assertion is now
+the box itself:
+
+```
+╔══════════════════╗
+║  kitsch          ║
+╚══════════════════╝
+```
+
+The round trip (rasterize → decode → the original text) is unit-tested in
+`kitsch-render`, and the scenario's expected value is **built from the program's
+intent**, not pasted from what the screen showed — so it states "a border, a title
+at column 2" rather than blessing current behaviour. It matched first try, which is
+four independent things agreeing.
+
+Three details that would each have cost an hour:
+
+- **Pad-byte asymmetry.** The rasterizer writes `0xffRRGGBB`; a framebuffer captured
+  through the emulator's minifb-shaped accessor arrives as `0x00RRGGBB` — the same
+  colour in two representations, depending only on where it was read. `decode_text`
+  masks the pad byte so a caller passes the colour it drew with and is right either
+  way.
+- **Blank cells.** Several CP437 glyphs are all-zero (NUL at 0x00 among them), so
+  "lowest matching code point" decoded every blank as `\0` and made snapshots
+  unreadable. An all-blank cell is a space.
+- **Unknown cells decode to `U+FFFD`**, never a space — otherwise a corrupted screen
+  reads as a plausible blank one.
+
+**What this cannot catch**: if the font *table* were wrong, drawing and reading with
+the same wrong data cancels out. The font has its own tests; this checks
+composition, rasterization and present.
+
 ### 4 (original scope) — First pixels
 
 A Rust workload composes a static scene through `kitsch-render` and presents it. No

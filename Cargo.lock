@@ -2810,6 +2810,7 @@ dependencies = [
  "diagram",
  "fs-proto",
  "itest-harness",
+ "kitsch-render",
  "kvetch-model",
  "kvetch-proto",
  "kvetch-serve",

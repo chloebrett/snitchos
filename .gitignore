@@ -57,6 +57,12 @@ target
 # lock relative to that cwd; we want all of them ignored.
 .itest.lock
 
+# Reboot instants `cargo xtask board reboot` keeps so its thrash guard applies
+# across invocations rather than resetting each time the process starts. Local
+# state about one bench board — nothing another checkout could want. Same
+# anywhere-cwd reasoning as the lock above.
+.board-reboots
+
 # Pending partial baseline from an interrupted itest run.
 # Promote with `cargo xtask itest --promote-pending` or discard with
 # `--discard-pending`. Same anywhere-cwd reasoning as above.

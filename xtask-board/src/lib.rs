@@ -3,12 +3,61 @@
 //! See [plans/board-bridge.md](../../plans/board-bridge.md). This crate is the
 //! serial-linked half; lean `xtask` forwards to it.
 
+pub mod echo;
 pub mod outcome;
 pub mod reach;
 pub mod script;
 pub mod split;
 pub mod stop;
+pub mod thrash;
 pub mod wire;
+
+#[cfg(test)]
+mod echo_tests {
+    use super::echo::visible;
+
+    /// The whole point, and the case that motivated it. Whether a command is
+    /// *submitted* depends on a byte you cannot see — U-Boot wants `\r`, the REPL
+    /// differs — and the 2026-08-27 session had to hand-check the sent bytes with
+    /// `cat -v` when the shell quoting fell under suspicion. Echoing raw would
+    /// reproduce exactly that unreadability, so control bytes are rendered.
+    #[test]
+    fn a_carriage_return_is_shown_rather_than_performed() {
+        assert_eq!(visible(b"printenv\r"), "printenv^M");
+    }
+
+    /// `\n` and `\r` are the two that decide whether a board acts on a line, and
+    /// they must be distinguishable in the record — a real newline here would be
+    /// indistinguishable from the echo's own line ending.
+    #[test]
+    fn newline_and_carriage_return_are_told_apart() {
+        assert_eq!(visible(b"a\n"), "a^J");
+        assert_eq!(visible(b"a\r\n"), "a^M^J");
+    }
+
+    /// Sending nothing is a legitimate move — "just watch" — so it must read as a
+    /// deliberate choice rather than as a missing line of output.
+    #[test]
+    fn sending_nothing_says_so() {
+        assert_eq!(visible(b""), "(nothing)");
+    }
+
+    /// Anything non-ASCII is shown as its byte value. A mojibake'd paste is a real
+    /// way for a command to be silently wrong, and `\xNN` is unambiguous where a
+    /// replacement character is not.
+    #[test]
+    fn a_non_ascii_byte_is_shown_as_its_value() {
+        assert_eq!(visible(&[0xC3, 0xA9]), r"\xc3\xa9");
+        assert_eq!(visible(b"\x7f"), "^?");
+    }
+
+    /// Ordinary text passes through untouched — the common case must stay
+    /// readable, or the echo becomes noise people learn to skip.
+    #[test]
+    fn printable_text_is_left_alone() {
+        assert_eq!(visible(b"setenv serverip 192.168.0.7"), "setenv serverip 192.168.0.7");
+    }
+}
 
 #[cfg(test)]
 mod wire_tests {

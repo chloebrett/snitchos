@@ -211,6 +211,84 @@ impl Font<'_> {
     }
 }
 
+/// Read a rasterized region back as text — the inverse of [`rasterize`], and
+/// what makes a display assertion a *snapshot* rather than a list of lit pixel
+/// coordinates.
+///
+/// A pixel whose **RGB** matches `ink` is treated as foreground, anything else as
+/// background; each cell's resulting bitmap is matched against `font`'s table.
+/// This is exact rather than fuzzy because the ground-truth bitmaps are right
+/// here — it is not OCR so much as a table lookup run backwards.
+///
+/// The comparison ignores the XRGB pad byte deliberately. The rasterizer writes
+/// `0xffRRGGBB`, but a framebuffer captured through an emulator's minifb-shaped
+/// accessor arrives as `0x00RRGGBB` — the same logical colour in two
+/// representations, depending only on where the buffer was read. Masking here
+/// means a caller passes the colour it drew with and is right either way.
+///
+/// Cells matching no glyph decode to `U+FFFD`, so a corrupted screen reads as
+/// corrupted instead of as a plausible blank one. Glyphs sharing a bitmap (the
+/// blanks, mostly) resolve to the lowest code point, which is why a space stays
+/// a space.
+///
+/// **What this cannot catch**: if the font *table itself* were wrong, drawing and
+/// reading with the same wrong data would cancel out. The font has its own tests
+/// for that; this checks composition, rasterization and present.
+pub fn decode_text(
+    pixels: &[u32],
+    stride: usize,
+    cols: usize,
+    rows: usize,
+    font: &Font<'_>,
+    ink: u32,
+) -> String {
+    let (cw, ch) = (font.width, font.height);
+    let mut out = String::with_capacity(rows * (cols + 1));
+    let mut cell = Vec::with_capacity(ch);
+
+    for cy in 0..rows {
+        if cy > 0 {
+            out.push('\n');
+        }
+        for cx in 0..cols {
+            cell.clear();
+            for row in 0..ch {
+                let mut bits = 0u8;
+                for col in 0..cw {
+                    let (x, y) = (cx * cw + col, cy * ch + row);
+                    let px = pixels.get(y * stride + x).copied();
+                    if px.map(|p| p & RGB) == Some(ink & RGB) {
+                        bits |= 0x80 >> col;
+                    }
+                }
+                cell.push(bits);
+            }
+            out.push(match_glyph(font, &cell).unwrap_or('\u{fffd}'));
+        }
+    }
+    out
+}
+
+/// The colour bits of an XRGB8888 pixel — everything but the alpha/pad byte.
+const RGB: u32 = 0x00ff_ffff;
+
+/// The code point in `font` whose bitmap is exactly `cell`, lowest first — except
+/// that an all-blank cell is a **space**. Several CP437 glyphs are all-zero (NUL
+/// at 0x00 among them), and "lowest wins" would decode every blank as `\0`,
+/// making a snapshot unreadable for no gain.
+fn match_glyph(font: &Font<'_>, cell: &[u8]) -> Option<char> {
+    if cell.iter().all(|b| *b == 0) {
+        return Some(' ');
+    }
+    let count = font.bitmaps.len() / font.height;
+    (0..count).find_map(|i| {
+        let start = i * font.height;
+        (&font.bitmaps[start..start + font.height] == cell)
+            .then(|| char::from_u32(font.first + i as u32))
+            .flatten()
+    })
+}
+
 /// The IBM VGA 8x16 text-mode font: 256 glyphs, **exactly one 4 KiB page**,
 /// carrying CP437's whole repertoire — ASCII, single- and double-line box
 /// drawing, block elements, shading, arrows. Everything the window furniture
@@ -532,6 +610,49 @@ mod tests {
 ................\n\
 ................";
         assert_eq!(pixels_as_art(&pixels, 16, 0xffc0_c0c0), expected);
+    }
+
+    #[test]
+    fn decoding_a_rasterized_scene_recovers_the_text_that_drew_it() {
+        // The inverse of `rasterize`, and the round trip is the test: draw text
+        // through the font, read the pixels back through the same font, get the
+        // text. That makes a display assertion readable — a snapshot of what is
+        // on the screen — instead of a list of lit pixel coordinates.
+        let font = ibm_vga_8x16();
+        let content = surface(&["Hi!", "ok."]);
+        let grid = compose(3, 2, &[Window {
+            rect: Rect { x: 0, y: 0, width: 3, height: 2 },
+            content: &content,
+        }]);
+
+        let (pw, ph) = (3 * font.width, 2 * font.height);
+        let mut pixels = vec![0u32; pw * ph];
+        rasterize(&grid, &font, &mut pixels, pw);
+
+        assert_eq!(decode_text(&pixels, pw, 3, 2, &font, 0x00c0_c0c0), "Hi!\nok.");
+    }
+
+    #[test]
+    fn a_blank_cell_decodes_to_a_space_not_a_nul() {
+        // CP437 has several all-zero glyphs — NUL at 0x00 and space at 0x20 among
+        // them — so "lowest matching code point" would decode every blank cell as
+        // `\0` and make each snapshot unreadable.
+        let font = ibm_vga_8x16();
+        let pixels = vec![0u32; 8 * 16];
+        assert_eq!(decode_text(&pixels, 8, 1, 1, &font, 0x00c0_c0c0), " ");
+    }
+
+    #[test]
+    fn decoding_marks_a_cell_it_cannot_identify() {
+        // A cell whose pixels match no glyph must be visible as unknown, not
+        // silently rendered as a space — otherwise a corrupted screen decodes to
+        // a plausible-looking blank one.
+        let font = ibm_vga_8x16();
+        let mut pixels = vec![0u32; 8 * 16];
+        // A lone lit pixel matches no glyph in the table.
+        pixels[8 * 3 + 4] = 0x00c0_c0c0;
+
+        assert_eq!(decode_text(&pixels, 8, 1, 1, &font, 0x00c0_c0c0), "\u{fffd}");
     }
 
     #[test]

@@ -10,6 +10,10 @@ publish = false
 # links `snemu` — see plans/xtask-lean-test-binary.md. Lean `xtask` delegates
 # the commands here via `cargo run -p xtask-itest --`.
 [dependencies]
+# Display scenarios read the guest's framebuffer back as text through the same
+# font that drew it (`decode_text`), so an assertion is a readable snapshot
+# rather than a list of lit pixel coordinates.
+kitsch-render = { path = "../kitsch-render" }
 clap = { version = "4", features = ["derive"] }
 # The tour's chapter contract. This crate boots; `tour` judges — so there is one
 # definition of what a chapter claims, shared with the browser.

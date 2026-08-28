@@ -178,6 +178,7 @@ graph LR
     xtask_itest --> diagram
     xtask_itest --> fs_proto
     xtask_itest --> itest_harness
+    xtask_itest --> kitsch_render
     xtask_itest --> kvetch_model
     xtask_itest --> kvetch_proto
     xtask_itest --> kvetch_serve
