@@ -263,6 +263,98 @@ pub struct Reclaimed {
     pub failed: usize,
 }
 
+/// The MDIO address the board's PHY sits at — `ethernet-phy@0` in the VF2 DTS.
+const PHY_MDIO_ADDRESS: u8 = 0;
+
+/// MDC divider field for the MDIO controller.
+///
+/// **A starting point, not a measured value** — it depends on the AHB rate, which
+/// depends on what U-Boot left the clock tree in. Design-note open question 1. Too
+/// fast and the PHY answers plausible garbage that reads like a wiring fault, so if
+/// T1 reports an implausible id this is the first thing to sweep.
+const CSR_CLOCK_RANGE: u32 = 4;
+
+/// How many times to poll `BMSR` for link before giving up. Bounded for the same
+/// reason MDIO's own poll is.
+const LINK_POLLS: u32 = 100_000;
+
+/// `workload=gmac-phy`: T1 (the PHY answers) then T2 (link up), reported separately
+/// because they fail for disjoint reasons — MDC divider and MDIO pads versus RGMII
+/// pads, delays and the cable.
+pub fn phy_smoke() {
+    use kernel_devices::phy;
+
+    crate::tracing::emit_log("gmac-phy: start");
+    let mdio = kernel_devices::gmac::Mdio::new(CSR_CLOCK_RANGE);
+    let mut mmio = Mmio;
+
+    // T1. The identity is a known constant, so a correct answer cannot come from
+    // noise — which is the whole reason this rung exists before any link attempt.
+    let id1 = mdio.read(&mut mmio, PHY_MDIO_ADDRESS, phy::PHY_ID1);
+    let id2 = mdio.read(&mut mmio, PHY_MDIO_ADDRESS, phy::PHY_ID2);
+    let (Ok(id1), Ok(id2)) = (id1, id2) else {
+        crate::tracing::emit_log(
+            "gmac-phy: MDIO never cleared GBUSY — the PHY is held in reset, absent, \
+             or the MDC divider (CSR_CLOCK_RANGE) is wrong for this AHB rate",
+        );
+        return;
+    };
+    let id = phy::phy_id(id1, id2);
+    if phy::is_yt853x(id) {
+        crate::tracing::emit_log(&alloc::format!("gmac-phy: phy id {id:#010x} — a YT853x"));
+    } else {
+        crate::tracing::emit_log(&alloc::format!(
+            "gmac-phy: phy id {id:#010x} — NOT a YT853x. 0xffffffff is a floating bus \
+             (wrong PHY address or MDIO pads unrouted); 0x00000000 is a PHY held in reset"
+        ));
+        return;
+    }
+
+    // T2. Advertise only what we intend to drive, then restart negotiation — both
+    // bits, because RESTART without ENABLE is a silent no-op.
+    if mdio.write(&mut mmio, PHY_MDIO_ADDRESS, phy::ANAR, phy::advertise_100_full()).is_err()
+        || mdio.write(&mut mmio, PHY_MDIO_ADDRESS, phy::BMCR, phy::restart_autoneg()).is_err()
+    {
+        crate::tracing::emit_log("gmac-phy: MDIO write timed out configuring the PHY");
+        return;
+    }
+
+    let mut polls = 0;
+    let up = loop {
+        if polls >= LINK_POLLS {
+            break false;
+        }
+        polls += 1;
+        // Two reads, because BMSR's link bit is latch-low — a single read of a link
+        // that blipped reports down. `link_is_up` takes a reader so it cannot be
+        // called with one.
+        let mut failed = false;
+        let up = phy::link_is_up(|| {
+            mdio.read(&mut mmio, PHY_MDIO_ADDRESS, phy::BMSR).unwrap_or_else(|_| {
+                failed = true;
+                0
+            })
+        });
+        if failed {
+            crate::tracing::emit_log("gmac-phy: MDIO stopped answering while polling link");
+            return;
+        }
+        if up {
+            break true;
+        }
+    };
+
+    if up {
+        crate::tracing::emit_log(&alloc::format!("gmac-phy: link up after {polls} polls"));
+    } else {
+        crate::tracing::emit_log(
+            "gmac-phy: link never came up — cable, PHY reset GPIO, RGMII pads, or the \
+             delay/TX_INV clock selection. The PHY answered, so MDIO itself is fine",
+        );
+    }
+    crate::tracing::emit_log("gmac-phy: done");
+}
+
 /// Build one real UDP datagram with `kernel-net` and push it through the
 /// [`NetDevice`] impl — the production path, not a hand-built frame.
 ///

@@ -31,13 +31,45 @@ const EID_SRST: u64 = 0x5352_5354;
 
 /// `sbi_system_reset` `reset_type`: cold reboot — the platform restarts as if
 /// power-cycled, which is what makes the board pick up a freshly TFTP'd image.
-const RESET_TYPE_COLD_REBOOT: u64 = 1;
+#[cfg(not(feature = "vf2"))]
+const RESET_TYPE: u64 = 1;
+
+/// `sbi_system_reset` `reset_type`: **warm** reboot on the VisionFive 2.
+///
+/// Cold reboot does not work on this board and does not fail cleanly either.
+/// Measured 2026-08-28: the `ecall` reaches OpenSBI's JH7110 reset driver, which
+/// prints
+///
+/// ```text
+/// pmic_ops: cannot read pmic power register
+/// ```
+///
+/// — it cannot reach the AXP15060 PMIC over I2C — and then **hangs**. The platform
+/// neither resets nor returns, so [`system_reset`]'s documented "a return means
+/// failure" contract never gets a chance to hold and the caller's fallback never
+/// runs. The board is left dead until someone power-cycles it by hand, which is
+/// exactly the cost `cargo xtask board reboot` exists to remove.
+///
+/// Warm reboot is the cheapest untried alternative: it may take a path through
+/// firmware that does not touch the PMIC at all. It is **not confirmed to work** —
+/// OpenSBI's reset driver may well claim both types and hang identically, in which
+/// case the next candidate is the JH7110 watchdog at `watchdog@13070000`, which
+/// U-Boot leaves present and unstarted (`WDT: Not starting watchdog@13070000`) and
+/// which needs no firmware cooperation.
+///
+/// Scoped to the board rather than swapped globally: cold reboot is correct under
+/// QEMU and snemu, and the `console-reboot-requests-srst` scenario asserts a halt,
+/// which a `NOT_SUPPORTED` return would not produce.
+#[cfg(feature = "vf2")]
+const RESET_TYPE: u64 = 0;
 
 /// `sbi_system_reset` `reset_reason`: no reason, i.e. an orderly request rather
 /// than a system failure.
 const RESET_REASON_NONE: u64 = 0;
 
-/// Cold-reboot the platform. SBI SRST extension, FID 0 (`sbi_system_reset`).
+/// Reboot the platform. SBI SRST extension, FID 0 (`sbi_system_reset`), with
+/// [`RESET_TYPE`] — cold everywhere except the VisionFive 2, where cold hangs the
+/// firmware (see that constant).
 ///
 /// **Does not return on success** — the firmware resets before the `ecall`
 /// retires. A return value therefore always means failure, most usefully
@@ -45,11 +77,16 @@ const RESET_REASON_NONE: u64 = 0;
 /// with older OpenSBI, and snemu until it models the call). Callers should treat
 /// a return as "reboot unavailable" and say so rather than hanging.
 ///
+/// **A return is not the only failure**, and the other one is worse: firmware can
+/// hang inside the call, which no caller-side code can recover from. That is the
+/// VisionFive 2's cold-reboot behaviour, and it is why [`RESET_TYPE`] is scoped
+/// per-platform rather than fixed at cold.
+///
 /// The caller is responsible for getting any final telemetry *onto the wire*
 /// first: a reset that fires while bytes are still queued produces a truncated
 /// frame and an unexplained silence, which is precisely the diagnostic vacuum this
 /// exists to avoid. See `console::flush_tx_blocking`.
-pub fn system_reset_cold_reboot() -> i64 {
+pub fn system_reset() -> i64 {
     let error: i64;
     unsafe {
         asm!(
@@ -57,7 +94,7 @@ pub fn system_reset_cold_reboot() -> i64 {
             in("a7") EID_SRST,
             in("a6") 0_u64, // FID 0 = sbi_system_reset
             // Both are arguments *and* return slots — see `send_ipi`.
-            inlateout("a0") RESET_TYPE_COLD_REBOOT => error,
+            inlateout("a0") RESET_TYPE => error,
             inlateout("a1") RESET_REASON_NONE => _,
             options(nostack),
         );

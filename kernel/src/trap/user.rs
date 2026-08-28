@@ -74,6 +74,23 @@ pub static CONSOLE_ECHO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_CONSOLE_ECHO_
 /// `workload=kitsch-static`: `kitsch` first light — composes a fixed scene and
 /// presents it through a `DisplaySink` cap.
 pub static KITSCH_STATIC_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KITSCH_STATIC_ELF"));
+
+/// `workload=kitsch-stitch`: the compositor's policy as a Stitch program.
+///
+/// **Embedded only under `itest-workloads`**, for the same reason the drivel
+/// server is gated: it statically links the whole Stitch interpreter, so it is
+/// ~1 MB and puts a *second* copy of the interpreter in the image beside
+/// `stitch_repl`'s. Un-gated it pushed the itest suite from ~9s to ~44s and
+/// tipped `heap-oom` — which asserts on a **wall-clock** deadline — past its
+/// 30s budget. A separate binary in the same image is not separate enough.
+#[cfg(feature = "itest-workloads")]
+pub static KITSCH_STITCH_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KITSCH_STITCH_ELF"));
+
+/// Without the feature the workload still *exists* — the registry stays additive
+/// — but there is nothing to run, so launching it fails at ELF load rather than
+/// silently booting something else.
+#[cfg(not(feature = "itest-workloads"))]
+pub static KITSCH_STITCH_ELF: &[u8] = &[];
 pub static STITCH_REPL_ELF: &[u8] = include_bytes!(env!("SNITCHOS_STITCH_REPL_ELF"));
 
 /// The `workload=probe` program: registers its own metric (`snitchos.probe.custom`)
@@ -416,6 +433,10 @@ pub static CONSOLE_ECHO: ProgramSpec = ProgramSpec { elf: CONSOLE_ECHO_ELF, laun
 pub static KITSCH_STATIC: ProgramSpec =
     ProgramSpec { elf: KITSCH_STATIC_ELF, launch: Launch::Display };
 
+/// `workload=kitsch-stitch`: the same `DisplaySink` launch, policy in Stitch.
+pub static KITSCH_STITCH: ProgramSpec =
+    ProgramSpec { elf: KITSCH_STITCH_ELF, launch: Launch::Display };
+
 /// `workload=stitch-repl`: the Stitch interpreter as a userspace REPL. Ambient —
 /// `ConsoleRead`/`ConsoleWrite` need no caps.
 pub static STITCH_REPL: ProgramSpec = ProgramSpec { elf: STITCH_REPL_ELF, launch: Launch::Plain };
@@ -622,18 +643,24 @@ pub extern "C" fn program_entry() -> ! {
             let rights = Rights::from_bits(*rights_bits);
             run_ipc(spec.elf, ep, rights, true)
         }
-        Launch::Display => run_with_caps(
-            spec.elf,
-            alloc::vec![(
-                kernel_proc::cap::Capability {
-                    object: kernel_proc::cap::Object::DisplaySink,
-                    rights: Rights::DISPLAY,
-                },
-                // A kernel-minted root grant — the ur-source of the scanout's
-                // derivation tree, so it has no parent holding to name.
-                0,
-            )],
-        ),
+        Launch::Display => {
+            // Userspace owns the screen from here: stop the heartbeat's
+            // milestone-0 clear, which would otherwise erase the compositor's
+            // output at tick rate.
+            crate::ramfb::claim();
+            run_with_caps(
+                spec.elf,
+                alloc::vec![(
+                    kernel_proc::cap::Capability {
+                        object: kernel_proc::cap::Object::DisplaySink,
+                        rights: Rights::DISPLAY,
+                    },
+                    // A kernel-minted root grant — the ur-source of the scanout's
+                    // derivation tree, so it has no parent holding to name.
+                    0,
+                )],
+            )
+        }
     }
 }
 
@@ -796,6 +823,14 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         programs: &[ProgramSpawn {
             name: "kitsch_static",
             program: &KITSCH_STATIC,
+            priority: Priority::Normal,
+        }],
+    }),
+    (WorkloadKind::KitschStitch, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn {
+            name: "kitsch_stitch",
+            program: &KITSCH_STITCH,
             priority: Priority::Normal,
         }],
     }),

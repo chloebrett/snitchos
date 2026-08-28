@@ -344,6 +344,30 @@ prove.
 | **T5** | **A decodable datagram arrives.** `net=` pointed at the host, one real `Frame` through `UdpFrameSink`. | `cargo xtask collect` decodes it | the whole stack, once | that it survives |
 | **T6** | **`net=` sustained.** Heartbeat-paced telemetry into Grafana, minutes not seconds. | Grafana | ring wrap, reclaim under real load, no leak | — |
 
+### Which rungs are already exercised off-hardware (2026-08-28)
+
+snemu now models the GMAC (`snemu/src/gmac.rs`), so several rungs have a desk
+rehearsal. **A green rehearsal means the glue does what we meant, never that the
+driver works** — snemu's model and `kernel_devices::gmac` are transcribed from the
+same mainline headers, so a wrong offset is wrong identically on both sides and they
+agree. The board still decides.
+
+| Rung | Off-hardware today | What the board still decides |
+|---|---|---|
+| T0 MAC answers | ✅ `gmac-probe-identifies-the-core` | that `0x0110` really is the version offset |
+| T1 PHY answers | ❌ no PHY modelled | everything — MDC divider, PHY address, MDIO pads |
+| T2 link up | ❌ | everything — RGMII pads, delays, cable |
+| T3 engine moves | ✅ `gmac-tx-transmits-a-frame` | that the descriptor layout matches silicon |
+| T4 bytes leave | ⚠️ partial — the model captures the frame | that they reach a switch, which needs T2 |
+| T5 decodable datagram | ⚠️ built and transmitted, not decoded back | end-to-end through the collector |
+| T6 sustained | ❌ | ring wrap and reclaim under real load |
+
+Two conversions are cheap and not yet done: a minimal MDIO-attached PHY in snemu
+answering the YT8531 id would make **T1** a desk rung, and routing `net=` through the
+GMAC (a `TelemetrySource::Gmac` beside the existing `Console`/`Net`) would make **T5**
+one. Neither touches T2, which is the genuinely unknown-shaped part and stays board-only
+by construction.
+
 Three things this ordering buys:
 
 - **T3 separates DMA from Ethernet.** The single most valuable rung, and the one most

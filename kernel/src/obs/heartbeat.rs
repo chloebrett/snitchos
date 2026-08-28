@@ -302,7 +302,7 @@ fn reboot_now() {
     crate::tracing::emit_log("reboot: requested over console, resetting");
     crate::console::flush_tx_blocking();
 
-    let error = crate::sbi::system_reset_cold_reboot();
+    let error = crate::sbi::system_reset();
 
     // Unreachable when the firmware honours the call.
     crate::console::clear_reboot_request();

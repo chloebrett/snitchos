@@ -28,6 +28,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("syscall_hog", "SNITCHOS_SYSCALL_HOG_ELF"),
     ("console_echo", "SNITCHOS_CONSOLE_ECHO_ELF"),
     ("kitsch_static", "SNITCHOS_KITSCH_STATIC_ELF"),
+    ("kitsch_stitch", "SNITCHOS_KITSCH_STITCH_ELF"),
     ("stitch_repl", "SNITCHOS_STITCH_REPL_ELF"),
     ("probe", "SNITCHOS_PROBE_ELF"),
     ("spawner", "SNITCHOS_SPAWNER_ELF"),
@@ -263,8 +264,16 @@ fn build_and_embed_user(kernel_dir: &str) {
     // Skipping the *embed* (rather than the build) keeps the dependency-graph walk
     // below complete, so a stale binary is still impossible.
     let drivel = std::env::var_os("CARGO_FEATURE_KVETCH_DRIVEL").is_some();
+    // `kitsch_stitch` links the whole Stitch interpreter (~1 MB — a second copy
+    // beside `stitch_repl`'s), so it embeds only for the itest build. Un-gated it
+    // slowed every scenario's boot enough to break a wall-clock assertion in an
+    // unrelated one. Same reasoning as the drivel weights above.
+    let itest = std::env::var_os("CARGO_FEATURE_ITEST_WORKLOADS").is_some();
     for (bin, env_var) in USER_PROGRAMS {
         if *bin == "kvetch-drivel-server" && !drivel {
+            continue;
+        }
+        if *bin == "kitsch_stitch" && !itest {
             continue;
         }
         embed(&format!("{bin_dir}/{bin}"), env_var);

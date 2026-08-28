@@ -633,6 +633,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::GlitchBeep
             | WorkloadKind::GlitchStarve
             | WorkloadKind::KitschStatic
+            | WorkloadKind::KitschStitch
             | WorkloadKind::ViewDemo
             | WorkloadKind::Shell
             | WorkloadKind::FrameOom
@@ -647,6 +648,8 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::GmacProbe) => device::gmac::probe(&dtb),
         // Writes, unlike the probe — see the `GmacTx` variant's note.
         Some(WorkloadKind::GmacTx) => device::gmac::tx_smoke(),
+        // Talks to the PHY over MDIO rather than to the MAC's DMA path.
+        Some(WorkloadKind::GmacPhy) => device::gmac::phy_smoke(),
     }
 
     // DTB physical region lives in the identity gigapage we're about

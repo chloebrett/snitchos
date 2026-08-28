@@ -52,6 +52,27 @@ const TX_RING_LEN: u64 = 0x112C;
 /// trigger**, matching the real device and the guest driver's write order.
 const TX_END_ADDR: u64 = 0x1120;
 
+/// `GMAC_MDIO_ADDR` — writing it starts a PHY transaction.
+const MDIO_ADDR: u64 = 0x0200;
+/// `GMAC_MDIO_DATA`.
+const MDIO_DATA: u64 = 0x0204;
+
+/// The MDIO address the VF2's PHY sits at (`ethernet-phy@0` in the board DTS).
+/// Every other address reads as a floating bus.
+const PHY_ADDRESS: u32 = 0;
+
+/// `BMSR` link status.
+const BMSR_LINK_UP: u16 = 1 << 2;
+/// `BMSR` auto-negotiation complete.
+const BMSR_ANEG_COMPLETE: u16 = 1 << 5;
+
+/// How many `BMSR` polls before the modelled link comes up.
+///
+/// **Not zero, deliberately.** A link that is up on the first read would let a guest
+/// that never restarts auto-negotiation — or never waits — pass. Making the model
+/// take time is what puts the guest's polling loop under test at all.
+const LINK_UP_AFTER_POLLS: u32 = 3;
+
 /// `TDES3_OWN`.
 const TDES3_OWN: u32 = 1 << 31;
 /// `TDES3_ERROR_SUMMARY`, in the writeback format — the device's way of saying the
@@ -78,6 +99,12 @@ pub(crate) struct Gmac {
     /// the already-returned slot 0 — a failure that looks like a guest bug.
     tx_current: u32,
     frames: Vec<Vec<u8>>,
+    /// Result of the last MDIO transaction, returned by reads of `MDIO_DATA`.
+    mdio_data: u16,
+    /// How many times the guest has read `BMSR`. Counted on the *address* write
+    /// rather than the data read, because reads take `&self` — and every MDIO read
+    /// is preceded by an address write, so this is the same count.
+    bmsr_polls: u32,
 }
 
 impl Gmac {
@@ -114,6 +141,33 @@ impl Gmac {
             a if a == GMAC1_BASE + TX_BASE_ADDR => self.tx_base & 0xFFFF_FFFF,
             a if a == GMAC1_BASE + TX_BASE_ADDR_HI => self.tx_base >> 32,
             a if a == GMAC1_BASE + TX_RING_LEN => u64::from(self.tx_ring_len),
+            // Transactions complete instantly, so `GBUSY` always reads clear. A
+            // model that left it set would turn every guest MDIO read into the
+            // bounded-poll timeout.
+            a if a == GMAC1_BASE + MDIO_ADDR => 0,
+            a if a == GMAC1_BASE + MDIO_DATA => u64::from(self.mdio_data),
+            _ => 0,
+        }
+    }
+
+    /// One PHY register's value. Only [`PHY_ADDRESS`] answers; anything else is a
+    /// floating bus reading all-ones, which is what the guest refuses as poison.
+    fn phy_register(&mut self, phy: u32, reg: u32) -> u16 {
+        if phy != PHY_ADDRESS {
+            return 0xFFFF;
+        }
+        match reg {
+            1 => {
+                self.bmsr_polls += 1;
+                if self.bmsr_polls > LINK_UP_AFTER_POLLS {
+                    BMSR_LINK_UP | BMSR_ANEG_COMPLETE
+                } else {
+                    0
+                }
+            }
+            // Motorcomm YT8531 — `PHY_ID_YT8531` in mainline `motorcomm.c`.
+            2 => 0x4F51,
+            3 => 0xE91B,
             _ => 0,
         }
     }
@@ -129,6 +183,16 @@ impl Gmac {
                 self.tx_base = (self.tx_base & 0xFFFF_FFFF) | (value64 << 32);
             }
             a if a == GMAC1_BASE + TX_RING_LEN => self.tx_ring_len = value,
+            // Writing the address word *is* the transaction. Decode it, resolve the
+            // answer now, and leave it in the data register for the guest to read.
+            a if a == GMAC1_BASE + MDIO_ADDR => {
+                let phy = (value >> 21) & 0x1F;
+                let reg = (value >> 16) & 0x1F;
+                let is_read = (value >> 2) & 0b11 == 0b11;
+                if is_read {
+                    self.mdio_data = self.phy_register(phy, reg);
+                }
+            }
             _ => {}
         }
     }
@@ -287,6 +351,53 @@ mod tests {
             g.service_tx(&mut mem);
         }
         assert_eq!(g.frames().len(), 5, "the fifth kick wrapped back to slot 0");
+    }
+
+    /// Drive one MDIO read the way the guest does: write the address word, then
+    /// read the data register.
+    fn mdio_read(g: &mut Gmac, phy: u32, reg: u32) -> u16 {
+        let word = (phy << 21) | (reg << 16) | (3 << 2) | 1; // PA | RDA | READ | BUSY
+        g.write(GMAC1_BASE + MDIO_ADDR, word);
+        g.read(GMAC1_BASE + MDIO_DATA) as u16
+    }
+
+    #[test]
+    fn the_phy_answers_its_identity_at_the_standard_registers() {
+        // T1's oracle. The value is a known constant, so it cannot arise from noise.
+        let mut g = Gmac::new();
+        assert_eq!(mdio_read(&mut g, PHY_ADDRESS, 2), 0x4F51);
+        assert_eq!(mdio_read(&mut g, PHY_ADDRESS, 3), 0xE91B);
+    }
+
+    #[test]
+    fn a_transaction_completes_rather_than_leaving_busy_set() {
+        // The guest polls GBUSY with a bounded loop and errors if it never clears.
+        // A model that left it set would make every MDIO read a timeout.
+        let mut g = Gmac::new();
+        g.write(GMAC1_BASE + MDIO_ADDR, (PHY_ADDRESS << 21) | (2 << 16) | (3 << 2) | 1);
+        assert_eq!(g.read(GMAC1_BASE + MDIO_ADDR) & 1, 0, "GBUSY cleared");
+    }
+
+    #[test]
+    fn an_empty_mdio_address_reads_as_a_floating_bus() {
+        // Only one PHY is on this bus. Addressing any other must look like nothing
+        // answering — all-ones — which is exactly what the guest refuses as poison.
+        let mut g = Gmac::new();
+        assert_eq!(mdio_read(&mut g, 7, 2), 0xFFFF);
+    }
+
+    #[test]
+    fn the_link_comes_up_only_after_the_guest_has_polled_for_it() {
+        // Starting up would let a guest that never restarts auto-negotiation pass.
+        // The point of the poll loop is that it *waits*, so the model must make it.
+        let mut g = Gmac::new();
+        assert_eq!(mdio_read(&mut g, PHY_ADDRESS, 1) & BMSR_LINK_UP, 0, "down at first");
+        for _ in 0..LINK_UP_AFTER_POLLS {
+            let _ = mdio_read(&mut g, PHY_ADDRESS, 1);
+        }
+        let bmsr = mdio_read(&mut g, PHY_ADDRESS, 1);
+        assert_ne!(bmsr & BMSR_LINK_UP, 0, "up once polled");
+        assert_ne!(bmsr & BMSR_ANEG_COMPLETE, 0, "and negotiation reported complete");
     }
 
     #[test]

@@ -48,6 +48,27 @@ pub static INIT_REFUSED: DeferredCounter =
 /// is set, so a machine without `-device ramfb` just never presents.
 static READY: AtomicBool = AtomicBool::new(false);
 
+/// Set once a `DisplaySink` capability has been granted to userspace: somebody
+/// out there owns the screen now.
+///
+/// The heartbeat's milestone-0 [`present`] clears the *whole* framebuffer every
+/// tick. That was fine when the kernel was the only thing that could draw; the
+/// moment a userspace compositor exists it is a tick-rate eraser fighting it for
+/// the glass. Rather than delete the demo clear (it is still the proof that
+/// `ramfb::init` worked on a machine with no compositor), it yields: the kernel
+/// draws only while nothing else claims the display.
+///
+/// Found by asserting on pixels — the screen showed one correct row and two
+/// clobbered ones, which no telemetry assertion would ever have noticed.
+static CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// Record that userspace holds the display. Called where the `DisplaySink` cap
+/// is minted; one-way, because a compositor that exits leaves its last frame up
+/// rather than handing the screen back to a clear loop.
+pub fn claim() {
+    CLAIMED.store(true, Ordering::Relaxed);
+}
+
 #[derive(Debug)]
 pub enum InitError {
     /// No `etc/ramfb` file — QEMU wasn't given `-device ramfb`.
@@ -100,7 +121,7 @@ pub unsafe fn init() -> Result<(), InitError> {
 /// counter. No-op (doesn't bump the counter) until `init` has
 /// succeeded. Called once per heartbeat tick.
 pub fn present() {
-    if !READY.load(Ordering::Relaxed) {
+    if !READY.load(Ordering::Relaxed) || CLAIMED.load(Ordering::Relaxed) {
         return;
     }
     // SAFETY: `READY` is only set after `init` has mapped exactly

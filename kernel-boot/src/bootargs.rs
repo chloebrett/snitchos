@@ -163,6 +163,15 @@ workloads! {
         /// observable nobody has watched fail is indistinguishable from a healthy
         /// system. `itest-workloads` only. See `plans/glitch-v2-async-ring.md`.
         GlitchStarve,
+        /// JH7110 PHY smoke (M2.5): reads the PHY's identity over MDIO, then
+        /// advertises 100-full, restarts auto-negotiation and polls for link — the
+        /// `T1`/`T2` rungs of the design note's tracer-bullet ladder.
+        ///
+        /// Reads and writes **the PHY**, not the MAC's DMA path, so it is separate
+        /// from [`GmacTx`](Self::GmacTx): the two fail for disjoint reasons (MDC
+        /// divider and MDIO pads versus ring bookkeeping and buffer addresses), and
+        /// merging them would merge their hypothesis sets. `itest-workloads` only.
+        GmacPhy,
         /// JH7110 GMAC reconnaissance (M2.5): a **read-only** boot that dumps what
         /// U-Boot already left configured — clock gates, reset status, the MAC's own
         /// registers and the `phy_intf_sel` syscon field — then stops. It writes
@@ -222,6 +231,13 @@ workloads! {
         /// rasterize → cap-gated present → glass. See `plans/kitsch-v1.md`
         /// increment 4.
         KitschStatic,
+        /// `kitsch` policy in Stitch: the compositor's *scene description* is a
+        /// Stitch program calling `present`, while the backend does the
+        /// cell-picking, glyph rasterizing and the syscall. The first
+        /// **long-running** Stitch process — everything before it ran and exited
+        /// — so it also reports its own footprint per pass. See
+        /// `plans/kitsch-v1.md` increment 5.
+        KitschStitch,
         /// The completion endpoint served by a model with **no weights**: a
         /// `kvetch` server backed by `babble` (rung 0 of the generative ladder)
         /// plus a client asking for one completion of a fixed prefix. Proves
@@ -871,6 +887,11 @@ mod tests {
     #[test]
     fn selects_gmac_probe() {
         assert_eq!(select("workload=gmac-probe"), Some(WorkloadKind::GmacProbe));
+    }
+
+    #[test]
+    fn selects_gmac_phy() {
+        assert_eq!(select("workload=gmac-phy"), Some(WorkloadKind::GmacPhy));
     }
 
     #[test]
