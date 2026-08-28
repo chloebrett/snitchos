@@ -24,6 +24,7 @@ pub mod framebuffer;
 pub mod fwcfg;
 pub mod gmac;
 pub mod iomux;
+pub mod phy;
 pub mod plic;
 pub mod pwmdac;
 pub mod ramfb;

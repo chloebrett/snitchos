@@ -748,6 +748,19 @@ mod tests {
         assert_eq!(TDES3_FD, 0x2000_0000);
         assert_eq!(TDES3_CTXT, 0x4000_0000);
         assert_eq!(TDES3_OWN, 0x8000_0000);
+        assert_eq!(TDES3_ERROR_SUMMARY, 0x0000_8000);
+    }
+
+    #[test]
+    fn a_returned_descriptor_reports_whether_the_transmit_failed() {
+        // `OWN` cleared says the device took the descriptor; this says whether it
+        // managed anything with it. Conflating them is the bug that let a wrong
+        // buffer address read as success.
+        let sent = Descriptor::prepare(0x4020_0000, 64).expect("64 fits").give_to_device();
+        assert!(!sent.transmit_failed(), "no error bit set");
+
+        let failed = Descriptor { tdes3: sent.tdes3 | TDES3_ERROR_SUMMARY, ..sent };
+        assert!(failed.transmit_failed());
     }
 
     #[test]
