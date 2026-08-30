@@ -12,11 +12,13 @@
 
 use std::io::Write;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
 use xtask_board::echo::visible;
+use xtask_board::knock::{Answer, Knock};
+use xtask_board::script;
 use xtask_board::outcome::{Outcome, condition_from, exit_code};
 use xtask_board::reach::{
     Unreachable, check_device, classify_open_failure, holder_pid, io_kind, refine_with_holder,
@@ -80,6 +82,54 @@ enum Cmd {
         until_quiet: Option<u64>,
     },
 
+    /// Catch the U-Boot prompt across a power cycle, run commands at it, then
+    /// stream whatever the board does next — **all on one open port**.
+    ///
+    /// `exec` opens, writes once, captures, closes. That is the wrong shape for
+    /// driving U-Boot, and each way it is wrong cost a boot on 2026-08-28:
+    ///
+    /// - **`bootdelay` is two seconds.** Reaching the prompt means already typing
+    ///   when the window opens, so the knocking has to start before the board
+    ///   does — which means holding the port across the power cycle.
+    /// - **Releasing the port between commands loses the boot log.** The adapter
+    ///   buffers it, and the next process to open reads a stale burst as though it
+    ///   were live. One owner for the whole sequence, or the record lies.
+    /// - **U-Boot's console has no flow control.** Commands go one at a time,
+    ///   waiting for the prompt between them ([`xtask_board::script`]); a pasted
+    ///   block drops characters, and a `setenv` that loses its first five is
+    ///   accepted silently as a different variable.
+    ///
+    /// Exit codes as `exec`: `0` the sequence ran, `1` the board was reached but
+    /// never gave the prompt (or a step's wait went unanswered), `2` never reached.
+    Uboot {
+        /// Serial device. A **call-out** node (`/dev/cu.*`) on macOS.
+        #[arg(long)]
+        device: String,
+
+        /// Line rate.
+        #[arg(long, default_value_t = 115_200)]
+        baud: u32,
+
+        /// A command to type at the prompt. Repeatable, run in order, each
+        /// awaiting the prompt before the next is sent.
+        #[arg(long = "cmd")]
+        cmds: Vec<String>,
+
+        /// How long to keep knocking for the prompt, in milliseconds. Generous by
+        /// default: the whole point is to be armed *before* a human power-cycles.
+        #[arg(long, default_value_t = 600_000)]
+        catch: u64,
+
+        /// How long to keep reading after the last command, in milliseconds —
+        /// which is how a `run bootcmd` boot log gets captured.
+        #[arg(long, default_value_t = 45_000)]
+        stream: u64,
+
+        /// The prompt to wait for.
+        #[arg(long, default_value = "StarFive #")]
+        prompt: String,
+    },
+
     /// Reboot the board over the console and wait until it is booting again.
     ///
     /// Writes the kernel's reboot line, which `RebootDetector` matches and the
@@ -140,6 +190,14 @@ fn main() -> ExitCode {
             report(&outcome);
             ExitCode::from(exit_code(&condition, &outcome))
         }
+        Cmd::Uboot { device, baud, cmds, catch, stream, prompt } => uboot(&UbootRequest {
+            device: &device,
+            baud,
+            cmds: &cmds,
+            catch: Duration::from_millis(catch),
+            stream: Duration::from_millis(stream),
+            prompt: &prompt,
+        }),
         Cmd::Reboot { device, baud, timeout, min_interval, cap, window, history } => {
             reboot(&RebootRequest {
                 device: &device,
@@ -151,6 +209,186 @@ fn main() -> ExitCode {
             })
         }
     }
+}
+
+/// Everything `uboot` needs. Same config-struct reasoning as [`RebootRequest`]:
+/// two of these are interchangeable `u64` durations.
+struct UbootRequest<'a> {
+    device: &'a str,
+    baud: u32,
+    cmds: &'a [String],
+    catch: Duration,
+    stream: Duration,
+    prompt: &'a str,
+}
+
+/// How often to send a key while knocking. Comfortably inside `bootdelay`, and
+/// slow enough that the echo does not swamp the line.
+const KNOCK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How often to send a bare carriage return and judge the reply. See
+/// [`xtask_board::knock`] for why the question has to be re-asked rather than
+/// answered from a rolling buffer.
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Catch the prompt, run the commands, stream the aftermath — one port throughout.
+fn uboot(req: &UbootRequest<'_>) -> ExitCode {
+    if let Err(unreachable) = check_device(req.device) {
+        report(&Outcome::Unreachable(unreachable));
+        return ExitCode::from(2);
+    }
+    let mut port: Box<dyn ReadWrite> = match serialport::new(req.device, req.baud)
+        .timeout(collector::serial::READ_TIMEOUT)
+        .open()
+    {
+        Ok(port) => Box::new(port),
+        Err(e) => {
+            let mut unreachable = classify_open_failure(req.device, io_kind(e.kind));
+            consult_lsof(&mut unreachable, req.device);
+            report(&Outcome::Unreachable(unreachable));
+            return ExitCode::from(2);
+        }
+    };
+
+    match catch_prompt(&mut *port, req) {
+        Err(code) => return code,
+        Ok(()) => eprintln!("board: at the {} prompt", req.prompt.trim()),
+    }
+
+    // One line at a time, waiting for the prompt between them. `script::run`
+    // abandons the rest if a step goes unanswered — a half-written environment is
+    // worse than none, and that rule lives there rather than in this loop.
+    let steps: Vec<script::Step> = req
+        .cmds
+        .iter()
+        .map(|cmd| {
+            script::Step::new(
+                format!("{cmd}\r").into_bytes(),
+                StopCondition::new(PROMPT_TIMEOUT).marker(req.prompt.as_bytes()),
+            )
+        })
+        .collect();
+
+    let mut failed = false;
+    // Kept rather than discarded: `script::run`'s closure signals transport death
+    // with `None`, which says *where* it died but not why. The kind is what
+    // `classify_open_failure` turns into an action, so it must survive the trip.
+    let mut transport_error: Option<std::io::ErrorKind> = None;
+    let outcome = script::run(&steps, |step| {
+        eprintln!("board: > {}", visible(step.send()));
+        if let Err(e) = port.write_all(step.send()) {
+            transport_error = Some(e.kind());
+            return None;
+        }
+        let (ended, raw) = capture(&mut *port, step.until());
+        emit(&raw);
+        match ended {
+            Ended::Stopped(reason) => Some(reason),
+            Ended::TransportFailed(kind) => {
+                transport_error = Some(kind);
+                None
+            }
+        }
+    });
+
+    match &outcome {
+        script::ScriptOutcome::Completed { .. } => {}
+        script::ScriptOutcome::Abandoned { index, reason } => {
+            failed = true;
+            eprintln!(
+                "board: no prompt back after {:?} ({reason:?}) — {} later command(s) unsent",
+                req.cmds.get(*index).map_or("?", String::as_str),
+                steps.len() - index - 1
+            );
+        }
+        script::ScriptOutcome::Interrupted { index } => {
+            eprintln!("board: transport died during command {index}");
+            let kind = transport_error.unwrap_or(std::io::ErrorKind::Other);
+            report(&Outcome::Unreachable(classify_open_failure(req.device, kind)));
+            // Exit 2: the board was answering, we stopped being able to hear it.
+            // Fix the host, do not power-cycle.
+            return ExitCode::from(2);
+        }
+    }
+
+    // Stream the aftermath. The last command is usually `run bootcmd`, whose
+    // whole output arrives *after* it — and never returns to a prompt, so this is
+    // a plain timed read rather than another step.
+    if req.stream > Duration::ZERO {
+        let (_, raw) = capture(&mut *port, &StopCondition::new(req.stream));
+        emit(&raw);
+    }
+
+    ExitCode::from(u8::from(failed))
+}
+
+/// How long a single U-Boot command may take to give the prompt back. `saveenv`
+/// writes SPI flash and `dhcp` waits on a link, so this is not instant.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Knock until the target prompt answers. `Err` carries the exit code.
+fn catch_prompt(port: &mut dyn ReadWrite, req: &UbootRequest<'_>) -> Result<(), ExitCode> {
+    let mut knock = Knock::new(req.prompt.as_bytes()).also(b"stitch>".as_slice(), "SnitchOS");
+    let mut buf = [0u8; 1024];
+    let started = Instant::now();
+    let mut last_key = Instant::now();
+    let mut announced_other = false;
+
+    eprintln!(
+        "board: knocking for {:?} — power-cycle the board now",
+        req.catch
+    );
+    // Ask once up front rather than back-dating the clock: if the board is
+    // already sitting at a prompt this answers immediately, and a `Duration`
+    // subtracted from `Instant::now()` is a panic waiting for a slow clock.
+    let _ = port.write_all(b"\r");
+    knock.probe();
+    let mut last_probe = Instant::now();
+    while started.elapsed() < req.catch {
+        match port.read(&mut buf) {
+            Ok(0) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+            Ok(n) => {
+                // Tee the boot log as it happens: the bytes before the prompt are
+                // the SPL banner and DDR training, which is exactly what you want
+                // when the prompt never comes.
+                let _ = std::io::stdout().write_all(&buf[..n]);
+                let _ = std::io::stdout().flush();
+                match knock.observe(&buf[..n]) {
+                    Some(Answer::Target) => return Ok(()),
+                    // Say it once. A board that autobooted past the window will
+                    // answer every probe, and the operator needs the fact, not a
+                    // line a second.
+                    Some(Answer::Other(name)) if !announced_other => {
+                        announced_other = true;
+                        eprintln!(
+                            "board: {name} answered — it autobooted past the window. \
+                             Power-cycle while this is still knocking."
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                report(&Outcome::Unreachable(classify_open_failure(req.device, e.kind())));
+                return Err(ExitCode::from(2));
+            }
+        }
+        if last_key.elapsed() >= KNOCK_INTERVAL {
+            let _ = port.write_all(b" ");
+            last_key = Instant::now();
+        }
+        if last_probe.elapsed() >= PROBE_INTERVAL {
+            let _ = port.write_all(b"\r");
+            knock.probe();
+            last_probe = Instant::now();
+        }
+    }
+    eprintln!("board: never reached the {} prompt", req.prompt.trim());
+    // Exit 1, not 2: the port opened and we listened: the board did not answer.
+    // That is the same distinction `exec` draws, and an unattended loop acts on it
+    // by power-cycling rather than by fixing the host.
+    Err(ExitCode::from(1))
 }
 
 /// Everything `reboot` needs. A config struct rather than seven positional

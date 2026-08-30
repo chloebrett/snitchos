@@ -4,6 +4,7 @@
 //! serial-linked half; lean `xtask` forwards to it.
 
 pub mod echo;
+pub mod knock;
 pub mod outcome;
 pub mod reach;
 pub mod script;
@@ -11,6 +12,83 @@ pub mod split;
 pub mod stop;
 pub mod thrash;
 pub mod wire;
+
+#[cfg(test)]
+mod knock_tests {
+    use super::knock::{Answer, Knock};
+
+    fn uboot() -> Knock {
+        Knock::new(b"StarFive #").also(b"stitch>", "SnitchOS")
+    }
+
+    /// The ordinary case: we knocked, the prompt answered.
+    #[test]
+    fn a_prompt_arriving_after_the_probe_is_caught() {
+        let mut k = uboot();
+        k.probe();
+        assert_eq!(k.observe(b"\r\nStarFive # "), Some(Answer::Target));
+    }
+
+    /// **The bug this module exists to prevent.** A prompt printed *before* we
+    /// opened the port — or before this probe — is not evidence that the board is
+    /// at a prompt *now*. A capture that treats it as such reports success against
+    /// a board that has since booted away, which cost a boot on 2026-08-28: the
+    /// board sat in SnitchOS echoing keystrokes while the catch loop waited for a
+    /// `StarFive #` that had scrolled past long before.
+    #[test]
+    fn a_prompt_seen_before_the_probe_does_not_count() {
+        let mut k = uboot();
+        assert_eq!(k.observe(b"StarFive # "), None, "nothing has been asked yet");
+        k.probe();
+        assert_eq!(k.observe(b"    "), None, "only stale echo since the probe");
+    }
+
+    /// A *different* known prompt is a different situation needing a different
+    /// action — the board autobooted past the window, so power-cycle rather than
+    /// keep knocking. Silence would leave the operator staring at a spinner.
+    #[test]
+    fn another_known_prompt_is_reported_as_itself() {
+        let mut k = uboot();
+        k.probe();
+        assert_eq!(k.observe(b"\r\nstitch> "), Some(Answer::Other("SnitchOS".into())));
+    }
+
+    /// A serial read splits wherever it likes; the prompt is a byte sequence, not
+    /// a line. Matching per-read would miss every prompt that straddles a boundary,
+    /// which on a 115200 line is most of them.
+    #[test]
+    fn a_prompt_split_across_reads_is_still_caught() {
+        let mut k = uboot();
+        k.probe();
+        assert_eq!(k.observe(b"StarF"), None);
+        assert_eq!(k.observe(b"ive # "), Some(Answer::Target));
+    }
+
+    /// Knocking echoes: U-Boot prints back every space we send. The prompt must
+    /// still be found among them, so the evidence cannot live in a window the
+    /// echo can push it out of.
+    #[test]
+    fn echoed_keystrokes_do_not_bury_the_prompt() {
+        let mut k = uboot();
+        k.probe();
+        for _ in 0..500 {
+            assert_eq!(k.observe(b" "), None);
+        }
+        assert_eq!(k.observe(b"StarFive # "), Some(Answer::Target));
+    }
+
+    /// Each probe starts a fresh question. Without this the first answer would
+    /// satisfy every later probe, and the loop could never detect that the board
+    /// had stopped answering.
+    #[test]
+    fn probing_again_discards_the_previous_answer() {
+        let mut k = uboot();
+        k.probe();
+        assert_eq!(k.observe(b"StarFive # "), Some(Answer::Target));
+        k.probe();
+        assert_eq!(k.observe(b" "), None);
+    }
+}
 
 #[cfg(test)]
 mod echo_tests {

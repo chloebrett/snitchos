@@ -253,6 +253,79 @@ is a hypothesis, and the text-mode control boot is the experiment that tests it.
 is not the problem: it decoded everything the board sent, and `--replay` of the raw
 capture is a clean, complete decode. The fault is kernel-side.
 
+### ✅ ROOT-CAUSED: the kernel inherits U-Boot's PLIC enable bitmap
+
+Two more boots settled it, and both hypotheses above were wrong.
+
+**First**, `console=text workload=gmac-probe` hangs in exactly the same place. So
+it is not `console=frames`, not the frame sink, and not TX volume. In text mode
+`println!` takes `UART.lock()` and writes *polled*, so a missing marker really is
+"did not get here".
+
+**Second**, three bisection markers between `post-timer` and `post-ipi` located it
+precisely:
+
+```
+ph: plic boot mhartid 2 -> S-context 4
+…
+ph: post-timer (interrupts on)
+ph: post-ssie                        <- last line. `post-seie` never printed.
+```
+
+The hang is *inside* `trap::enable_external_interrupts()` — the single CSR write
+that sets `sstatus.SEIE`.
+
+And the PLIC context is **right**: mhartid 2 is cpu2, whose S-context is 4 under
+the JH7110's `interrupts-extended` order. So last session's suspicion of the
+context formula is exonerated; the formula and the boot-hart-derived computation
+both hold.
+
+The actual mechanism:
+
+- `plic::enable_source` **deliberately preserves the other bits** in the enable
+  word, because a context may route several sources. Correct on a freshly-reset
+  PLIC.
+- **A bootloader is not a reset.** U-Boot has just run DHCP and TFTP over GMAC1,
+  and leaves that source enabled in the same S-context the kernel adopts.
+- So the first `SEIE` immediately takes an external interrupt for a device the
+  kernel has no handler for. `handle_external` claims it, sees it is not the UART,
+  completes it — and **completing an interrupt does not quiet its device**, so the
+  `while let Some(source) = claim()` loop claims it again, forever.
+
+A livelock inside the trap handler, with interrupts masked. No fault, no panic,
+no output: indistinguishable from a dead board, which is why it read as "the UART
+is broken" for most of the day.
+
+**Fix**: `kernel_devices::plic::reset_context(plic, context, max_source)` clears
+every enable bit the context holds before `enable_source` sets ours — the kernel
+starts from a bitmap it owns rather than inheriting the bootloader's. Three tests
+(TDD, RED confirmed first): clears inherited enables across *both* enable words,
+leaves other contexts alone (the JH7110's M-contexts belong to OpenSBI, still
+running), and covers the word holding `max_source` inclusively. `MAX_SOURCE` is
+per-platform — 95 on QEMU `virt` (`VIRT_NDEV`), 136 on the JH7110
+(`riscv,ndev = <136>`) — because clearing past the implemented range would write
+registers that do not exist.
+
+**Still worth doing separately**: `handle_external`'s claim loop is unbounded and
+silent. An enabled source with no handler wedges the kernel with no diagnostic at
+all. It should disable-and-snitch instead — "refusals snitch, never silent" is
+this repo's rule everywhere else, and this is the one path where a surprise costs
+the whole machine.
+
+### Two lessons worth keeping
+
+- **A missing marker means "did not get here" before it means "the mechanism under
+  test is broken".** `tx-irq-ok` exists as the PLIC+SEIE+THRE+drain oracle, and
+  last session read its absence as proof that path had failed. It was absent
+  because execution stopped one instruction earlier. `ph: post-ipi`'s absence is
+  what distinguishes the two, and it was already in the tree.
+- **I built three successive mechanism stories** (volume-dependent TX livelock,
+  `UART.lock()` deadlock, `TX_RING` deadlock) and the code had already defended
+  against all three — `drain_tx` takes a fresh handle, `tx_push` wraps in
+  `without_interrupts`. Each story was plausible and none was tested. The
+  three-marker bisect cost one boot and beat all of them. *Instrument before
+  theorising* is cheaper than it looks, even when the theory feels close.
+
 ### One smaller thing the decode surfaced
 
 `BuildInfo` arrives **before** `Hello`, and the collector drops it with a warning
@@ -261,11 +334,85 @@ QEMU-shaped advice that cannot apply to a serial board — there is no connect-f
 on a physical line. Either the kernel's frame order is wrong or the collector's
 expectation is; either way the message needs a serial-aware branch.
 
+## Where the session stopped
+
+**The PLIC fix is written, host-tested and built into `snitchos.img`, but has
+never run on the board.** The session ended before a power cycle could confirm it.
+That is the one thing to do first next time, and it is a single boot:
+
+```
+cargo xtask image          # if the tree has moved
+# arm a capture, power-cycle, and read the markers
+```
+
+Success looks like `post-ssie` → **`post-seie`** → `tx-irq-ok` → `post-ipi`,
+followed by the `gmac-probe` dump. `post-seie` is the whole result: it is the
+marker that has never printed on this board.
+
+If it still stops at `post-ssie`, the diagnosis is wrong and the next suspect is
+the claim loop itself rather than the bitmap — bound `handle_external` and have it
+report the source id, which names the device instead of guessing at it.
+
+Note the confirmation boot also delivers **item 4a** (the probe dump) for free,
+since the fix has to be tested with *some* workload and `gmac-probe` is the one
+still owed.
+
 ## Still to do
 
-- The `console=frames` hang — the blocker for item 2 / M2.
-- A reset path that works on this board (WARM_REBOOT, or the JH7110 watchdog),
-  without which the bridge's unattended loop cannot close.
+- **Confirm the PLIC fix on hardware** (above). Blocks everything else.
+- Then item 2 / M2: re-run `console=frames` + `cargo xtask reader --serial`. The
+  collector side is already proven — `--replay` decoded the captured stream
+  completely — so this should be the boot that closes M2.
+- `handle_external`: bound the claim loop and snitch on an unhandled source.
+  Independent of whether the bitmap fix works; a silent livelock in the trap
+  handler should not be reachable at all.
+- Whether `WARM_REBOOT` actually helps. Tried once and got the same `pmic_ops`
+  message, but that boot may have been the *old* image — untested, not disproven.
+  The JH7110 watchdog remains the fallback.
 - Item 4bb — `workload=gmac-tx`, T3/T4.
 - §3c's remaining exit-code rows (`CallInDevice`, `PortHeld`, `--until NEVER_APPEARS`).
 - §3d — the unplug-mid-capture test.
+
+## Tooling: `cargo xtask board uboot` — ported, in-session
+
+Driving the board this session needed a sequence `board exec` cannot express:
+catch the autoboot prompt, feed commands one line at a time waiting for the prompt
+between them, then stream — all on **one fd held open throughout**. That is
+board-bridge step 4b, and it is what made the last four boots legible.
+
+It was prototyped in a throwaway Python script in the scratchpad while `cargo`
+rebuilds were costing minutes against a live board — a fair trade for a prototype
+and a bad one for a deliverable, so it was **not** committed and has now been
+ported:
+
+```
+cargo xtask board uboot --device /dev/cu.usbserial-0001 \
+  --cmd 'setenv bootargs workload=gmac-probe' --cmd 'run bootcmd' --stream 45000
+```
+
+Most of it already existed. `script::run` was written for exactly this — one line
+at a time, abandoning the rest if a step goes unanswered — and had simply never
+been wired to a command. The genuinely new part is `xtask_board::knock` (6 tests,
+RED first), which decides *what answered*.
+
+Three properties it needs that `board exec` does not have, each learned by losing
+a boot to its absence:
+
+1. **One process owns the line for the whole sequence.** Releasing the port
+   between `run bootcmd` and attaching a reader loses the boot log — the adapter
+   buffers it and the next opener reads a stale burst as if it were live.
+2. **Never reopen the device per keystroke** — that resets termios to the default
+   line rate, and the result is indistinguishable from a dead board.
+3. **Probe, don't wait passively.** Sending a CR every second and reading only
+   what comes back after it distinguishes "already at a prompt printed before we
+   opened" from "autobooted past the window" from "genuinely silent". Waiting for
+   a prompt string to appear spontaneously fails the first two, silently.
+
+Also worth having: a `board loopback` — short the adapter's RX and TX and echo a
+string. One physical action, unambiguous pass/fail, and it partitions the entire
+stack. It would have saved the first hour of this session.
+
+And a caution the session earned twice: **U-Boot's console has no flow control.**
+A `setenv` line came back as `bootargs le=text workload=gmac-probe` — the leading
+`conso` simply dropped. Anything driving U-Boot should echo back what it sent and
+compare, not assume the line arrived.
