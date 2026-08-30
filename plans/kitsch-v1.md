@@ -587,7 +587,32 @@ exits — so this is where per-process heap telemetry starts earning its keep.
 **Done when**: a Stitch program holding the display cap presents a scene built in
 Stitch, and its heap footprint is flat across 1,000 presents.
 
-### 6 — kitsch, with the shell as its only client
+### 6 — kitsch, with the shell as its only client 🚧 **PROTOCOL LANDED**
+
+`kitsch-proto` exists: the wire types a client and the compositor exchange, four
+`u64` words per message, the same framing the FS server uses. **5/5 host tests,
+clippy clean.**
+
+- **The verbs are `glitch`'s** — `Attach`, `Commit`, `Detach`, with `Tap` to come
+  in increment 9. Deliberately the same words for the same ideas, because that is
+  the difference between a shared crate being liftable later and the
+  correspondence staying a nice observation in a design doc (design §2).
+- **A commit carries text, not pixels**, and carries a *whole frame*. Coherence
+  falls out of that rather than needing a protocol beat: there is no window in
+  which the server can read a half-drawn surface.
+- **Geometry is capped at the wire** (`MAX_COLS`/`MAX_ROWS`) and zero is refused.
+  The server allocates on a number the client chose, so a billion-cell `Attach`
+  has to be stopped at decode — not at the allocator, and certainly not at the
+  OOM killer. Zero is not a small surface; it is one that cannot be drawn, and
+  accepting it means every later loop defends against it.
+- **Opcode numbers are pinned by a test.** Renumbering silently breaks every peer
+  with no compile error anywhere — the same hazard `protocol`'s positional frames
+  have, so it gets the same guard.
+
+**Remaining**: the server side (kitsch receiving commits, composing two surfaces)
+and the shell emitting cells instead of writing to the UART.
+
+### 6 (original scope) — kitsch, with the shell as its only client
 
 kitsch in Stitch: holds the scene, receives cell commits over IPC, calls
 compose-rasterize-present once per frame. The shell becomes a **client with a

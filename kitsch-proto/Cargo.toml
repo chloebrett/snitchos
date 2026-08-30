@@ -1,0 +1,17 @@
+[package]
+name = "kitsch-proto"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Dependency-free: the wire types a client and `kitsch` exchange over IPC, and
+# nothing else. The compositor's rendering lives in `kitsch-render`, its policy in
+# Stitch; this crate is only the shape of what crosses between a client and the
+# server. See `docs/kitsch-design.md`, `plans/kitsch-v1.md`.
+[dependencies]
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false

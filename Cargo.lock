@@ -1036,6 +1036,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitsch-proto"
+version = "0.0.1"
+
+[[package]]
 name = "kitsch-render"
 version = "0.0.1"
 dependencies = [
