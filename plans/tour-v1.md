@@ -209,6 +209,39 @@ is the standard to meet, and its three findings are the ones to expect again:
 unbounded loops, no-op methods, and **delegating accessors that are covered at
 their delegate but never through the wrapper**.
 
+## Findings from building it, not yet acted on
+
+Measured or noticed while implementing steps 1–7, and recorded here because
+otherwise they exist only in a transcript.
+
+**The browser will reach the anchor 7× slower than the gate does.** The chapter's
+anchor lands at **5.24M** guest instructions under the *release* kernel and
+**37.5M** under the *debug* one — optimized code retires far fewer instructions
+reaching the same point. `web/` ships a debug kernel, so at the paced 10 MIPS that
+is ~3.7s of replay before a reader sees anything, against ~0.5s. This is a
+build-profile decision for the web kernel and it belongs to **step 8**, not to a
+later "the page feels slow" investigation.
+
+**`Decoder::frames()` clones the whole store on every call**, and `cap_tree`,
+`span_tree` and `switch_graph` each call it — three full copies per panel render.
+A slice accessor fixes it, and is a **prerequisite for a `Guest` impl** over the
+browser's machine, which would otherwise clone every frame every search round.
+
+**The itest harness already models a stamped input log.**
+`xtask-itest/src/itest/snapshot_tree.rs` has `Injection { instret: u64, bytes:
+Vec<u8> }` — console input tagged with the guest instret it was fed at — and
+already *replays* those deterministically as branch keys for snapshot sharing.
+That is step 3's `InputEvent` under another name, which means the URL-replay
+capability is already proven on the gate side. Two crates, two purposes, one
+concept: worth deciding whether to unify before a third appears.
+
+**The gate could report the exact anchor instret, not an approximation.** That
+same module records `(emit_instret, frame)` streams, so a frame carries the
+instruction it was emitted on. The current search reports an observation point
+quantized to its chunk. If `snemu-wasm`'s decoder tagged frames the same way, the
+browser and the gate would agree on the exact number rather than merely on the
+frame — which is what the URL-state design will want.
+
 ## Where to from here
 
 Deliberately out of scope, roughly in the order the work would want them.

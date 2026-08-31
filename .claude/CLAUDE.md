@@ -206,6 +206,19 @@ protocol/     no_std by default. The `Frame` enum + postcard
               `protocol::stream` (decoder + `OwnedFrame`).
 collector/    Host-side decoder. Reads virtio-console socket,
               decodes frames, exports OTLP + serves Prometheus.
+kitsch-render/ no_std + alloc, one dep (`kernel-devices`, for the pixel view).
+              The **native half of the desktop**: compose a scene into a cell
+              grid, damage bitmap + row-run spans, rasterize through the IBM
+              VGA 8x16 font (`fonts/`, 4 KiB — see its `PROVENANCE.md`), and
+              `decode_text`, the inverse used by display itests to read the
+              screen back as text. `kitsch`'s *policy* is a Stitch program;
+              this is what it calls, **once per frame**. Measured: a Stitch
+              loop over the grid's 7,200 cells would be ~85x a full-screen
+              native clear, so Stitch iterates over windows, never cells.
+kitsch-proto/ no_std, NO deps. The client↔compositor wire types (4-word IPC,
+              like `fs-proto`). Verbs are deliberately `glitch`'s — `Attach`,
+              `Commit`, `Tap` — because both are one server mediating one
+              scarce output for many contributors.
 xtask/        Build / run / test orchestration — the **lean** half:
               build/boot/test/clippy/collect/measure/loc/audit/links/snip.
               Does NOT link `snemu`, so `cargo xtask test` never compiles the

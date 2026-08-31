@@ -527,3 +527,148 @@ status header had about B3 as a whole. A crate's test suite can prove a componen
 correct; it cannot prove that anything calls it. Its mutation score is actively
 misleading, because it certifies code nothing runs.
 
+---
+
+### #23 — The rustdoc gate skips `itest-workloads`, and five doc links are broken behind it
+
+**Found 2026-08-28** while checking whether a new module's doc links resolved.
+
+`cargo xtask test`'s rustdoc phase documents the kernel **without**
+`--features itest-workloads`. So intra-doc links inside feature-gated modules have
+never been checked, and five in `kernel/src/workloads/storms.rs` are broken:
+
+```
+error: unresolved link to `spawn_storm`
+error: unresolved link to `ipi_pong`
+error: unresolved link to `shootdown`
+error: unresolved link to `mutex_storm`
+error: unresolved link to `virtio_storm`
+```
+
+Reproduce:
+
+```
+RUSTDOCFLAGS="-D warnings" cargo doc -p kernel --no-deps \
+  --target riscv64gc-unknown-none-elf --features itest-workloads
+```
+
+They date to `50b4a23` ("remove kernel-core and update refs"), a module move — the
+links named items that moved with it. **A markdown link is a contract nothing
+compiles, and a Rust doc link is a contract only rustdoc compiles**, so a feature
+gate that hides rustdoc hides the contract too.
+
+Two things worth separating:
+
+- **The five broken links** are a five-minute fix.
+- **The hole is the debt.** Sibling of the `itest-workloads` lesson that cfg-gated
+  *compile* errors hide from the default build — it turns out they hide *doc* errors
+  too. Adding the feature to the kernel's rustdoc invocation closes it, at the cost
+  of one more rustdoc pass in the gate.
+
+It also rhymes with the known gap that `cargo xtask links` walks only `.md`, so the
+~116 doc paths written in Rust comments rot unchecked. Same class, different
+mechanism: one is unchecked because it is not markdown, the other because it is
+behind a feature flag.
+
+---
+
+### #24 — Itest deadlines are wall-clock, which un-determinises a deterministic gate
+
+**Found 2026-08-28**, chasing an intermittent `heap-oom` failure.
+
+`itest` scenarios wait with `Duration`-based deadlines:
+
+```rust
+const SEC: Duration = Duration::from_secs(1);
+h.wait_for(SEC * 30, …)
+```
+
+That is **host wall-clock**. So a scenario's verdict depends on how fast the host can
+simulate the guest, which depends on machine load — while the entire argument for
+snemu being the gate engine is that it is deterministic and *"one run is the gate"*.
+
+`heap-oom` is where it bites first, because it needs the most guest time: the
+watermark grow fires at guest t≈4.8s, and reaching that within 30 host seconds is
+marginal on a loaded machine. Observed failing at load average ~2.4 with several
+concurrent cargo builds, while a direct `snemu boot --workload heap-oom` shows
+`heap.grow_total` reaching 1, 2, 3 — the mechanism is fine.
+
+**The misleading part is the failure message**, which accuses the guest:
+`"watermark grow never triggered, leak too slow, or extend() broken"`. All three are
+false. A wall-clock timeout cannot distinguish "the guest never did it" from "we did
+not wait long enough", and it phrases the ambiguity as a guest bug.
+
+Fix: express deadlines as a **guest step or tick budget** under snemu, so the verdict
+is a property of the guest rather than of the host's load. QEMU, being wall-clock by
+nature, would keep the `Duration` path.
+
+Caveat on attribution: the failure may *also* be sensitive to the itest kernel image
+growing — a bigger image reaches the grow later in guest time as well as host time.
+The two were not separated. The wall-clock dependency is worth fixing regardless.
+
+**Attribution separated, 2026-08-28** (independently, from the `kitsch` side — the
+two sessions found this the same day and did not know about each other). Image size
+is **not** a contributor:
+
+- The kitsch work added `kitsch_stitch` to the image — **1,032,824 bytes**, a second
+  static copy of the Stitch interpreter beside `stitch_repl`'s. `heap-oom` began
+  failing in the same sitting, so image growth was the obvious suspect, and it
+  matches a documented failure mode (the drivel weights, #16's neighbourhood).
+- Gating the program behind `itest-workloads` did not help — the itest image is
+  precisely the one that keeps it.
+- Removing the program from the image **entirely** did not help either: `heap-oom`
+  failed identically, in the same ~42s, at load average **5.10**.
+
+So the wall-clock dependency is the whole story, and the fix is the one above. Worth
+recording the shape as much as the result: a convenient hypothesis, well-supported
+and matching a known failure mode, produced a **defensible patch that fixed nothing**
+— the gating was kept on its own merits, which is exactly how a wrong diagnosis
+survives with a plausible story attached to it. Only deleting the suspect outright
+settled it.
+
+### #25 — `--record-instret` disagrees with the guest by three orders of magnitude
+
+**Found 2026-08-28**, while trying to measure a full-screen blit.
+
+`--check-instret` is documented as *the deterministic-perf gate*: per-scenario guest
+instret is recorded, and a later run fails if a scenario grew. The recorded numbers
+do not appear to be full guest work.
+
+The two `framebuffer-*` scenarios differ by **6,692** instructions
+(20,660,918 vs 20,667,610). They are separated by a **mandatory ≥8.65M** — one
+presenting, one not — and that floor is not an estimate:
+
+- `Framebuffer::fill_rect`'s inner loop was 11 instructions per pixel (disassembled,
+  at the time of measurement), over 786,432 pixels.
+- `heartbeat` calls `ramfb::present()` **before** `counter::drain_all()`, so the
+  `frames_presented_total ≥ 1` the scenario waits on *cannot* be observed until a
+  full clear has run.
+
+So two measurements of the same quantity disagree by ~1300x, and the disassembly is
+the trustworthy side. Either presents are not happening in the recorded window, or
+per-scenario instret measures a post-fork delta that excludes them (snapshot
+sharing is the obvious candidate — `snemu_audit` forks scenarios off a shared boot).
+
+**Do not build on per-scenario instret until this is understood**, and note that
+whatever the answer is, `--check-instret` has been gating on it. Owned by
+[../plans/snemu-milestone-4-measurement.md](../plans/snemu-milestone-4-measurement.md),
+which is the measurement spine's plan.
+
+### #26 — `snemu profile` cannot see userspace, and does not enable ramfb
+
+**Found 2026-08-28**, same sitting as #25 and the same shape: reaching for an
+instrument and finding it measures the kernel and not much else.
+
+- `cargo xtask snemu profile --workload stitch-drivel --steps 60M` returns the
+  **same top-12 kernel functions** as a default `init` boot — no `[userspace]`
+  bucket at all. It profiles the post-boot heartbeat steady state rather than the
+  workload's work, so a userspace hot spot is invisible to the tool whose stated
+  job is finding hot spots.
+- It also boots without `-device ramfb`, so `ramfb::present()` is a silent no-op and
+  the framebuffer can never appear in a profile. Any display work is unprofilable
+  until that is fixed.
+
+Neither is hard; both were found by wanting a number the tool was supposed to
+already provide. Taken with #25, the measurement spine has three instruments and all
+three are kernel-only in practice.
+
