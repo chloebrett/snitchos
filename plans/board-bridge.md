@@ -1,28 +1,32 @@
 # Plan: the board bridge — driving the VisionFive 2 from the host
 
-**Status (2026-08-27)**: 🚧 **STARTED — Steps 1–4 are code-complete and gate-green;
-steps 4b–9 are open.** Step 4's acceptance criterion is *not* met: nothing here has
-run against a real UART, and `serialport::open` plus the live read loop are the
-untested boundary. **Everything from step 4b onward needs hardware to develop
-against** — "interrupt autoboot within the countdown" has no host-side oracle — so a
-first-light session with the board is the natural next move, not more code. The
-on-board steps are written up as §3 of
-[../docs/next-board-session.md](../docs/next-board-session.md), batched with the
-other board-required work so the setup overhead is paid once.
-The `xtask-board` crate exists and is a workspace member, carrying `reach.rs` (the
-"could not reach the board" vs "reached it and it said nothing" failure taxonomy,
-Step 1), `stop.rs` (the composed stop-condition evaluator, Step 2) and `split.rs`
-(text/frame separation, Step 3). All three are pure host logic; none has touched a
-board. **No `board` subcommand is wired into `xtask` yet** (`cargo xtask board` is
-an unrecognised subcommand), so Step 4's CLI is genuinely unstarted — which is why
-the Phase 1 acceptance boxes below stay unticked even where the *behaviour* they
-name is built and tested: they are criteria on the shipped command, and nothing
-ships until step 4 wires it. Two phases — the host bridge
-(steps 1–6b, including the U-Boot layer that makes netboot zero-touch) and the
+**Status (2026-08-30)**: 🚧 **STARTED — steps 1–4b done and board-verified; step 6
+is blocked by firmware, not by us.** First light happened 2026-08-28
+([../notes/board-session-2026-08-28.md](../notes/board-session-2026-08-28.md)):
+`board exec` drove a real UART, the input echo earned its keep immediately, and
+step 4b shipped as **`cargo xtask board uboot`**, which caught the prompt across a
+power cycle and ran every command of that session.
+
+**The one thing that did not survive hardware is reboot.** SBI SRST *hangs* this
+board's OpenSBI in its PMIC reset path — it neither resets nor returns — so
+`board reboot` costs a manual power cycle instead of saving one, and step 5's
+"a return means failure" contract never gets to apply (step 6 has the detail and
+the two remaining candidates). **Until that is solved the unattended loop cannot
+close on this board**, which is the main thing standing between Phase 1 and the
+value Phase 2 assumes.
+
+Still true from the previous status: `serialport::open` and the live read loop have
+now been exercised, so step 4's untested boundary is closed, but nothing here has an
+itest — the transport is a physical port, and the pure halves (`reach`, `stop`,
+`split`, `script`, `knock`, `thrash`) are what the gate covers. Two phases — the host
+bridge (steps 1–6b, including the U-Boot layer that makes netboot zero-touch) and the
 ESP32 transport (steps 7–9).
+
 **Unblocked 2026-08-25**: its prerequisite, [uart-telemetry.md](uart-telemetry.md)
-**Step 10** (collector `--serial`), has landed and is gate-green — though not yet run
-against a board.
+**Step 10** (collector `--serial`), has landed and is gate-green. **Run against a
+board 2026-08-28**: it decoded a real capture completely via `--replay`, so the
+collector's serial path is proven; M2 is held open by a kernel bug instead (see that
+plan).
 **Design**: [docs/board-agent-bridge-design.md](../docs/board-agent-bridge-design.md)
 **Milestone**: follows M2 in [visionfive2-port.md](visionfive2-port.md)
 
@@ -609,12 +613,49 @@ Requires the permission gate — this writes to physical hardware.
 
 ---
 
-### Step 4b: Reach and drive the U-Boot prompt
+### Step 4b: Reach and drive the U-Boot prompt — ✅ DONE 2026-08-30
 
-**Acceptance criteria**: `cargo xtask board uboot "<command>"` interrupts autoboot,
-lands at the `=>` prompt, runs the command, and returns its output. Failing to reach
-the prompt within the countdown is an error that says *that*, distinct from a board
-that never printed anything.
+**Shipped as `cargo xtask board uboot`** and used for every boot of the 2026-08-28
+session. Catches the prompt across a power cycle, runs `--cmd`s one at a time, then
+streams — see [../notes/board-session-2026-08-28.md](../notes/board-session-2026-08-28.md).
+
+```
+cargo xtask board uboot --device /dev/cu.usbserial-0001 \
+  --cmd 'setenv bootargs workload=gmac-probe' --cmd 'run bootcmd' --stream 45000
+```
+
+Most of it was already here: `script::run` had been written for exactly this
+send/expect sequencing and simply never wired to a command. The new part is
+`xtask_board::knock` (6 tests), which decides **what answered** — and the shape of
+that decision is the step's real lesson, so it is worth recording against the
+criteria as written.
+
+**Three constraints hardware imposed that the plan did not anticipate**, each of
+which cost a boot before it was understood:
+
+1. **One process must own the port for the whole sequence.** Releasing it between
+   `run bootcmd` and attaching a reader loses the boot log — the USB adapter
+   buffers it, and the *next* opener reads a stale burst as though it were live.
+   This is why `uboot` is one command rather than `board exec` called three times.
+2. **Never reopen the device per keystroke.** Doing so resets termios to the
+   default line rate, and the result is indistinguishable from a dead board.
+3. **Ask again rather than scanning a buffer.** A prompt already in the capture
+   proves the board *was* at a prompt, not that it is now. `knock` sends a bare CR
+   each second and judges only what arrives after it — which also separates
+   "autobooted past the window" (SnitchOS answers) from "genuinely silent",
+   two states a rolling-buffer scan reports identically.
+
+**Deviation from the criteria as written**, deliberately: the prompt is
+`StarFive #`, not `=>`, and the race is not modelled against a `FakeWallClock`.
+The countdown turned out not to be the hard part — knocking every 50 ms from
+*before* the board powers on wins it every time, so there is no window to miss and
+no timing logic to table-test. The pure logic worth testing was the classification
+instead, and that is what `knock_tests` covers. **`bootdelay` stays non-zero** for
+the reason below, and the knock cadence is what makes a short delay survivable.
+
+**Not done**: no `--engine`-style verification against a booted kernel, and the
+`uboot` command has no itest — its transport is a real serial port, and the pure
+half is covered by `knock_tests` + `script_tests`.
 
 **Why this is its own step**: it is the one interaction in the whole plan with a hard
 real-time constraint — the autoboot countdown is a couple of seconds, and a keystroke
@@ -750,7 +791,44 @@ module proper.
 
 ---
 
-### Step 6: `cargo xtask board reboot` + the thrash guard
+### Step 6: `cargo xtask board reboot` + the thrash guard — 🔴 BLOCKED ON HARDWARE 2026-08-30
+
+**The command is built and its guard is host-tested. It cannot work on this board**,
+and the reason is below step 5's floor rather than in anything this step does.
+
+Measured twice, 2026-08-28. The kernel side works exactly as designed — the token is
+detected, the reason frame goes out, the TX drains — and then the SBI call reaches
+OpenSBI's JH7110 reset driver, which prints
+
+```
+pmic_ops: cannot read pmic power register
+```
+
+— it cannot reach the AXP15060 PMIC over I2C — and **hangs**. The board does not
+reset and does not come back. So `board reboot` currently *costs* a manual power
+cycle rather than saving one, which inverts the point of the step.
+
+**Step 5's contract does not survive contact with this firmware.** It is written for
+firmware that *refuses* SRST: "callers should treat a return as reboot unavailable
+and say so". `kernel/src/obs/heartbeat.rs`'s fallback (`reboot: SBI SRST refused
+(error=…) — continuing`) never ran, because OpenSBI never returned. **A return is not
+the only failure mode, and the other one is unrecoverable from the caller's side** —
+no amount of better fallback fixes it; it needs a different reset mechanism.
+
+Tried: `RESET_TYPE` is now per-platform (`kernel/src/sbi.rs`), warm (0) under `vf2`
+and cold (1) elsewhere — scoped rather than swapped, since cold is correct under QEMU
+and snemu and `console-reboot-requests-srst` asserts a halt a `NOT_SUPPORTED` return
+would not produce. **Untested**: the one boot that showed the same `pmic_ops` message
+may have been running the previous image. Not disproven, not confirmed.
+
+Next candidate: the **JH7110 watchdog** at `watchdog@13070000`. U-Boot reports
+`WDT: Not starting watchdog@13070000`, so it is present and idle, and a short timeout
+resets the SoC with no firmware cooperation at all — immune to whatever is wrong with
+the PMIC path.
+
+**Until one of these works, the unattended loop cannot close on this board**: every
+iteration needs a human at the power switch. That is the single biggest constraint on
+Phase 2's value, and it is a hardware/firmware fact rather than a missing feature.
 
 **Acceptance criteria**: the command sends the magic line, waits for the boot marker
 on the fresh image, and returns success only once the board is booting. An iteration

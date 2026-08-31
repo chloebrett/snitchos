@@ -1,7 +1,59 @@
 # The next board session — an ordered agenda
 
 **Written 2026-08-27**, from a verification sweep of every in-flight plan against
-the tree.
+the tree. **Revised 2026-08-30** after the 2026-08-28 session
+([../notes/board-session-2026-08-28.md](../notes/board-session-2026-08-28.md)).
+
+## Read this first — the agenda has collapsed to one boot
+
+Most of what follows is done. What remains has a strict order, because the first
+item unblocks everything else:
+
+1. **Confirm the PLIC fix.** The kernel wedges a few instructions after enabling
+   external interrupts, because it inherits U-Boot's PLIC enable bitmap and then
+   livelocks claiming an interrupt it cannot handle. `kernel_devices::plic::reset_context`
+   fixes it, is host-tested, and **has never run on hardware**. One command:
+
+   ```
+   cargo xtask image
+   cargo xtask board uboot --device /dev/cu.<adapter> \
+     --cmd 'setenv bootargs workload=gmac-probe' --cmd 'run bootcmd' --stream 45000
+   ```
+
+   Then power-cycle. **Success is the single line `ph: post-seie`** — the marker
+   that has never printed on this board. It is followed by `tx-irq-ok` and
+   `ph: post-ipi`, and then the probe dump, which closes §4a in the same boot.
+
+   If it still stops at `post-ssie`, the bitmap theory is wrong: bound
+   `handle_external`'s claim loop and have it *report the source id*, which names
+   the offending device instead of guessing at it.
+
+2. **Then item 2 / M2** — `console=frames` plus `cargo xtask reader --serial`. The
+   collector side is already proven: it decoded a real board capture completely
+   via `--replay`. This should be the boot that closes the milestone.
+3. **Then §4bb** (`workload=gmac-tx`), and §3c/§3d's remaining rows.
+
+**Driving the board is now one command**, not a hand-typed sequence:
+`cargo xtask board uboot` catches the prompt across a power cycle, feeds `--cmd`s
+one at a time waiting for the prompt between them, and streams the boot — all on
+one open port. Sections below that describe typing at the board by hand predate it.
+
+**A caution the last session earned twice**: U-Boot's console has **no flow
+control**. A `setenv` arrived as `bootargs le=text …`, its first five characters
+silently dropped, and was accepted as a different variable. Always read back what
+you set.
+
+### What is already closed
+
+| item | status |
+|---|---|
+| §1 netboot provisioning | ✅ zero-touch, verified end to end |
+| §3a first light / §3e quiescence | ✅ `board exec` drove a real UART |
+| §4a the probe | ⏳ blocked only by item 1 above |
+| §4b descriptor ground truth | ✅ version `0x52`, TDES layout confirmed against silicon |
+| §4c which RJ45 | ✅ **GMAC1** (`ethact=ethernet@16040000`) |
+| §2 collector `--serial` | 🟡 decode proven; needs a board that keeps talking |
+| `board reboot` | 🔴 SBI SRST **hangs** this board's OpenSBI — every cycle is manual |
 
 The VisionFive 2 is across the room, not far away — but in its current state it
 needs wiring up each time, including a long ethernet cable, and that setup is

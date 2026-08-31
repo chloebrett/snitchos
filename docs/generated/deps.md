@@ -54,6 +54,7 @@ graph LR
     glitch_core["glitch-core"]
     glitch_proto["glitch-proto"]
     kernel_net["kernel-net"]
+    kitsch_proto["kitsch-proto"]
     kitsch_render["kitsch-render"]
     kvetch["kvetch"]
     kvetch_model["kvetch-model"]

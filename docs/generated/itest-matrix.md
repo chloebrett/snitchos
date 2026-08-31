@@ -38,6 +38,7 @@
 | fs-write-read | fs | wfi | userspace, ipc |
 | glitch-beep-plays | glitch-beep | cpu | audio |
 | glitch-starve-underruns | glitch-starve | cpu | audio |
+| gmac-phy-identifies-and-links | gmac-phy | wfi | gmac |
 | gmac-probe-identifies-the-core | gmac-probe | wfi | gmac |
 | gmac-tx-transmits-a-frame | gmac-tx | wfi | gmac |
 | heap-grows-on-demand | heap-grow | wfi | userspace |
@@ -72,6 +73,7 @@
 | ipi-pong | ipi-pong | cpu | smp, ipi, stress |
 | kill-without-a-process-cap-is-refused | kill-no-cap | cpu | userspace |
 | kitsch-presents-a-scene | kitsch-static | wfi | display, ramfb, kitsch |
+| kitsch-stitch-policy-draws | kitsch-stitch | cpu | display, ramfb, kitsch, stitch |
 | kvetch-babble-serves | kvetch-babble | cpu | kvetch |
 | kvetch-drivel-serves | kvetch-drivel | cpu | kvetch |
 | sched-task-lookup-is-o1 | live-tasks | cpu | sched |

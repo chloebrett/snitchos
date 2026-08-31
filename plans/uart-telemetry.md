@@ -1,10 +1,31 @@
 # Plan: B3 — Telemetry over UART (M2)
 
-**Status (2026-08-27)**: 🟡 **Steps 0–4, 6, 8, 9, 10a and 10b are landed and gate-green — but
-Step 10b is NOT yet verified against the board, so B3 is not done.** The remaining
-work is one hardware run (see 10b), then Step 5b (interactive relay); Step 7
-(programming the baud) is deferred as optional headroom — Step 6 measured
-steady-state telemetry at single-digit throughput, so 115200 suffices.
+**Status (2026-08-30)**: 🟡 **Steps 0–4, 6, 8, 9, 10a landed and gate-green. Step
+10b is half-verified: telemetry frames DID cross a real UART and decoded perfectly
+— but the kernel wedges shortly after boot, so there is no sustained stream and B3
+is not done.**
+
+Measured 2026-08-28 ([../notes/board-session-2026-08-28.md](../notes/board-session-2026-08-28.md)).
+Booting with `console=frames` puts real postcard frames on the board's UART, and
+`collector --replay` of the raw capture decodes **all** of them — `BuildInfo`,
+`StringRegister`s, nested `SpanStart`/`SpanEnd` with monotonic timestamps,
+`Dropped { count: 0 }`, `MetricRegister`s. **So the collector's serial path is not
+the problem**; the half of 10b that was genuinely untested (`serialport::open` and
+the live read loop) works.
+
+What stops it is a kernel bug, since root-caused: the kernel **inherits U-Boot's
+PLIC enable bitmap**, so the first `sstatus.SEIE` takes an interrupt for a device it
+has no handler for and `handle_external`'s claim loop livelocks. The stream dies
+~500 bytes in, mid-backlog. Fix (`kernel_devices::plic::reset_context`) is written
+and host-tested but **has never run on the board** — that confirmation boot is what
+10b now needs, and it is one `cargo xtask board uboot` invocation.
+
+Note the failure is *not* specific to `console=frames`: a `console=text` boot wedges
+in the same place. Frames mode merely made it unmissable.
+
+Then Step 5b (interactive relay); Step 7 (programming the baud) is deferred as
+optional headroom — Step 6 measured steady-state telemetry at single-digit
+throughput, so 115200 suffices.
 **Builds on this**: [board-bridge.md](board-bridge.md) — the *programmatic* half of
 driving the board (`cargo xtask board exec`, reboot) starts where Step 10 finishes.
 **Design**: [docs/uart-telemetry-design.md](../docs/uart-telemetry-design.md)

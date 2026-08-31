@@ -1,6 +1,6 @@
 # Porting SnitchOS to the VisionFive 2 (StarFive JH7110)
 
-**Status (2026-08-27)**: 🎉 **M1 FIRST LIGHT ACHIEVED ON HARDWARE — 2026-07-24.** SnitchOS boots
+**Status (2026-08-30)**: 🎉 **M1 FIRST LIGHT ACHIEVED ON HARDWARE — 2026-07-24.** SnitchOS boots
 on the VisionFive 2, brings up all four U74s, realises userspace, and heartbeats.
 All four blockers shipped and are now **hardware-proven**, not just QEMU-green:
 **B4 (console) ✓, B1 (SBI timer) ✓, B6 (multi-hart) ✓, B2 (RAM base) ✓.**
@@ -245,6 +245,22 @@ OpenSBI. These retire most of the "measure on the board" unknowns; see
 | CLINT / PLIC | `0x0200_0000` / `0x0C00_0000` (both < `0x4000_0000`, inside identity MMIO gigapage; same as QEMU) | B5 |
 | NIC (future) | 2× `snps,dwmac-5.20` @ `0x1603_0000`/`0x1604_0000`, PHY **Motorcomm YT8531**, RGMII-id, MDIO | M2.5 |
 | QSPI layout | `spl@0` `[0,0xf0000)`, `uboot-env@0xf0000`, `uboot@0x100000` | firmware |
+
+**Measured 2026-08-28** ([../notes/board-session-2026-08-28.md](../notes/board-session-2026-08-28.md)):
+
+| Fact | Value | Feeds |
+|---|---|---|
+| **PLIC UART source / S-context** | UART0 is source **32**; U74 `mhartid m` owns S-context **2m** (the S7 contributes only an M context, shifting everything down one) | B5 |
+| **PLIC enable bitmap at handoff** | **U-Boot leaves its own sources enabled** in the S-context the kernel adopts. The kernel must clear it before enabling `SEIE`, or `handle_external` livelocks on an interrupt it cannot quiet | B5 |
+| `riscv,ndev` | **136** sources implemented (QEMU `virt` is 95) — how far the enable bitmap must be cleared | B5 |
+| **SBI SRST** | Advertised, and **hangs**: OpenSBI's JH7110 reset driver reports `pmic_ops: cannot read pmic power register` and never returns. A return is *not* the only failure mode | board-bridge |
+| GMAC1 core version | `0x52` @ `0x1604_0110` — dwmac-5.20, ungated and out of reset after U-Boot | M2.5 |
+| Cabled RJ45 | **GMAC1** (`0x1604_0000`), `ethact=ethernet@16040000`; PHY autonegotiates ~130 ms | M2.5 |
+
+**The boot hart really does move**, and it is not a curiosity: two consecutive power
+cycles booted on mhartid 3 then 2. Anything deriving a per-hart *index* — a PLIC
+context above all — must compute it from `LOGICAL_TO_MHARTID[0]` at runtime. A
+compile-time constant is right only by luck, and wrong silently.
 
 **Identity-map consequence for B2:** the RAM identity gigapage moves from QEMU's
 root entry 2 (`[0x8000_0000, 0xC000_0000)`) to **entry 1** (`[0x4000_0000,

@@ -1,6 +1,6 @@
 # Plan: the JH7110 GMAC driver — `NetDevice` on real hardware
 
-**Status (2026-08-27)**: 🚧 **STARTED — the pure register model has landed.**
+**Status (2026-08-30)**: 🚧 **STARTED — the pure register model has landed.**
 `kernel-devices/src/gmac.rs` (144 lines) transcribes the dwmac-5.20 register
 layout from mainline, in the same pure-`Op` shape as `syscrg.rs`. There is **no
 kernel MMIO glue yet** — `kernel/src/device/gmac.rs`, which its doc comment
@@ -8,7 +8,32 @@ names, does not exist — so nothing has touched a board.
 Phase 0's *desk* half is done — see the design
 note — which closes three open questions, retires a risk nobody had asked about
 (DMA coherency), and replaces the step 5–7 sketches with a six-rung tracer-bullet
-ladder. What remains of Phase 0 is board-side and cheap.
+ladder.
+
+**Phase 0's board half is now mostly answered too, 2026-08-28** — from the *U-Boot
+prompt* rather than from the probe, which never got to run (the kernel wedges before
+workload dispatch; see [uart-telemetry.md](uart-telemetry.md)). Details in
+[../notes/board-session-2026-08-28.md](../notes/board-session-2026-08-28.md):
+
+- **Core version `0x52` — dwmac-5.20 confirmed.** `md.l 0x16040110 1` → `00004152`.
+  Both the `0x1604_0000` base and the `0x0110` version offset are right, and the
+  offset had been transcribed from mainline and *never checked against a datasheet*.
+- **The peripheral is ungated and out of reset.** U-Boot uses it for DHCP and TFTP,
+  so no clock/reset bring-up is needed to reach the registers.
+- **The cabled RJ45 is GMAC1** (`ethact=ethernet@16040000`, plus a live `dhcp` over
+  it) — old item 4c, closed. Its PHY auto-negotiates in ~130 ms.
+- **The TDES layout is confirmed against silicon.** U-Boot's live descriptor after a
+  DHCP reads `ff73e840 / 00000000 / 0000015e / 30000000` — buffer address low/high,
+  `0x15e` = 350 bytes in `TDES2[13:0]`, and `TDES3` in writeback form with `FD`(29)
+  and `LD`(28) set, `OWN`(31) and the length field cleared, `ERROR_SUMMARY`(15)
+  clear. That validates `kernel_devices::gmac`'s encoding *and* `is_owned_by_device`
+  / `had_error`. **No desk work is invalidated.**
+
+**Still unanswered, and it still gates the estimate**: `dma-noncoherent`. The probe
+reads it from the DTB and the probe has not run. If the board disagrees with
+mainline and it is `true`, the driver needs a cache-maintenance layer the kernel has
+no primitives for.
+
 **Design**: [docs/vf2-gmac-design.md](../docs/vf2-gmac-design.md) — the register map,
 the GMAC1-over-GMAC0 decision, the module boundary, the ladder, and the failure-mode
 table. Read it before this plan. Its parent is
