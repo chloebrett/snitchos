@@ -95,7 +95,7 @@ Kernel internals (read before touching the matching code):
 
 ## Backlogs & method
 
-- [Debt register](debt-register.md) — living; delete an item when it's done.
+- [Debt register](debt-register.md) — living, open items only · [closed entries](debt-register-completed.md) — moved here when done, numbers kept.
 - [Redesign from scratch](redesign-from-scratch.md) — the method → [`redesign-reviews/`](redesign-reviews/)
 - [Software on SnitchOS](software-on-snitchos.md) · [backlog](software-to-explore-backlog.md) · [notes](software-explorations-notes.md)
 - [Seven questions](design-explorations-seven-questions.md) · [Cross-cutting axes](cross-cutting-axes-brainstorm.md) — handoff notes; **still cited by live design docs, don't archive.**
