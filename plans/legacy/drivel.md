@@ -11,7 +11,7 @@ better than no model was a complete success here.
 It cleared that bar and kept going: drivel trains on the **real** `.st` corpus against a
 frozen 2048 vocab and a frozen 116-program held-out set, and **answers Tab at the
 on-target Stitch prompt**, byte-identical through the emulator, with a vocab-fingerprint
-provenance check and a KV cache ([post 80](../../posts/post-80-the-control-passed-twice.md);
+provenance check and a KV cache ([post 80](../../posts/post-80-checkpoint-vocab-pairing.md);
 plan archived at [legacy/kvetch-drivel-on-target.md](kvetch-drivel-on-target.md)).
 Best checkpoint to date is `drivel-D-b9b10b11` at **2.5309** held-out NLL — deliberately
 *not* promoted to the embedded checkpoint, since `drivel-b9b10-30k` is committed,

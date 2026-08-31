@@ -6,7 +6,7 @@ Two questions, measured the same way [batch10](batch10-training-findings.md) was
    against a 4.3M-token corpus. Does volume keep paying at ~6.7M tokens, or has it
    saturated?
 2. `examples/stitch/` is 30 hand-polished gold programs sitting inside every arm as
-   part of `--real-root`. [Stitch 18](../posts/stitch-18-a-binding-is-not-a-boundary.md)
+   part of `--real-root`. [Stitch 18](../posts/stitch-18-thirty-example-programs.md)
    ends on "what they're worth to an actual model is the next measurement". This is
    that measurement.
 
@@ -403,7 +403,7 @@ trusting a control that cannot discriminate.
   steepest of the arms, so a longer run would more likely widen D − E than close it.
 - **Parse rate is not reported.** The batch9 and batch10 notes both established it
   cannot resolve checkpoints half a nat apart, and it is partly measuring comment
-  fraction ([post 77](../posts/post-77-the-number-that-could-not-see-it.md)). Held-out
+  fraction ([post 77](../posts/post-77-training-loss-is-blind-to-memorisation.md)). Held-out
   NLL is the gate metric.
 - ~~**`cargo xtask test` has one pre-existing failure on a clean tree**
   (`mutant_plan_tests::the_derived_plan_matches_the_previously_hardcoded_set`) —

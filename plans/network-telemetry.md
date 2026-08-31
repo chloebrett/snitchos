@@ -4,7 +4,7 @@
 that remains — and it is its own project, not a step here.**
 **Design**: [docs/network-telemetry-design.md](../docs/network-telemetry-design.md)
 **Milestone**: M2.5 in [plans/visionfive2-port.md](visionfive2-port.md)
-**Write-up**: [post 70 — the wire was never load-bearing](../posts/post-70-the-wire-was-never-load-bearing.md)
+**Write-up**: [post 70 — telemetry over UDP](../posts/post-70-telemetry-over-udp.md)
 
 Verified in-tree 2026-08-06: the `kernel-net` crate exists, the `net-telemetry-over-udp`
 scenario is registered (`xtask-itest/src/itest.rs:201`) and passes under snemu, and the

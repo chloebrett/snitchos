@@ -122,5 +122,5 @@ stitch> 1.5 + 1.5
 >
 > what misled me: I read the scenario's own leftover `return Err("DIAGNOSTIC: …")` instead of the frame stream, and I read the console *after* the wedge, where the last completed line is all there is — so a completion that had actually been inserted at the prompt looked like a grammar-only fallback. **the diagnostic I trusted was a hand-rolled string from someone else's abandoned bisect; the telemetry was right there and I didn't look at it.**
 >
-> the sequel is [post 72](post-72-the-unit-was-already-on.md), which is largely about that guard finding its customer.
+> the sequel is [post 72](post-72-fp-context-switching.md), which is largely about that guard finding its customer.
 - five increments to fix a bug I found by typing four characters at a prompt. two of them were fixing the design document.

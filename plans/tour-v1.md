@@ -12,7 +12,7 @@ Implements stage 3 of [../docs/tour-and-user-docs-design.md](../docs/tour-and-us
 (snapshot-pinned chapters + the CI contract), with two of that design's calls
 overturned by measurement and one by architecture. Stages 1 and 2 of its
 sequencing — the wasm MVP and the frame-fold store with panels — shipped in the
-arc closed by [../posts/post-82-a-symptom-arrives-with-a-diagnosis-attached.md](../posts/post-82-a-symptom-arrives-with-a-diagnosis-attached.md).
+arc closed by [../posts/post-82-snitchos-in-a-browser-tab.md](../posts/post-82-snitchos-in-a-browser-tab.md).
 
 ## Goal
 

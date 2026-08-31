@@ -89,11 +89,11 @@ it see; anything you *assert*, it takes on trust.
 - The kernel's build script declared a directory it **writes into** as an input,
   so it invalidated itself forever and rebuilt the kernel on every invocation.
   Cargo cannot see that cycle — it believes the declaration.
-  ([67](../posts/post-67-the-build-watched-what-it-wrote.md))
+  ([67](../posts/post-67-where-the-xtask-build-time-went.md))
 - `in("a1")` on an SBI `ecall` promised the compiler that a register survives a
   call which firmware overwrites. The optimizer believed it completely and parked
   a live pointer there.
-  ([68](../posts/post-68-two-promises-the-hardware-never-made.md))
+  ([68](../posts/post-68-telemetry-off-the-vf2-serial-line.md))
 - A syntax reference wrote `cond => a | b`, meaning `cond` as a metavariable. The
   model read it as a keyword and emitted `cond overlap(b1: Booking) -> Bool`.
   **An omission or ambiguity in a reference does not produce a blank — it
@@ -112,7 +112,7 @@ it see; anything you *assert*, it takes on trust.
   test in a position to notice.
   ([69](../posts/post-69-the-bug-was-where-no-test-could-reach.md))
 - snemu shouted its most useful diagnostic into a discarded `Result`.
-  ([74](../posts/post-74-the-emulator-was-shouting.md))
+  ([74](../posts/post-74-trained-weights-answer-tab-on-target.md))
 
 **3. Checked by something that shares the defect's assumption.** The worst case,
 because a check *is* running and reporting success. Every instance below comes
@@ -166,7 +166,7 @@ is also a claim out of reach, and believing it costs real work:
   **nothing** — the cost is clap-derive expansion and dependency
   monomorphisation, which stay in the binary however you carve up your own
   modules. Kept as real factoring; retracted as a speed fix.
-  ([67](../posts/post-67-the-build-watched-what-it-wrote.md))
+  ([67](../posts/post-67-where-the-xtask-build-time-went.md))
 - Splitting `kernel-core` for speed, likewise: the tests already ran in 0.01s,
   and more crates means *more* per-test-binary floors, so the honest full-suite
   number is slightly **worse**. Done anyway, on the real reason — a crate
@@ -175,7 +175,7 @@ is also a claim out of reach, and believing it costs real work:
 - "Framing is the hard part" for network telemetry. The wire had *always* been an
   unframed byte stream; virtio's message boundaries were never load-bearing. The
   real problem was resynchronisation, which is a transport property.
-  ([70](../posts/post-70-the-wire-was-never-load-bearing.md))
+  ([70](../posts/post-70-telemetry-over-udp.md))
 - Eyeballed verdicts on five generated programs were **40% wrong**, discovered
   the moment a twenty-line gate function existed to check them.
   ([66](../posts/post-66-cond-is-not-a-keyword.md))
@@ -191,7 +191,7 @@ resolved not by thinking harder but by relocating the question:
 | "`a1` survives the call" | release codegen under a deterministic emulator |
 | "this module is layered correctly" | a crate boundary — a `Cargo.toml` line a reviewer sees |
 | "this generated program is fine" | `stitch::gate::run` |
-| "the new corpus is better" | a control arm holding token count fixed ([75](../posts/post-75-it-was-the-volume.md)) |
+| "the new corpus is better" | a control arm holding token count fixed ([75](../posts/post-75-corpus-volume-beats-corpus-quality.md)) |
 | "these tests cover it" | mutation scoring |
 
 Two corollaries worth keeping:
@@ -199,14 +199,14 @@ Two corollaries worth keeping:
 - **Build the ruler earlier than feels necessary.** The eval harness was written
   before the corpus it measures, and the first thing it produced was that the
   baseline had never been measured either
-  ([73](../posts/post-73-the-floor-was-in-the-wrong-place.md)). The gate function
+  ([73](../posts/post-73-cram-eval-the-baseline-nobody-measured.md)). The gate function
   was written after eleven hand-read candidates and immediately overturned two of
   five recorded verdicts.
 - **A guard that names itself is worth building even when it looks unnecessary.**
   The one-FP-process refusal was written against "a case nobody has" and had a
   customer within two days — announcing itself in one attributable line instead
   of corrupting silently
-  ([72](../posts/post-72-the-unit-was-already-on.md)).
+  ([72](../posts/post-72-fp-context-switching.md)).
 
 # Two more recurring patterns, adjacent but distinct
 
@@ -224,12 +224,12 @@ plumbing of the diagnostic, not in the diagnosis.
   itself. The itest harness wrote `if self.machine.step().is_err()`, so the
   loudest error in the system arrived as the vaguest one — "no frame arrived" —
   and the scenario blamed whatever it was waiting for.
-  ([74](../posts/post-74-the-emulator-was-shouting.md))
+  ([74](../posts/post-74-trained-weights-answer-tab-on-target.md))
 - `serve_model` correctly refuses a checkpoint/vocab mismatch and then answers
   `Malformed` forever instead of exiting. A client blocked in `call` on a dead
   endpoint has neither refusal nor timeout, so the symptom surfaces two processes
   away as a REPL that completes to nothing.
-  ([74](../posts/post-74-the-emulator-was-shouting.md))
+  ([74](../posts/post-74-trained-weights-answer-tab-on-target.md))
 - snemu's interactive mode first routed `Ctrl-C` to the guest by clearing `ISIG`
   — making the escape hatch depend on the input path working, which is precisely
   what fails. `ISIG` stays on; `Ctrl-]` is a *second* way out, never the only one.
@@ -237,7 +237,7 @@ plumbing of the diagnostic, not in the diagnosis.
 - `cargo xtask test` ran `cargo metadata` through `Command::output()`, which
   captures **both** streams — so cargo's "blocking waiting for file lock" went to
   a swallowed stderr and a wait looked like a hang.
-  ([67](../posts/post-67-the-build-watched-what-it-wrote.md))
+  ([67](../posts/post-67-where-the-xtask-build-time-went.md))
 
 Post 76 states the general form: **a debugging tool must remain interruptible
 while it is misbehaving, and that is exactly when its own handling cannot be
@@ -254,12 +254,12 @@ the decision can be spelled at all.
 - Which wire telemetry leaves on was chosen correctly by the live emit path and
   baked wrong into `send_hello` and `flush_pre_init`, so the two most important
   frames ignored `net=`. One `transmit_bytes` now names a device; nothing else
-  can. ([70](../posts/post-70-the-wire-was-never-load-bearing.md))
+  can. ([70](../posts/post-70-telemetry-over-udp.md))
 - Every hand-written SBI `ecall` carried its own register constraints, and
   several were wrong the same way. One reviewed `ecall()` wrapper with the
   clobber list written once — a wrong `in()` can no longer be typed, because
   nobody types the `in()`.
-  ([68](../posts/post-68-two-promises-the-hardware-never-made.md))
+  ([68](../posts/post-68-telemetry-off-the-vf2-serial-line.md))
 - `satp_for` was open-coded a second time inside `mmu::enable`, either fixable
   without the other, with the mode-shift and PPN-mask constants ten lines apart
   and nothing asserting they agreed.

@@ -1,6 +1,6 @@
 # Post 78 — the repair was real, the proof was not
 
-- [post 75](post-75-it-was-the-volume.md) is the finding that more corpus beats better corpus. [post 77](post-77-the-number-that-could-not-see-it.md) is the instruments that finding needed. this post is the work *between* them — building the generator that produced batch10 — and it is the one where I was wrong most often.
+- [post 75](post-75-corpus-volume-beats-corpus-quality.md) is the finding that more corpus beats better corpus. [post 77](post-77-training-loss-is-blind-to-memorisation.md) is the instruments that finding needed. this post is the work *between* them — building the generator that produced batch10 — and it is the one where I was wrong most often.
 - the headline is good: **parse deaths fell 45% → 15%, and wall clock per candidate fell 87s → 59s.** batch11, a second run against the same recipe sheet, reproduces both.
 - the part worth writing down is that **every quick instrument I used to check my own work in the moment reported something false.** a regex that counted English words. a pilot too small to see the rate it was measuring. a "signature" that turned out to name two different causes. the repair was real. none of my proofs of it were.
 
@@ -41,7 +41,7 @@
 
 - **the first measured English.** I counted keyword-plus-camelCase fusions with `\b(ext|let|use)[a-z]+[A-Z]`, got 499 in batch9 against 0 in the pilots, and called it proof. the top matches in batch9 are `userId` (14), `extendPeriod` (10), `usedIds` (10), `letterIndex` (10). in batch10, `userId` (27), `extractPrefix` (9), `extendTrain` (7). the regex was measuring **how often the corpus uses words beginning with "use", "ext" and "let"**, and the pilots' zero was thirty small files happening not to contain `userId`.
 
-- **the second was too small to see its own rate.** the pilots reported 0 glue parse errors across 30 candidates. the 1000-candidate run reports 47. a 4.7% rate is invisible at n=30 roughly a quarter of the time, and I read the zero as an absence rather than as a sample. this is [post 77](post-77-the-number-that-could-not-see-it.md)'s "a coarse metric reports a tie, not an uncertainty" arriving one project over.
+- **the second was too small to see its own rate.** the pilots reported 0 glue parse errors across 30 candidates. the 1000-candidate run reports 47. a 4.7% rate is invisible at n=30 roughly a quarter of the time, and I read the zero as an absence rather than as a sample. this is [post 77](post-77-training-loss-is-blind-to-memorisation.md)'s "a coarse metric reports a tie, not an uncertainty" arriving one project over.
 
 - **the third named one cause and had two.** the "glue signature" was four parse errors — `unexpected token: If`, `unexpected token: Let`, `expected '(' after function name`, `expected a declaration, found Ext` — and batch9's Finding 2 attributed all 126 of them to fused tokens. but Stitch has no `if`. batch10's candidate 12 died of `unexpected token: If` and contains, in plain sight:
 

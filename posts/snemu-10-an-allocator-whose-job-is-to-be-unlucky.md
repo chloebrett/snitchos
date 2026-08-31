@@ -56,7 +56,7 @@ zeroed at the moment it was being computed, and everything downstream followed.
 
 It's a pure-interpreter bug — `snemu boot` runs the plain interpreter, no JIT, and hits
 it — so all of Backend B and the native-op machinery from [snemu
-09](snemu-09-the-fast-part-wasnt-the-native-part.md) were innocent. The oracle itself
+09](snemu-09-a-native-jit-byte-identical-and-no-faster.md) were innocent. The oracle itself
 was wrong.
 
 ## why it hid for 114 green tests

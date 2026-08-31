@@ -30,7 +30,7 @@ throughput, so 115200 suffices.
 driving the board (`cargo xtask board exec`, reboot) starts where Step 10 finishes.
 **Design**: [docs/uart-telemetry-design.md](../docs/uart-telemetry-design.md)
 **Milestone**: M2 in [plans/visionfive2-port.md](visionfive2-port.md)
-**Write-up**: [post 68 — two promises the hardware never made](../posts/post-68-two-promises-the-hardware-never-made.md)
+**Write-up**: [post 68 — telemetry off the VF2's serial line](../posts/post-68-telemetry-off-the-vf2-serial-line.md)
 
 Verified in-tree 2026-08-25: `UartFrameSink` is host-tested
 (`kernel-obs/src/uart_sink.rs`, 8/8 mutants killed) and the collector now has its

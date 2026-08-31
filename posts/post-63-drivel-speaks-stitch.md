@@ -3,7 +3,7 @@
 - rung 0 of the model ladder is **babble**: a sampler with no weights at all. it asks the parser what tokens are legal here and picks one. its output is valid Stitch by construction and means nothing — that's the point, it's the zero line every trained model gets measured against.
 - rung 1 is **drivel**, ~1M parameters. the question for the day was the dumbest possible version of the whole arc: *can one million parameters beat zero?*
 - the answer is yes, and almost nothing I predicted about **how** turned out to be right.
-- [the previous post](stitch-16-the-gap-was-doing-work.md) built the pretty-printer that makes the corpus this model eats — babble renders a flat space-separated token stream, and training on that teaches a model babble's *renderer* rather than the language. it ends with "what that's worth to an actual model is the next post." this is that post.
+- [the previous post](stitch-16-the-ast-printer-and-ten-round-trip-bugs.md) built the pretty-printer that makes the corpus this model eats — babble renders a flat space-separated token stream, and training on that teaches a model babble's *renderer* rather than the language. it ends with "what that's worth to an actual model is the next post." this is that post.
 
 ```
 contract buffer { }

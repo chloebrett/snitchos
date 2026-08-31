@@ -1,6 +1,6 @@
 # snemu-itest performance: remaining options
 
-Status: options analysis, 2026-07-15. Follows [posts/snemu-09-the-fast-part-wasnt-the-native-part.md](../posts/snemu-09-the-fast-part-wasnt-the-native-part.md),
+Status: options analysis, 2026-07-15. Follows [posts/snemu-09-a-native-jit-byte-identical-and-no-faster.md](../posts/snemu-09-a-native-jit-byte-identical-and-no-faster.md),
 which established the current state: the block-JIT frontend (Backend A, `--speedup hi`)
 is the ~3× lever at ~3.1s for the full suite; Backend B native codegen measured
 *slower* (~3.6s); the harness side is maxed (snapshot tree, 99% worker utilisation,

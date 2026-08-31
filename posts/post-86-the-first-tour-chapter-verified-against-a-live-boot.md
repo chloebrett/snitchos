@@ -41,7 +41,7 @@ each one would have been caught by the mechanism I was in the middle of building
 - **a doc comment citing a guard test that did not exist yet.** I wrote that `NAMED_RIGHTS` was kept honest by an `every_right_in_the_abi_can_be_named` test, then wrote the test. it failed on its **first run**: `KILL` was missing from my hand-written table of six. re-reading the ABI found `AUDIO` missing too. writing the guarantee before the guard nearly shipped two rights a chapter could not name.
 - **"host-tested and linked into `snemu-wasm`."** in the crate docs *and* in the plan's status header. it is not linked into `snemu-wasm`; that is a later step. two files asserting a wiring that does not exist.
 
-the arc is getting hard to miss. [post 80](post-80-the-control-passed-twice.md) was a guard that passed while checking nothing. [post 82](post-82-a-symptom-arrives-with-a-diagnosis-attached.md) was a diagnosis that arrived attached to a correct observation and was never tested. this is the next one along: **an assertion that outruns its evidence**, written by someone building a machine against exactly that.
+the arc is getting hard to miss. [post 80](post-80-checkpoint-vocab-pairing.md) was a guard that passed while checking nothing. [post 82](post-82-snitchos-in-a-browser-tab.md) was a diagnosis that arrived attached to a correct observation and was never tested. this is the next one along: **an assertion that outruns its evidence**, written by someone building a machine against exactly that.
 
 - the punchline arrived unprompted. a `DISPLAY` right landed on the ABI mid-session from parallel work, and the guard caught it the same day — the third right it has caught, and the second time it has been the reason a table was wrong.
 

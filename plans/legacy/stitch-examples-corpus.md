@@ -3,7 +3,7 @@
 **Status: ✅ COMPLETE — all 30 programs shipped.** `examples/stitch/` carries 30
 programs, ~6,300 lines and **279 native tests**, every one parsing, type-checking and
 passing its own suite under `stitch/tests/examples.rs`. Write-up:
-[stitch 18](../../posts/stitch-18-a-binding-is-not-a-boundary.md); findings:
+[stitch 18](../../posts/stitch-18-thirty-example-programs.md); findings:
 [stitch-examples-findings.md](../stitch-examples-findings.md).
 
 The exercise paid for itself the way it was designed to — the friction *was* the data.
