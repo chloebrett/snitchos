@@ -1,4 +1,4 @@
-# Post 83 — the first tour chapter, verified against a live boot
+# Post 86 — the first tour chapter, verified against a live boot
 
 - the plan for this arc is a documentation system whose whole purpose is that a page cannot go on saying something the machine has stopped doing. a chapter declares a world-state and some claims; the gate boots the kernel, replays to that state, and fails the build if a claim is no longer true.
 - I built most of it. and while building it I wrote, at least four times, a claim that said more than anything could check.
