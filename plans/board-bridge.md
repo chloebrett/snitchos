@@ -1,6 +1,6 @@
 # Plan: the board bridge — driving the VisionFive 2 from the host
 
-**Status (2026-08-30)**: 🚧 **STARTED — steps 1–4b done and board-verified; step 6
+**Status (2026-08-31)**: 🚧 **STARTED — steps 1–4b done and board-verified; step 6
 is blocked by firmware, not by us.** First light happened 2026-08-28
 ([../notes/board-session-2026-08-28.md](../notes/board-session-2026-08-28.md)):
 `board exec` drove a real UART, the input echo earned its keep immediately, and
@@ -750,6 +750,42 @@ netboots unattended, gate green, approved.
 
 ---
 
+### Step 4d: `cargo xtask board loopback` — split the stack in one physical move
+
+**Acceptance criteria**: with the adapter's RX and TX jumpers pulled off the board
+and touched together, `cargo xtask board loopback --device …` writes a known string,
+reads it back, and reports pass/fail. On pass it says explicitly that the adapter,
+cable, driver, baud and host path are all good and **the fault is at the board end**.
+
+**Why this earns a step.** 2026-08-28 lost its first hour to a silent board while I
+theorised about console modes and firmware. The cause was **failed dupont wires** —
+and reseating them twice did not fix it, so "check the connections" is not the same
+advice. A loopback is one physical action with an unambiguous verdict that partitions
+the *entire* stack: everything host-side on one side, everything board-side on the
+other. The 2026-08-27 session's "board went quiet — unexplained" was almost certainly
+the same fault, written up as a mystery for want of this test.
+
+It also pairs with the cheaper question that costs nothing: **does the silence cover
+output our code cannot possibly control?** U-Boot's banner is the ideal probe — if
+that is missing too, no amount of kernel debugging will help, and the loopback is the
+next move rather than the tenth.
+
+**RED**: the logic is thin but not nothing — "wrote N bytes, read back M, compare" has
+a real timeout case and a real partial-read case, and both must be distinguishable
+from a mismatch. Table-test against the existing `wire::capture` seam.
+**GREEN**: the subcommand over step 4's transport; a `StopCondition` on the echoed
+string with a short deadline.
+**MUTATE**: `cargo xtask mutants xtask-board`.
+**KILL MUTANTS**: a mutant that reports pass on a *partial* echo must fail — a
+half-echo is a real symptom (wrong baud, marginal wire) and reporting it as success
+would send the operator to the board end for a host-side fault, which inverts the
+command's entire purpose.
+**REFACTOR**: if this duplicates `exec`, make it `exec` with a preset condition.
+**Done when**: gate green, and it has been run once against a deliberately
+disconnected adapter (which needs no board — that is the point).
+
+---
+
 ### Step 5: SBI SRST — the kernel side of reboot
 
 **Acceptance criteria**: a magic console line (exact token decided at CONFIRM)
@@ -998,20 +1034,30 @@ the default-off behaviour is verified.
 
 Carried from the design note, plus what this plan surfaced:
 
-1. **Does SBI cold reset re-netboot on the VF2?** SRST *should* re-enter ZSBL → SPL →
-   U-Boot → autoboot → TFTP, but if it warm-restarts the payload instead, then
-   "reboot = pick up the freshest image" — the premise the whole loop is built on —
-   is false and the reset type needs revisiting. **Resolve this before step 5**; it is
-   one experiment and it invalidates a lot if it goes the wrong way.
+1. ~~**Does SBI cold reset re-netboot on the VF2?**~~ **ANSWERED 2026-08-28, and the
+   answer is worse than either branch this question imagined.** SRST does not
+   re-netboot *and* does not warm-restart: OpenSBI's JH7110 reset driver cannot reach
+   the AXP15060 PMIC (`pmic_ops: cannot read pmic power register`) and **hangs**. The
+   platform neither resets nor returns. So "reboot = pick up the freshest image" is
+   not merely false, it is unavailable — see step 6. The question assumed the failure
+   mode would be a *wrong reset*; it was *no reset and no return*, which is the case
+   `sbi::system_reset`'s "a return means failure" contract cannot express.
 2. **Does snemu need the SRST model?** See step 5. Leaning yes: without it the reboot
    path has no deterministic oracle, and this repo's discipline is that the board
    confirms what the emulator already proved.
 3. **Marker syntax** — literal substring or regex? Start with a literal (the two real
    markers are U-Boot's `=>` prompt and a named span); add regex only when a case
    needs it.
-4. **Does the JH7110 have a usable on-chip watchdog?** If yes it can be the L2
-   backstop and the relay becomes near-vestigial. Confirm the peripheral, its MMIO
-   base, and that SPL/U-Boot do not disable it out from under the kernel.
+4. **Does the JH7110 have a usable on-chip watchdog?** **Promoted 2026-08-28 from
+   "nice if it exists" to the leading candidate for the reset path itself**, because
+   question 1's answer removed SRST. Partly confirmed for free: U-Boot's banner says
+   `WDT: Not starting watchdog@13070000`, so the peripheral **exists, has a known
+   MMIO base, and is left idle rather than disabled**. What is unconfirmed is whether
+   a short timeout produces a full SoC reset that re-enters ZSBL (the thing SRST was
+   supposed to do), and whether anything re-disables it. Its appeal now is exactly
+   that it needs **no firmware cooperation** — it cannot be defeated by whatever is
+   wrong with the PMIC path. If it works it is also still the L2 backstop, and the
+   relay becomes near-vestigial.
 5. **Which ESP32 firmware?** See step 8 — pick deliberately and record the choice.
 6. **Does the bridge hold up at higher baud?** `init` already uses ~half of 115200,
    so the line has less headroom than it looks. If Phase 2 goes well, the deferred
@@ -1022,6 +1068,16 @@ Carried from the design note, plus what this plan surfaced:
 7. **What is the WiFi latency distribution, really?** It sets the transport-default
    quiescence window in step 7. Measure it rather than guessing a round number — the
    tail matters more than the median here, because the tail is what false-fires.
+8. **When does `--until-quiet`'s clock start?** Observed 2026-08-28, undocumented and
+   untested: a capture against a **totally silent** line ends on the hard deadline
+   (`Timeout`), not on quiescence — so the quiet clock appears not to run until the
+   first byte arrives. There is a defensible argument for that (you cannot call a
+   board "gone quiet" if it never spoke), and an equally defensible one against
+   (a board that says nothing for 500 ms is quiet by the stated definition). Either
+   way **the behaviour is currently decided by accident rather than by a test**, and
+   the two readings give opposite exit codes for a dead board — which is precisely
+   the distinction [`outcome`](../xtask-board/src/outcome.rs) exists to keep sharp.
+   Pick one, write the test, say why in the doc comment.
 
 ## Pre-PR Quality Gate
 

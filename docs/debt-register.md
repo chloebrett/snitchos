@@ -759,3 +759,71 @@ negative result recorded in
 [../notes/board-session-2026-08-27.md](../notes/board-session-2026-08-27.md)), but it
 needed the same override to get far enough to fail informatively.
 
+### #29 — `handle_external`'s claim loop is unbounded, so one unhandled source wedges the machine
+
+**Found 2026-08-28** on the board, as the mechanism behind the VF2 boot hang
+([../notes/board-session-2026-08-28.md](../notes/board-session-2026-08-28.md)).
+
+`handle_external` loops `while let Some(source) = plic::claim()`, drains the UART if
+the source *is* the UART, and completes it either way. A source that is **enabled in
+our context but has no handler** is therefore claimed, ignored, and completed — and
+**completing an interrupt does not quiet its device**, so the next `claim()` returns
+the same source. The loop never terminates. It runs in the trap handler with
+interrupts masked, so the machine is simply gone: no fault, no panic, no output,
+indistinguishable from a dead board.
+
+That is exactly what happened. U-Boot leaves the GMAC enabled in the S-context the
+kernel adopts, and the first `sstatus.SEIE` walked straight into it.
+
+**This is separate from that bug's fix and should land regardless.**
+`plic::reset_context` stops the kernel *inheriting* an unhandled source, which
+removes the known trigger — it does not stop a future one. Any newly-routed device
+whose handler is missing or mis-dispatched reproduces this, and reproduces it as a
+total silent wedge rather than as a diagnosable failure.
+
+**What it should do instead**: on a source it cannot handle, **disable that source in
+this context and say so** — a counter plus a frame naming the source id. Two reasons
+it must name the id: the operator learns *which* device, and the kernel stays alive
+to tell them. *Refusals snitch, never silent* is the rule everywhere else in this
+kernel; this is the one path where a surprise costs the whole machine.
+
+A bound alone (claim at most N per trap) is a weaker fix worth having as well — it
+caps the damage even when the disable is wrong — but the diagnostic is what matters,
+because this failure currently produces **zero** evidence.
+
+Host-testable: the policy is `(claimed source, is-handled) -> Handle | DisableAndReport`,
+which belongs in `kernel-devices::plic` beside `reset_context`, leaving the kernel
+with the MMIO.
+
+### #30 — An unexplained 540 KB swing in `snitchos.img`, and the board booted the odd one
+
+**Observed 2026-08-28**, not explained. Four `cargo xtask image` builds in one
+session, same `--opt max`, same machine:
+
+| build | bytes |
+|---|---|
+| 12:23 | 1,839,528 |
+| **13:15** | **2,378,712** |
+| bisect boot | 1,839,400 |
+| 14:40 | 1,839,800 |
+
+The middle build is **540 KB larger** than its neighbours on both sides, and it is
+the one the board actually TFTP'd and ran (`Bytes transferred = 2378712`, an exact
+match). The edit between 12:23 and 13:15 was a one-line `RESET_TYPE` change in
+`kernel/src/sbi.rs`, which cannot account for it. Parallel sessions were committing
+to the tree throughout, which is the obvious suspect — but that is a hypothesis
+nobody has tested, and the size came back *down* afterwards, which a landed commit
+does not explain.
+
+**Why this is a register entry rather than a shrug**: image size on this board is not
+cosmetic. Embedding 4.5 MB of model weights once broke unrelated scenarios with
+`OutOfFrames` — the itest kernel image is a shared budget — and "a VF2 regression is a
+missed `cargo xtask image` until proven otherwise" only works if the artifact is a
+function of the tree. A build whose size moves by half a megabyte for reasons nobody
+can name undermines both.
+
+**Cheapest next step**: have `cargo xtask image` print the ELF's section sizes beside
+the byte count it already reports, so the *next* anomaly names its own cause instead
+of needing a bisect. `rust-objcopy` is already required; `rust-size` is the same
+toolchain.
+
