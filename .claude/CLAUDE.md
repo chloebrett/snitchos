@@ -240,6 +240,25 @@ xtask-cram/   The **cram-linked** half of xtask: `cram` (train a rung end to
               `xtask-itest` — an edit to the trainer should not recompile the
               tool that runs `cargo xtask test`. Built `--release`, since
               training is a numerics loop where the run dwarfs the compile.
+xtask-board/  The **serial-linked** half of xtask: `board exec` / `board reboot`,
+              the host bridge that drives the VisionFive 2 over its UART. Same
+              split rationale again — lean `xtask` must not link `serialport`.
+              Depends on `collector` with `default-features = false`, which is
+              load-bearing: the `native` feature pulls `ureq` → `ring` and
+              `tiny_http`, and a serial bridge has no business compiling a web
+              server. Modules: `reach` (the "could not reach the board" vs
+              "reached it and it said nothing" failure taxonomy — variants
+              partition by *what the operator must do differently*), `stop`
+              (composed stop conditions), `split` (U-Boot text vs COBS frames),
+              `wire` (the read loop; **idle advances the capture, dead ends
+              it** — the opposite discipline to `collector::serial::SerialReader`
+              one layer down, deliberately), `script` (send/expect sequences; a
+              step that misses what it awaited abandons the rest *unsent*),
+              `thrash` (the reboot guard), `echo`, `outcome` (exit codes as an
+              interface: `0` ended as asked, `1` reached but the awaited event
+              never came, `2` never reached — an unattended loop needs 1 and 2
+              apart, or it reboots a board whose port is merely held).
+              See plans/board-bridge.md.
 kvetch-vocab/ no_std + alloc, NO deps. The frozen BPE tokenizer every rung of
               the model ladder shares. Byte-level, GPT-2-style pre-tokenization
               (one leading space joins its word; longer whitespace runs stand
@@ -388,9 +407,10 @@ and they improve the code. Only `deref_addrof` needs the `#[allow]` guard.
 | Unit (kernel-proc) | `cargo test -p kernel-proc` | Runqueue/preempt/kill, caps, IPC, reaping, ELF + W^X planning |
 | Unit (protocol)    | `cargo test -p protocol --features std` | Frame roundtrips + stream decoder |
 | Unit (collector)   | `cargo test -p collector` | Span state machine, prom/otlp encoding |
-| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the collector-core wasm32 portability build + the generated-diagram drift check + the doc-link check + the plan-status check + rustdoc (`-D warnings`, host and riscv) |
+| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the collector-core wasm32 portability build + the generated-diagram drift check + the doc-link check + the plan-status check + the counter-registry check + rustdoc (`-D warnings`, host and riscv) |
 | Doc links          | `cargo xtask links` | Every relative `.md` link in the repo resolves (also runs inside `xtask test`) |
 | Plan status        | `cargo xtask plan-status` | Every plan has a dated `**Status (YYYY-MM-DD)**:` header and is linked from `plans/README.md` (also runs inside `xtask test`) |
+| Counter registry   | `cargo xtask counters` | Every `DeferredCounter` is listed in `counter::COUNTERS`, so it actually reaches the wire (also runs inside `xtask test`) |
 | Integration        | `cargo xtask itest` | Boots the kernel **under snemu**, asserts on the decoded wire frame sequence. Deterministic → one run is the gate. `--engine qemu` runs the same scenarios under QEMU (the fidelity escape hatch). |
 
 **Run host tests with `cargo nextest run`, never plain `cargo test`.** The gate
@@ -425,6 +445,25 @@ more than nextest: a passing `Summary` line with `FAILED` after it means a *late
 phase failed — portability, doc links, or rustdoc — and a `| tail`-style filter will
 hide which.
 
+**Adding a workspace member breaks three derived artifacts, and the gate is where you
+find out.** A new crate joins the host gate, the lint gate and the mutation gate *by
+existing* — that is the anti-drift property, and it is why an allow-list was replaced
+with derivation. The cost is that one `Cargo.toml` edit reddens the gate in three
+places at once, none of which mentions the crate you added:
+
+1. `mutant_plan_tests::the_derived_plan_matches_the_previously_hardcoded_set` — add the
+   name to the characterisation list in `xtask/src/main.rs`. Its own doc says the
+   failing test *is* the point when a step changes the surface.
+2. `diagram_drift_tests::committed_diagrams_are_up_to_date` — `cargo xtask diagram deps`
+   (a new crate is a new node **and** new edges).
+3. rustdoc, if the crate's docs link a private item — see the `private_intra_doc_links`
+   note above.
+
+Hit twice in one session (`xtask-board`, then `kitsch-render` from a parallel session).
+Neither failure names the cause, so knowing the list is worth more than diagnosing it
+again. `itest-matrix` drifts on a *scenario* change rather than a crate one, but it
+lives in the same check and regenerates the same way.
+
 **The gate composes explicitly: `cargo xtask test && cargo xtask itest && cargo xtask
 itest --scramble`.** `itest` runs integration *only* — it does not run the host
 checks first (that coupling, and the `--skip-unit-tests` flag that existed to undo
@@ -457,6 +496,19 @@ opt out via `NOT_PLANS` in `xtask-cmds/src/plan_status.rs`, each with a written
 reason — a deny-list, because this repo has already been bitten by
 allow-lists-by-omission. The date bounds the *header block* on purpose: `stim-v1.md`
 and `visionfive2-port.md` both carry per-step `**Status**:` notes deep in the body.
+
+**Counter registry (`cargo xtask counters`, also inside `xtask test`).** A
+`DeferredCounter` is only **half** a metric: declaring one and incrementing it does
+nothing observable, and it reaches the wire only if it *also* appears in
+`kernel::counter::COUNTERS`, which the heartbeat walks. Nothing compiles that second
+step, so missing it produces a counter that climbs forever in silence — and **a metric
+that never arrives looks exactly like a system with nothing to report.** Two were live
+when this landed (2026-08-25): `snitchos.audio.xruns_total`, whose own doc comment
+calls it "the marquee real-time observable", and `snitchos.smp4.worker_ticks_total`.
+The XRun one had a second layer of camouflage — its sibling `AudioXRun` *frame* worked,
+so the fault looked observable from outside. Source-level by necessity: the kernel is
+`no_std`/`no_main` and cannot host a `#[test]`, so the registry cannot check itself
+from the inside. Add a counter → add its row, or the gate says so.
 
 **Rustdoc's own links are a *separate* gate, and one lint catches almost everyone:
 `private_intra_doc_links`.** `[`FOO`]` from a public item — or from module docs — is a
