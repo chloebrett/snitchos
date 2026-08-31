@@ -48,7 +48,9 @@ you set.
 | item | status |
 |---|---|
 | §1 netboot provisioning | ✅ zero-touch, verified end to end |
-| §3a first light / §3e quiescence | ✅ `board exec` drove a real UART |
+| §3a first light | ✅ `board exec` drove a real UART |
+| §3e quiescence window | 🟡 **not swept** — see below |
+| §3d unplug mid-capture | ⏳ still unanswered |
 | §4a the probe | ⏳ blocked only by item 1 above |
 | §4b descriptor ground truth | ✅ version `0x52`, TDES layout confirmed against silicon |
 | §4c which RJ45 | ✅ **GMAC1** (`ethact=ethernet@16040000`) |
@@ -281,6 +283,23 @@ bytes as transport death, not idleness.
 heartbeats are a property of the board. Try 200 ms, 500 ms, 1 s and note which
 first stops fragmenting a boot log into pieces. Record the answer — Phase 2 needs
 it, because WiFi jitter will widen whatever serial wants.
+
+**Partially answered 2026-08-27 — the sweep was never run.** Values were chosen ad
+hoc across the session rather than compared, so there is no "first value that stops
+fragmenting". What the session does establish:
+
+- **A boot capture needs seconds, not milliseconds.** `--until-quiet 6000` captured
+  complete boots reliably; the sub-second values the item proposes are far too short,
+  because a *single* gap inside a normal boot — PHY auto-negotiation — runs about
+  five seconds on its own, with DHCP and the TFTP transfer after it.
+- **Short windows are still right for prompt work.** `--until-quiet 500`–`2000` was
+  fine for U-Boot command/response, where the board answers immediately or not at all.
+
+So the constant is not one number: it is at least two, because "wait for a board to
+finish booting" and "wait for a prompt to answer" are different questions. The sweep
+the item asks for is still worth running to find the boundary, and should be run
+against a boot capture rather than a prompt, since that is the case with the long
+gaps.
 
 ---
 

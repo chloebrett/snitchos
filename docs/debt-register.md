@@ -672,3 +672,90 @@ Neither is hard; both were found by wanting a number the tool was supposed to
 already provide. Taken with #25, the measurement spine has three instruments and all
 three are kernel-only in practice.
 
+### #27 — CLAUDE.md's syscall inventory is stale, and stale in the load-bearing half
+
+**Noticed 2026-08-31**, adding `Syscall::Present`.
+
+`.claude/CLAUDE.md` says:
+
+> **Syscalls** (`abi::Syscall` 0–25, dispatch `kernel/src/syscall/mod.rs`):
+> cap-mediated — … Ambient — …
+
+There are **35** syscalls (0–34). Nine are missing from the sentence altogether:
+`SpawnImage`, `CapList`, `Revoke`, `ClockFreq`, `Kill`, `SpawnOn`, `AudioWrite`,
+`AudioEnqueue`, `Present`.
+
+The stale *number* is cosmetic. The problem is **which** nine: `Kill` (gated on
+`KILL`), `AudioWrite`/`AudioEnqueue` (`AUDIO`), `Present` (`DISPLAY`), `Revoke` and
+`CapList` are cap-mediated, and the sentence's whole job is teaching the
+cap-mediated/ambient split. So the omission falsifies the taxonomy, not just the
+count — a reader learns that device authority is not part of the syscall story,
+which is the opposite of true, and CLAUDE.md is **always-loaded context**, so it is
+the first thing anyone (human or agent) reads about the ABI.
+
+Why it drifts: nothing derives the list. Adding a syscall means touching `abi`,
+`kernel/src/syscall/mod.rs`, and — by convention only — this prose. The first two
+have compiler enforcement and a `syscall_numbers_round_trip` test; the prose has
+nothing, which is the same shape as the doc-link rot `cargo xtask links` was built
+for and the `plans/README.md` staleness `plan-status` now gates.
+
+Fix options, cheapest first: (a) drop the count and the enumeration, and point at
+`abi::Syscall` as the source of truth — the list is *already* documented per-variant
+there; (b) generate the line; (c) a test that reads CLAUDE.md and checks the range
+against `Syscall::ALL`-style metadata. (a) is probably right: a hand-maintained
+mirror of an enum earns its keep only while it is correct, and this one demonstrably
+is not.
+
+Same family: **the itest scenario inventory in CLAUDE.md** is hand-maintained prose
+listing scenarios by name, and does not include the two `kitsch` ones. It will drift
+for the same reason.
+
+### #28 — The sandbox denies `/dev/cu.*`, and the denial impersonates a board fault
+
+**Noticed 2026-08-27** on the board session; hit again 2026-08-31 from a different
+direction.
+
+Every `cargo xtask board` command against the real adapter needs the sandbox
+override. Without it the open fails, and it fails *as*:
+
+```
+board: OpenFailed { device: "/dev/cu.usbserial-0001", kind: Other }
+```
+
+The cost is not the override — that is one flag. The cost is **which** error it
+produces. `xtask-board`'s whole design premise is that *"could not reach the board"*
+must never look like *"reached it, and it said nothing"*, and `reach::Unreachable`
+partitions its variants by **what the operator must do differently**: kill a process
+(`PortHeld`), fix permissions (`NoPermission`), plug it in (`NoSuchDevice`). A
+host-side sandbox denial is a fourth thing — nothing is holding the port, the
+permissions are fine, the device is present — and it lands in the catch-all
+alongside genuine device failures. At the taxonomy level it is indistinguishable
+from a board fault, which is the one confusion the module exists to prevent.
+
+`OpenFailed { kind: Other }` now has **two recorded causes**, found four days apart
+and unalike:
+
+| Cause | What is actually wrong | What fixes it |
+|---|---|---|
+| Sandbox denies the device node | host policy | an allowlist entry / `/sandbox` |
+| Device exists but cannot be driven (a pty — `serialport` wants termios/ioctls it lacks) | wrong kind of device | use a real UART |
+
+Two fixes, and they are independent:
+
+1. **An allowlist entry for `/dev/cu.*`**, so the override stops being per-command.
+   Open question, and the reason this is a register entry rather than a commit:
+   **project or user settings?** The device path is a property of *this machine's*
+   adapter rather than of the repo, which argues for user settings — but the tool
+   that needs it lives here. Wants a human call before anything touches a
+   permissions file.
+2. **Give host-side denial its own `Unreachable` variant.** `Other` is where unlike
+   things go to look alike; a fourth variant restores the "different action"
+   partition. Cheap, and it is the half that survives whatever is decided about (1).
+
+Note the sandbox also blocks **pty allocation** (`OSError: out of pty devices`), which
+is how the second cause was found — an attempt to exercise the untested
+open→write→capture path without hardware. That attempt failed for its own reason (a
+negative result recorded in
+[../notes/board-session-2026-08-27.md](../notes/board-session-2026-08-27.md)), but it
+needed the same override to get far enough to fail informatively.
+

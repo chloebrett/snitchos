@@ -219,7 +219,7 @@ channel 0 only.
 |---|---|---|
 | `DMA_BUS_MODE` | `0x1000` | `SFT_RESET` = bit 0 — self-clearing; poll it |
 | `DMA_SYS_BUS_MODE` | `0x1004` | burst config; DT asks `fixed-burst`, `no-pbl-x8` |
-| `DMA_CHAN_CONTROL` | `0x1100` | `PBLX8` = bit 16 (leave clear) |
+| `DMA_CHAN_CONTROL` | `0x1100` | `PBLX8` = bit 16 (leave clear); **`DSL` in `[20:18]` — write it explicitly, see below** |
 | `DMA_CHAN_TX_CONTROL` | `0x1104` | `ST` = bit 0, TXPBL in `[21:16]` (DT: 16), `OSP` = bit 4 |
 | `DMA_CHAN_TX_BASE_ADDR_HI` | `0x1110` | ring PA, high |
 | `DMA_CHAN_TX_BASE_ADDR` | `0x1114` | ring PA, low |
@@ -228,6 +228,43 @@ channel 0 only.
 | `DMA_CHAN_INTR_ENA` | `0x1134` | 0 |
 | `DMA_CHAN_CUR_TX_DESC` | `0x1144` | diagnostic gold: where the engine actually is |
 | `DMA_CHAN_STATUS` | `0x1160` | |
+
+### `DSL` — the ring is not necessarily packed, and U-Boot's is not
+
+**Write `DSL` explicitly. Do not inherit it.** `DSL` (descriptor skip length,
+`DMA_CHAN_CONTROL[20:18]`) is the gap the engine steps *between* descriptors. A
+driver that assumes a packed 16-byte ring while the hardware still holds a
+predecessor's non-zero `DSL` will have the engine read every N-th descriptor and
+write completions somewhere the driver never looks — a ring that desynchronises
+silently, with no error bit to catch it.
+
+Measured on the board, 2026-08-27, reading U-Boot's own live ring after a `dhcp`
+(`md.l 0x16041114 1` for the base, then the descriptors):
+
+```
+ff73e5c0: ff73e840 00000000 0000004c 30000000   <- descriptor
+ff73e5d0..ff73e5f0: all zero
+ff73e600: ff73e840 00000000 0000004c 30000000   <- descriptor
+```
+
+Two live descriptors **64 bytes apart** with zeros between. A packed ring would
+have had U-Boot fill slots 0 and 4 while skipping 1–3, which is not how a ring
+fills, so the reading is that U-Boot runs a non-zero `DSL` — plausibly padding each
+descriptor to a cache line. That inference is strong but it is an inference: what is
+*measured* is the 64-byte spacing.
+
+Either way the action is the same and does not depend on resolving it: **our
+`dma_init` must write `DSL` to the value our ring actually uses (0, packed) rather
+than leaving the field at whatever the previous owner left.** This is the same class
+as the PLIC enable bitmap in
+[../plans/visionfive2-port.md](../plans/visionfive2-port.md)'s *Ground truth* — U-Boot
+hands the kernel live, configured hardware, and every field the kernel does not
+write is a field it has inherited.
+
+The same reading also **validated the TDES encoding transcribed by hand from
+mainline** — `OWN`(31) `FD`(29) `LD`(28), buffer size in word 2 `[13:0]`, buffer
+address in words 0/1 — against silicon-accepted data, before any of it was relied
+on. `word3 = 0x30000000` is `FD|LD` with `OWN` clear, i.e. a completed descriptor.
 
 **TX descriptor** — four `u32` words, read format:
 
